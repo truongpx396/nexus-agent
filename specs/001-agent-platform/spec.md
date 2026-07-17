@@ -12,6 +12,16 @@
 
 Build **one** model-agnostic AI agent platform — a single reliable agent kernel wrapped in an engineered harness, exposed through thin surface adapters, fronted by a control plane, and grounded in a trust surface — that serves customers from a 5-person startup to a 50,000-person enterprise via configuration and connectors, never per-customer code forks. The platform aims to be more reliable, more cost-efficient, more secure, and more scalable than the current generation of agent products by unifying their best ideas on one immutable, event-sourced kernel and adding the control plane, trust surface, and cost governance that separate a demo from a system a security-conscious enterprise will sign.
 
+## Clarifications
+
+### Session 2026-07-17
+
+- Q: What availability/uptime SLA should the platform target? → A: 99.9% control plane / API, 99.5% agent-run completion (enterprise-standard baseline)
+- Q: What queue-wait / latency SLA should submitted runs meet? → A: p95 queue-wait < 5s interactive / < 60s batch; first token < 2s interactive (tiered)
+- Q: What happens when a required human approval is never answered? → A: Fail-closed — the approval expires as a denial after a configurable TTL and the run terminates with a typed `approval_expired` reason (audited)
+- Q: What eval-gate pass threshold must a change clear in CI to ship? → A: ≥90% pass AND zero regressions versus the current baseline (no previously-passing case may regress)
+- Q: What default retention window applies to per-tenant memory? → A: 90-day default, tenant-overridable (regulated tiers may tighten or extend by config)
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Complete a real task through a reliable agent (Priority: P1)
@@ -140,6 +150,7 @@ The platform keeps long-running agents alive through transient failures, provide
 - **Oversized tool output**: When a tool returns a very large result, it is spilled to durable storage with a preview returned in-context plus a "do not infer success from the preview" caveat.
 - **Prompt injection via tool/retrieved content**: All tool output and retrieved content is treated as untrusted and is never fed straight into execution; the Rule of Two constrains what can happen unattended.
 - **Waiting on humans or long jobs**: Waits (human approval, long-running job) suspend durably at zero ongoing cost and resume on an event, without polling turns.
+- **Approval never answered**: A required human approval that is not granted within a configurable timeout expires as a denial (fail-closed); the run terminates with a typed `approval_expired` reason and an audit record, and the gated high-impact action never proceeds.
 - **One tenant bursting**: Per-tenant budgets, rate limits, sandbox caps, and fair scheduling prevent one tenant from starving or bankrupting others.
 - **Regulated payloads**: Requests carrying regulated/sensitive data are routed deterministically (by data label, not model discretion) to a self-hosted in-environment model so the payload never leaves the trust boundary.
 - **Repeated identical failing call**: Broken by a circuit breaker after three identical failures rather than looping.
@@ -151,7 +162,7 @@ The platform keeps long-running agents alive through transient failures, provide
 - **FR-001**: The platform MUST implement a single agent control loop that powers every surface; surfaces MUST NOT fork or re-implement agent control flow.
 - **FR-002**: The loop MUST classify each model response into a typed set of outcomes (tool calls, content, empty) and dispatch on that classification rather than on text matching.
 - **FR-003**: Every tool invocation MUST have a paired result recorded before the next model call; on any cancel or error path the platform MUST record a synthetic result.
-- **FR-004**: The loop MUST end in an explicit, typed terminal reason (e.g., completed, max turns, cost exhausted, error, aborted, prompt too long, hook stopped) that callers can handle exhaustively.
+- **FR-004**: The loop MUST end in an explicit, typed terminal reason (e.g., completed, max turns, cost exhausted, error, aborted, prompt too long, hook stopped, approval expired) that callers can handle exhaustively.
 - **FR-005**: The platform MUST allow a human to steer or correct an in-flight run through a mid-run input mechanism.
 - **FR-006**: Agent, tool, model, and configuration objects MUST be immutable; the only mutable runtime state MUST be the conversation state, changed only by appending typed events to an append-only log.
 
@@ -175,7 +186,7 @@ The platform keeps long-running agents alive through transient failures, provide
 
 ### Functional Requirements — Memory & Skills
 
-- **FR-019**: Memory MUST be file-first, injected immutably at session start (updates take effect the next session), scoped per tenant, retention-bounded, and screened for injection/exfiltration before injection.
+- **FR-019**: Memory MUST be file-first, injected immutably at session start (updates take effect the next session), scoped per tenant, retention-bounded (default 90-day retention, overridable per tenant and per deployment tier), and screened for injection/exfiltration before injection.
 - **FR-020**: Skills MUST load by progressive disclosure (a brief description always visible, full content on demand) and be reusable across runs.
 - **FR-021**: Agent-proposed skills MUST follow propose → human/evaluation gate → version → promote and MUST NEVER be auto-promoted.
 - **FR-022**: Richer retrieval tiers (embeddings/episodic memory, knowledge graph) MUST be introduced only when the data shape and scale justify it, and retrieved claims MUST be grounded/cited.
@@ -201,7 +212,7 @@ The platform keeps long-running agents alive through transient failures, provide
 - **FR-033**: Within a session, at most two of {process untrusted input, access private data, change state or communicate externally} MUST proceed without human approval (Rule of Two); all tool output and retrieved content MUST be treated as untrusted.
 - **FR-034**: Secrets MUST NEVER be placed in the prompt; they MUST be injected at tool-execution time from a vault (model sees a handle) and isolated per tenant.
 - **FR-035**: The agent MUST act with the calling user's permission scope (delegated identity), never a superuser service account, enforced at the tool boundary.
-- **FR-036**: High-impact actions (payments, deletions, external sends, production changes) MUST be gated by scoped human approval.
+- **FR-036**: High-impact actions (payments, deletions, external sends, production changes) MUST be gated by scoped human approval. An approval that is not granted within a configurable timeout MUST expire as a denial (fail-closed), terminating the run with a typed `approval_expired` reason recorded in the audit log; the high-impact action MUST NOT proceed on timeout.
 - **FR-037**: Outbound domains MUST be allowlisted and sensitive data (PII/secrets/PHI/card data) MUST be masked by class before leaving the trust boundary; regulated payloads MUST be routable to a self-hosted in-environment model.
 
 ### Functional Requirements — Multi-Tenancy, Audit & Observability
@@ -214,7 +225,7 @@ The platform keeps long-running agents alive through transient failures, provide
 ### Functional Requirements — Governance & Evals
 
 - **FR-042**: Prompts, tools, and skills MUST be treated as production config — versioned, code-reviewed, and evaluation-gated; a prompt or model change is a deploy.
-- **FR-043**: An evaluation set (starting ~20 real cases) with a rubric-based judge and end-state checks MUST run in CI and gate any prompt/tool/model/skill change, with held-out grader tests the agent cannot edit to prevent spec-gaming.
+- **FR-043**: An evaluation set (starting ~20 real cases) with a rubric-based judge and end-state checks MUST run in CI and gate any prompt/tool/model/skill change, with held-out grader tests the agent cannot edit to prevent spec-gaming. A change MUST clear the gate only when it achieves at least a 90% pass rate AND causes zero regressions versus the current baseline (no previously-passing case may regress).
 - **FR-044**: Agents MUST NOT self-declare success; completion MUST be verified against explicit acceptance criteria.
 - **FR-045**: No production launch MUST occur without the go-live checklist green (attributable audit, vaulted per-tenant secrets, sandboxing + human approval for high-impact actions, one leg of the lethal trifecta broken per risky flow, per-task/per-tenant cost ceilings, failure classification + resume + stuck detection, evals green in CI, high steady-state cache-read, documented residency/retention/no-train, rehearsed incident runbook).
 
@@ -252,8 +263,9 @@ The platform keeps long-running agents alive through transient failures, provide
 - **SC-005**: 100% of high-impact actions (payments, deletions, external sends, production changes) are blocked pending scoped human approval, and no session performs all three legs of the lethal trifecta unattended.
 - **SC-006**: A run interrupted mid-task resumes from its last checkpoint and completes without restarting from scratch; a deploy during active runs cuts over zero in-flight tasks mid-task.
 - **SC-007**: The same build is deployed in at least two topologies (e.g., multi-tenant SaaS and self-hosted) purely by configuration, and a new organization is onboarded with zero kernel code changes.
-- **SC-008**: The platform sustains thousands of concurrent long-running sessions with a met queue-wait SLA, and under overload it degrades gracefully (admission control / fair scheduling / load-shedding) with zero cascading collapse.
-- **SC-009**: 100% of prompt/tool/model/skill changes pass the evaluation gate in CI before release; the agent cannot edit held-out grader tests.
+- **SC-008**: The platform sustains thousands of concurrent long-running sessions with a met queue-wait SLA — p95 queue-wait under 5s for interactive runs and under 60s for batch/async runs, with first-token latency under 2s for interactive runs — and under overload it degrades gracefully (admission control / fair scheduling / load-shedding) with zero cascading collapse.
+- **SC-011**: The platform meets a monthly availability SLA of ≥99.9% for the control plane / API and ≥99.5% for agent-run completion; SLA attainment is measured and reported, and breaches trigger an alert.
+- **SC-009**: 100% of prompt/tool/model/skill changes pass the evaluation gate in CI before release — defined as ≥90% pass rate on the eval set and zero regressions versus the current baseline — and the agent cannot edit held-out grader tests.
 - **SC-010**: Every failure is classified before retry with zero silent retries, and identical failing calls are circuit-broken within three attempts.
 
 ## Assumptions
