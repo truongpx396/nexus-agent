@@ -1,0 +1,43 @@
+# ── Working drafts ──────────────────────────────────────────────────────────────
+draft-plan.md
+
+# ── Speckit / agent run artifacts ───────────────────────────────────────────────
+runs/
+.specify/feature.json
+
+# ── OS / editor ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/settings.json
+*.swp
+*.swo
+*~
+
+# ── Node / JS (future frontend) ─────────────────────────────────────────────────
+node_modules/
+dist/
+.cache/
+
+# ── Python (future ML/eval helpers) ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.env
+
+# ── Go (future kernel/control plane) ────────────────────────────────────────────
+vendor/
+*.test
+*.out
+
+# ── Build outputs ────────────────────────────────────────────────────────────────
+bin/
+build/
+out/
+
+# ── Secrets / local env ──────────────────────────────────────────────────────────
+.env.*
+!.env.example
+*.pem
+*.key
