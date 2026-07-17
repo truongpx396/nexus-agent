@@ -1,0 +1,187 @@
+openapi: 3.1.0
+info:
+  title: Nexus Agent — Run Submission API (external surface contract)
+  version: 1.0.0
+  description: >
+    The external REST surface for submitting agent runs and observing progress.
+    This is one surface adapter over the single kernel (FR-001, FR-028); the CLI,
+    chat, email, and cron surfaces translate to the same underlying run model.
+    All requests are authenticated (SSO/OIDC) and RBAC-scoped by the control plane
+    (FR-029, FR-035). Long-running interactions stream or poll — never a blocked
+    connection (FR-031).
+servers:
+  - url: https://api.nexus-agent.example/v1
+security:
+  - oidc: []
+paths:
+  /runs:
+    post:
+      summary: Submit a new agent run
+      operationId: submitRun
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunRequest'
+      responses:
+        '202':
+          description: Run accepted and queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunAccepted'
+        '402':
+          description: Budget exhausted (per-task or per-tenant ceiling) (FR-017)
+        '403':
+          description: RBAC denied for the calling user's scope (FR-035)
+        '429':
+          description: At capacity; retry later (admission control) (FR-049)
+          headers:
+            Retry-After:
+              schema: { type: integer }
+  /runs/{sessionId}:
+    get:
+      summary: Poll run status and terminal reason
+      operationId: getRun
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Current run status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunStatus'
+        '404': { description: Not found or not visible to this tenant (FR-039) }
+  /runs/{sessionId}/events:
+    get:
+      summary: Stream structure-only run progress (SSE)
+      description: >
+        Emits typed event structure and per-turn spans WITHOUT requiring reads of
+        conversation content (FR-040). Conversation content is available only via
+        an authorized debugging scope.
+      operationId: streamRunEvents
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: text/event-stream of RunEvent objects
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/RunEvent'
+  /runs/{sessionId}/input:
+    post:
+      summary: Steer or correct an in-flight run (mid-run input) (FR-005)
+      operationId: sendRunInput
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message: { type: string }
+      responses:
+        '202': { description: Input queued for the running session }
+  /approvals/{approvalId}:
+    post:
+      summary: Resolve a pending human approval for a high-impact action (FR-036)
+      operationId: resolveApproval
+      parameters:
+        - name: approvalId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                decision: { type: string, enum: [grant, deny] }
+                scope: { type: string, enum: [once, session, permanent] }
+      responses:
+        '200': { description: Approval resolved }
+        '410':
+          description: >
+            Approval already expired (TTL elapsed, fail-closed); the run has
+            terminated with approval_expired and the action did not proceed (FR-036)
+components:
+  securitySchemes:
+    oidc:
+      type: openIdConnect
+      openIdConnectUrl: https://auth.nexus-agent.example/.well-known/openid-configuration
+  schemas:
+    RunRequest:
+      type: object
+      required: [agent_id, input]
+      properties:
+        agent_id: { type: string, format: uuid }
+        agent_version: { type: integer }
+        session_key:
+          type: string
+          description: Optional; continues an existing conversation (per-session serial)
+        input: { type: string }
+        data_label:
+          type: string
+          enum: [public, internal, regulated]
+          description: Drives deterministic model routing; regulated → self-hosted (FR-037)
+        mode:
+          type: string
+          enum: [interactive, batch]
+          default: interactive
+        budget_per_task_usd:
+          type: number
+          description: Optional override under the tenant ceiling (FR-017)
+    RunAccepted:
+      type: object
+      properties:
+        session_id: { type: string, format: uuid }
+        status: { type: string, enum: [queued] }
+    RunStatus:
+      type: object
+      properties:
+        session_id: { type: string, format: uuid }
+        status: { type: string, enum: [queued, running, suspended, terminal] }
+        terminal_reason:
+          type: string
+          nullable: true
+          enum:
+            - completed
+            - max_turns
+            - cost_exhausted
+            - error
+            - aborted
+            - prompt_too_long
+            - hook_stopped
+            - approval_expired
+        cost_usd: { type: number }
+    RunEvent:
+      type: object
+      description: Structure-only progress span (no conversation content)
+      properties:
+        seq: { type: integer, format: int64 }
+        type:
+          type: string
+          enum: [thought, action, observation, tool_use, tool_result, condensation, terminal]
+        tool_id: { type: string, nullable: true }
+        input_tokens: { type: integer, nullable: true }
+        output_tokens: { type: integer, nullable: true }
+        latency_ms: { type: integer, nullable: true }
+        model_id: { type: string, nullable: true }
+        terminal_reason: { type: string, nullable: true }
+        ts: { type: string, format: date-time }
