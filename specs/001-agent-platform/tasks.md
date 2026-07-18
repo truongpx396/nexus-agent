@@ -160,13 +160,16 @@ identical control flow, safety/cost guarantees, and no per-surface fork (quickst
 
 ## Phase 5: User Story 3 - Operate safely with enterprise trust (Priority: P2)
 
-**Goal**: Per-tenant isolation at the data layer, attributable immutable audit,
-vault-injected secrets (model sees only a handle), delegated identity, the Rule of Two,
-and scoped human approval that fails closed on timeout (`approval_expired`).
+**Goal**: Federated identity (per-tenant OIDC issuer, token validation, and just-in-time
+user provisioning — the platform never issues credentials itself), per-tenant isolation at
+the data layer, attributable immutable audit, vault-injected secrets (model sees only a
+handle), delegated identity, the Rule of Two, and scoped human approval that fails closed on
+timeout (`approval_expired`).
 
-**Independent Test**: Run two tenants concurrently and prove zero cross-tenant access;
-every mutating action has an audit receipt; a high-impact action blocks pending approval
-and expires as denial (quickstart.md Scenario 3).
+**Independent Test**: A first-time sign-in JIT-provisions a `User` while invalid/expired/
+wrong-issuer tokens are rejected; run two tenants concurrently and prove zero cross-tenant
+access; every mutating action has an audit receipt; a high-impact action blocks pending
+approval and expires as denial (quickstart.md Scenario 3).
 
 ### Tests for User Story 3 ⚠️
 
@@ -175,19 +178,25 @@ and expires as denial (quickstart.md Scenario 3).
 - [ ] T057 [P] [US3] Integration test: unanswered approval expires as denial → run ends `approval_expired`, gated action does not proceed in `backend-go/tests/integration/approval_timeout_test.go` (FR-036)
 - [ ] T058 [P] [US3] Integration test: Rule of Two blocks the third leg of the lethal trifecta unattended in `backend-go/tests/integration/rule_of_two_test.go` (FR-033)
 - [ ] T059 [P] [US3] Unit test: secret handle never appears in prompt/transcript in `backend-go/internal/security/secrets_test.go` (FR-034)
+- [ ] T060 [P] [US3] Integration test: first-time sign-in JIT-provisions a `User`, and invalid/expired/wrong-issuer tokens are rejected in `backend-go/tests/integration/auth_provisioning_test.go` (FR-029, FR-035)
 
 ### Implementation for User Story 3
 
-- [ ] T060 [P] [US3] Implement the secrets vault client injecting credentials at tool-execution time (model sees a handle), per-tenant isolated in `backend-go/internal/security/secrets.go` (FR-034)
-- [ ] T061 [P] [US3] Implement delegated-identity (act-as calling user) enforcement at the tool boundary in `backend-go/internal/security/identity.go` (FR-035)
-- [ ] T062 [P] [US3] Implement layered fail-closed defense (channel allowlist, autonomy mode, workspace restriction, shell allow/blocklist) in `backend-go/internal/security/defense.go` (FR-032)
-- [ ] T063 [P] [US3] Implement the Rule of Two evaluator over {untrusted input, private data, external state change} per session in `backend-go/internal/security/rule_of_two.go` (FR-033)
-- [ ] T064 [P] [US3] Implement egress allowlist + by-class PII/PHI/secret redaction before leaving the trust boundary in `backend-go/internal/security/egress.go` (FR-037)
-- [ ] T065 [P] [US3] Implement the immutable audit log + HMAC tamper-evident tool receipts in `backend-go/internal/audit/receipt.go` (FR-040)
-- [ ] T066 [US3] Implement scoped human approval for high-impact actions with a TTL that expires as denial (`approval_expired`) in `backend-go/internal/security/approval.go` (FR-036)
-- [ ] T067 [US3] Implement the `POST /v1/approvals/{id}` resolve endpoint (grant/deny + scope) in `backend-go/cmd/surface-gateway/approvals.go` (FR-036)
-- [ ] T068 [US3] Implement the control-plane authN (SSO/OIDC) + RBAC authorization gate in `backend-go/cmd/control-plane/auth.go` (FR-029, FR-035)
-- [ ] T069 [US3] Implement the per-tenant permission-scoped connector catalog (MCP) in `backend-go/internal/tools/connectors.go` (FR-012)
+- [ ] T061 [P] [US3] Implement the secrets vault client injecting credentials at tool-execution time (model sees a handle), per-tenant isolated in `backend-go/internal/security/secrets.go` (FR-034)
+- [ ] T062 [P] [US3] Implement delegated-identity (act-as calling user) enforcement at the tool boundary in `backend-go/internal/security/identity.go` (FR-035)
+- [ ] T063 [P] [US3] Implement layered fail-closed defense (channel allowlist, autonomy mode, workspace restriction, shell allow/blocklist) in `backend-go/internal/security/defense.go` (FR-032)
+- [ ] T064 [P] [US3] Implement the Rule of Two evaluator over {untrusted input, private data, external state change} per session in `backend-go/internal/security/rule_of_two.go` (FR-033)
+- [ ] T065 [P] [US3] Implement egress allowlist + by-class PII/PHI/secret redaction before leaving the trust boundary in `backend-go/internal/security/egress.go` (FR-037)
+- [ ] T066 [P] [US3] Implement the immutable audit log + HMAC tamper-evident tool receipts in `backend-go/internal/audit/receipt.go` (FR-040)
+- [ ] T067 [US3] Implement scoped human approval for high-impact actions with a TTL that expires as denial (`approval_expired`) in `backend-go/internal/security/approval.go` (FR-036)
+- [ ] T068 [US3] Implement the `POST /v1/approvals/{id}` resolve endpoint (grant/deny + scope) in `backend-go/cmd/surface-gateway/approvals.go` (FR-036)
+- [ ] T069 [US3] Implement the control-plane authN + RBAC authorization gate that composes the OIDC/provisioning primitives below (rejects unauthenticated/out-of-scope requests before a run is queued) in `backend-go/cmd/control-plane/auth.go` (FR-029, FR-035)
+- [ ] T070 [US3] Implement OIDC token validation middleware (OIDC discovery + per-tenant JWKS fetch/cache from `Tenant.identity_config`, signature + `iss`/`aud`/`exp` claim verification; standards-only, no provider-specific SDK) in `backend-go/cmd/control-plane/oidc.go` (FR-029)
+- [ ] T071 [US3] Implement JIT user provisioning with a per-tenant claims mapping (resolve `external_subject` and roles/groups from the configured claim names — default `sub`/`roles`, overridable per provider; upsert `User` by `(tenant_id, external_subject)` on first valid sign-in; resolve roles → permission scopes via `Tenant.rbac_map`) in `backend-go/internal/tenancy/provision.go` (FR-035)
+- [ ] T072 [US3] Implement the tenant identity-config admin API (register/rotate the OIDC issuer + client credentials and the subject/roles claims mapping in `Tenant.identity_config` during onboarding) in `backend-go/cmd/control-plane/identity_admin.go` (FR-029)
+- [ ] T073 [P] [US3] Implement service/machine identity for the CLI & cron surfaces (OIDC client-credentials service tokens carrying a delegated, least-privilege scope) in `backend-go/internal/security/service_identity.go` (FR-035)
+- [ ] T074 [P] [US3] Implement the web-surface OAuth2/PKCE login + redirect callback + session handling in `frontend/src/services/auth.ts` and `frontend/src/pages/Login.tsx` (FR-029)
+- [ ] T075 [US3] Implement the per-tenant permission-scoped connector catalog (MCP) in `backend-go/internal/tools/connectors.go` (FR-012)
 
 **Checkpoint**: Enterprise trust surface enforced at the data layer; US1–US2 still work.
 
@@ -205,20 +214,20 @@ the eval set (quickstart.md Scenario 4).
 
 ### Tests for User Story 4 ⚠️
 
-- [ ] T070 [P] [US4] Integration test: per-tenant ceiling breach stops further runs with cost-exhausted + alert in `backend-go/tests/integration/tenant_budget_test.go` (FR-017)
-- [ ] T071 [P] [US4] Integration test: trace view exposes structure/cost/latency/token spans without conversation content in `backend-go/tests/integration/trace_structure_test.go` (FR-040)
-- [ ] T072 [P] [US4] Eval-gate test: a regressing prompt/model change is blocked (≥90% pass AND zero regressions) in `ml-python/tests/test_eval_gate.py` (FR-043)
+- [ ] T076 [P] [US4] Integration test: per-tenant ceiling breach stops further runs with cost-exhausted + alert in `backend-go/tests/integration/tenant_budget_test.go` (FR-017)
+- [ ] T077 [P] [US4] Integration test: trace view exposes structure/cost/latency/token spans without conversation content in `backend-go/tests/integration/trace_structure_test.go` (FR-040)
+- [ ] T078 [P] [US4] Eval-gate test: a regressing prompt/model change is blocked (≥90% pass AND zero regressions) in `ml-python/tests/test_eval_gate.py` (FR-043)
 
 ### Implementation for User Story 4
 
-- [ ] T073 [P] [US4] Implement per-tenant budget enforcement (rolling sums vs `Budget`) + alert on breach in `backend-go/internal/cost/budget.go` (FR-017)
-- [ ] T074 [P] [US4] Implement deterministic two-axis model routing (data-label + difficulty, auditable, regulated → self-hosted) in `backend-go/internal/provider/routing.go` (FR-037)
-- [ ] T075 [P] [US4] Implement quality-per-dollar (η$) and completions-per-million-token reporting in `backend-go/internal/cost/report.go` (FR-018)
-- [ ] T076 [P] [US4] Implement structure-only trace spans (decision structure + per-turn cost/latency/token) with content gated behind an authorized debug scope in `backend-go/internal/observability/trace.go` (FR-040)
-- [ ] T077 [US4] Implement the control-plane rate limits + budget checks + routing front door in `backend-go/cmd/control-plane/gateway.go` (FR-029)
-- [ ] T078 [P] [US4] Implement the eval runner (~20 real cases, end-state checks) in `ml-python/src/evals/runner.py` (FR-043)
-- [ ] T079 [P] [US4] Implement the LLM-as-judge rubric scorer + held-out grader protection in `ml-python/src/judge/rubric.py` (FR-043)
-- [ ] T080 [US4] Wire the eval gate into CI (≥90% pass AND zero regressions vs baseline) in `.github/workflows/ci.yml` and `ml-python/src/evals/gate.py` (FR-042, FR-043)
+- [ ] T079 [P] [US4] Implement per-tenant budget enforcement (rolling sums vs `Budget`) + alert on breach in `backend-go/internal/cost/budget.go` (FR-017)
+- [ ] T080 [P] [US4] Implement deterministic two-axis model routing (data-label + difficulty, auditable, regulated → self-hosted) in `backend-go/internal/provider/routing.go` (FR-037)
+- [ ] T081 [P] [US4] Implement quality-per-dollar (η$) and completions-per-million-token reporting in `backend-go/internal/cost/report.go` (FR-018)
+- [ ] T082 [P] [US4] Implement structure-only trace spans (decision structure + per-turn cost/latency/token) with content gated behind an authorized debug scope in `backend-go/internal/observability/trace.go` (FR-040)
+- [ ] T083 [US4] Implement the control-plane rate limits + budget checks + routing front door in `backend-go/cmd/control-plane/gateway.go` (FR-029)
+- [ ] T084 [P] [US4] Implement the eval runner (~20 real cases, end-state checks) in `ml-python/src/evals/runner.py` (FR-043)
+- [ ] T085 [P] [US4] Implement the LLM-as-judge rubric scorer + held-out grader protection in `ml-python/src/judge/rubric.py` (FR-043)
+- [ ] T086 [US4] Wire the eval gate into CI (≥90% pass AND zero regressions vs baseline) in `.github/workflows/ci.yml` and `ml-python/src/evals/gate.py` (FR-042, FR-043)
 
 **Checkpoint**: Cost governance, structure-only observability, and the CI eval gate are live; US1–US3 still work.
 
@@ -235,17 +244,17 @@ skill loading, and that an agent-proposed skill is not auto-promoted (quickstart
 
 ### Tests for User Story 5 ⚠️
 
-- [ ] T081 [P] [US5] Integration test: memory injected at session start (not mid-session), tenant-scoped, screened first in `backend-go/tests/integration/memory_injection_test.go` (FR-019)
-- [ ] T082 [P] [US5] Integration test: agent-proposed skill requires human+eval gate, never auto-promoted in `backend-go/tests/integration/skill_promotion_test.go` (FR-021)
+- [ ] T087 [P] [US5] Integration test: memory injected at session start (not mid-session), tenant-scoped, screened first in `backend-go/tests/integration/memory_injection_test.go` (FR-019)
+- [ ] T088 [P] [US5] Integration test: agent-proposed skill requires human+eval gate, never auto-promoted in `backend-go/tests/integration/skill_promotion_test.go` (FR-021)
 
 ### Implementation for User Story 5
 
-- [ ] T083 [P] [US5] Implement file-first memory load (immutable snapshot at session start) + append (takes effect next session) in `backend-go/internal/memory/store.go` (FR-019)
-- [ ] T084 [P] [US5] Implement injection/exfiltration screening + per-tenant retention enforcement (default 90-day, overridable) in `backend-go/internal/memory/screen.go` (FR-019)
-- [ ] T085 [P] [US5] Implement progressive-disclosure skills (brief description always visible, body on demand) in `backend-go/internal/skills/registry.go` (FR-020)
-- [ ] T086 [US5] Implement the skill promotion pipeline (propose → human/eval gate → version → promote; never auto) in `backend-go/internal/skills/promote.go` (FR-021)
-- [ ] T087 [P] [US5] Implement the off-loop structured context condenser/summarizer helper (cheaper model, keep recent + verbatim requirements) in `ml-python/src/condenser/compact.py` (FR-015)
-- [ ] T088 [US5] Wire context compaction at ~80% budget into the kernel (two-zone prompt, byte-stable prefix) in `backend-go/internal/context/compaction.go` (FR-013, FR-014, FR-015)
+- [ ] T089 [P] [US5] Implement file-first memory load (immutable snapshot at session start) + append (takes effect next session) in `backend-go/internal/memory/store.go` (FR-019)
+- [ ] T090 [P] [US5] Implement injection/exfiltration screening + per-tenant retention enforcement (default 90-day, overridable) in `backend-go/internal/memory/screen.go` (FR-019)
+- [ ] T091 [P] [US5] Implement progressive-disclosure skills (brief description always visible, body on demand) in `backend-go/internal/skills/registry.go` (FR-020)
+- [ ] T092 [US5] Implement the skill promotion pipeline (propose → human/eval gate → version → promote; never auto) in `backend-go/internal/skills/promote.go` (FR-021)
+- [ ] T093 [P] [US5] Implement the off-loop structured context condenser/summarizer helper (cheaper model, keep recent + verbatim requirements) in `ml-python/src/condenser/compact.py` (FR-015)
+- [ ] T094 [US5] Wire context compaction at ~80% budget into the kernel (two-zone prompt, byte-stable prefix) in `backend-go/internal/context/compaction.go` (FR-013, FR-014, FR-015)
 
 **Checkpoint**: Memory + skills compound capability; US1–US4 still work.
 
@@ -262,16 +271,16 @@ topologies (SaaS + self-hosted) by configuration (quickstart.md Scenario 6).
 
 ### Tests for User Story 6 ⚠️
 
-- [ ] T089 [P] [US6] Integration test: new org onboarded via config/connectors with zero kernel changes in `backend-go/tests/integration/onboard_config_test.go` (FR-050)
-- [ ] T090 [P] [US6] Integration test: same build handshakes in split control/data-plane topology in `backend-go/tests/integration/topology_split_test.go` (FR-030)
+- [ ] T095 [P] [US6] Integration test: new org onboarded via config/connectors with zero kernel changes in `backend-go/tests/integration/onboard_config_test.go` (FR-050)
+- [ ] T096 [P] [US6] Integration test: same build handshakes in split control/data-plane topology in `backend-go/tests/integration/topology_split_test.go` (FR-030)
 
 ### Implementation for User Story 6
 
-- [ ] T091 [P] [US6] Implement org onboarding from config (tenant settings, agent def, seeded skills, enabled surfaces, connectors) in `backend-go/internal/tenancy/onboard.go` (FR-050)
-- [ ] T092 [P] [US6] Implement bootstrap-markdown agent definition loader (persona + toolset profile + autonomy) read at runtime in `backend-go/internal/tenancy/bootstrap.go` (FR-050)
-- [ ] T093 [P] [US6] Author the signed OCI image set + Helm chart in `deploy/helm/` (control-plane, runtime-worker, surface-gateway) (FR-030)
-- [ ] T094 [P] [US6] Author the Terraform module + BYOC KEDA/HPA autoscale-on-queue-depth policy in `deploy/terraform/` (FR-030, FR-046)
-- [ ] T095 [US6] Implement deployment-topology configuration (SaaS/single-tenant/BYOC/hybrid) selecting sandbox isolation + data-plane placement in `backend-go/internal/tenancy/topology.go` (FR-050)
+- [ ] T097 [P] [US6] Implement org onboarding from config (tenant settings, agent def, seeded skills, enabled surfaces, connectors) in `backend-go/internal/tenancy/onboard.go` (FR-050)
+- [ ] T098 [P] [US6] Implement bootstrap-markdown agent definition loader (persona + toolset profile + autonomy) read at runtime in `backend-go/internal/tenancy/bootstrap.go` (FR-050)
+- [ ] T099 [P] [US6] Author the signed OCI image set + Helm chart in `deploy/helm/` (control-plane, runtime-worker, surface-gateway) (FR-030)
+- [ ] T100 [P] [US6] Author the Terraform module + BYOC KEDA/HPA autoscale-on-queue-depth policy in `deploy/terraform/` (FR-030, FR-046)
+- [ ] T101 [US6] Implement deployment-topology configuration (SaaS/single-tenant/BYOC/hybrid) selecting sandbox isolation + data-plane placement in `backend-go/internal/tenancy/topology.go` (FR-050)
 
 **Checkpoint**: Config-not-forks onboarding + multi-topology deploy work; US1–US5 still work.
 
@@ -289,23 +298,23 @@ graceful degradation (quickstart.md Scenario 7).
 
 ### Tests for User Story 7 ⚠️
 
-- [ ] T096 [P] [US7] Integration test: worker crash mid-run resumes from last checkpoint, preserving partial work in `backend-go/tests/integration/resume_test.go` (FR-024)
-- [ ] T097 [P] [US7] Integration test: identical failing call circuit-breaks within three attempts with logged reasons (no silent retries) in `backend-go/tests/integration/circuit_breaker_test.go` (FR-023)
-- [ ] T098 [P] [US7] Integration test: deploy during an active run does not cut it over mid-task in `backend-go/tests/integration/rainbow_deploy_test.go` (FR-026)
-- [ ] T099 [P] [US7] Integration test: overload triggers admission control / fair scheduling / load-shedding (429 + `Retry-After`) in `backend-go/tests/integration/overload_test.go` (FR-049)
+- [ ] T102 [P] [US7] Integration test: worker crash mid-run resumes from last checkpoint, preserving partial work in `backend-go/tests/integration/resume_test.go` (FR-024)
+- [ ] T103 [P] [US7] Integration test: identical failing call circuit-breaks within three attempts with logged reasons (no silent retries) in `backend-go/tests/integration/circuit_breaker_test.go` (FR-023)
+- [ ] T104 [P] [US7] Integration test: deploy during an active run does not cut it over mid-task in `backend-go/tests/integration/rainbow_deploy_test.go` (FR-026)
+- [ ] T105 [P] [US7] Integration test: overload triggers admission control / fair scheduling / load-shedding (429 + `Retry-After`) in `backend-go/tests/integration/overload_test.go` (FR-049)
 
 ### Implementation for User Story 7
 
-- [ ] T100 [P] [US7] Implement the typed failure classifier + backoff-with-jitter retry policy in `backend-go/internal/reliability/classify.go` (FR-023)
-- [ ] T101 [P] [US7] Implement the circuit breaker (break after 3 identical failing calls, logged reasons) in `backend-go/internal/reliability/breaker.go` (FR-023)
-- [ ] T102 [P] [US7] Implement durable checkpointing + resume-from-last-checkpoint (Postgres event log + WAL) in `backend-go/internal/reliability/checkpoint.go` (FR-024)
-- [ ] T103 [P] [US7] Implement stuck detection (repeated actions / oscillation / zero net change over K steps) breaking the loop with a clear reason in `backend-go/internal/reliability/stuck.go` (FR-025)
-- [ ] T104 [P] [US7] Implement provider retry → cooldown → failover across backends in `backend-go/internal/provider/failover.go` (FR-027)
-- [ ] T105 [P] [US7] Implement the warm sandbox pool (hard TTLs, reclamation on terminal/stuck, per-tenant caps, isolation by topology) in `backend-go/internal/sandbox/pool.go` (FR-047)
-- [ ] T106 [P] [US7] Implement per-tenant rate limiting + connection pooling + cached-prefix handling in `backend-go/internal/queue/ratelimit.go` (FR-048)
-- [ ] T107 [US7] Implement admission control + weighted-fair scheduling + priority load-shedding + graceful degradation at the gateway in `backend-go/cmd/control-plane/admission.go` (FR-049)
-- [ ] T108 [US7] Implement rainbow (rolling) deploy support keeping in-flight runs alive in `backend-go/internal/queue/deploy.go` and `deploy/helm/` (FR-026)
-- [ ] T109 [US7] Implement autoscale-on-queue-depth/age worker signals in `backend-go/cmd/runtime-worker/scale.go` (FR-046)
+- [ ] T106 [P] [US7] Implement the typed failure classifier + backoff-with-jitter retry policy in `backend-go/internal/reliability/classify.go` (FR-023)
+- [ ] T107 [P] [US7] Implement the circuit breaker (break after 3 identical failing calls, logged reasons) in `backend-go/internal/reliability/breaker.go` (FR-023)
+- [ ] T108 [P] [US7] Implement durable checkpointing + resume-from-last-checkpoint (Postgres event log + WAL) in `backend-go/internal/reliability/checkpoint.go` (FR-024)
+- [ ] T109 [P] [US7] Implement stuck detection (repeated actions / oscillation / zero net change over K steps) breaking the loop with a clear reason in `backend-go/internal/reliability/stuck.go` (FR-025)
+- [ ] T110 [P] [US7] Implement provider retry → cooldown → failover across backends in `backend-go/internal/provider/failover.go` (FR-027)
+- [ ] T111 [P] [US7] Implement the warm sandbox pool (hard TTLs, reclamation on terminal/stuck, per-tenant caps, isolation by topology) in `backend-go/internal/sandbox/pool.go` (FR-047)
+- [ ] T112 [P] [US7] Implement per-tenant rate limiting + connection pooling + cached-prefix handling in `backend-go/internal/queue/ratelimit.go` (FR-048)
+- [ ] T113 [US7] Implement admission control + weighted-fair scheduling + priority load-shedding + graceful degradation at the gateway in `backend-go/cmd/control-plane/admission.go` (FR-049)
+- [ ] T114 [US7] Implement rainbow (rolling) deploy support keeping in-flight runs alive in `backend-go/internal/queue/deploy.go` and `deploy/helm/` (FR-026)
+- [ ] T115 [US7] Implement autoscale-on-queue-depth/age worker signals in `backend-go/cmd/runtime-worker/scale.go` (FR-046)
 
 **Checkpoint**: Operational resilience + horizontal scale in place; all user stories work.
 
@@ -315,14 +324,14 @@ graceful degradation (quickstart.md Scenario 7).
 
 **Purpose**: Hardening, docs, and the go-live gate spanning all stories
 
-- [ ] T110 [P] Implement the go-live checklist assertion (`make go-live-check`) covering audit, vaulted secrets, sandboxing+approval, trifecta, cost ceilings, reliability, evals-green, cache-read, residency/retention, runbook in `backend-go/cmd/control-plane/golive.go` (FR-045)
-- [ ] T111 [P] Add the cache-read steady-state measurement + >90% assertion to observability in `backend-go/internal/observability/cache_metrics.go` (FR-014)
-- [ ] T112 [P] Implement oversized tool-output offload to object storage with in-context preview + "do not infer success" caveat in `backend-go/internal/tools/offload.go` (FR-010)
-- [ ] T113 [P] Add SLA measurement + alerting (≥99.9% control plane / ≥99.5% run completion; p95 queue-wait, first-token) in `backend-go/internal/observability/sla.go` (SC-008, SC-011)
-- [ ] T114 [P] Author quickstart validation `Makefile` targets referenced by quickstart.md (`verify-isolation`, `verify-approval-timeout`, `verify-skill-promotion`, `chaos-crash`, `load-test`, `trace`, `seed-memory`, `onboard-org`, `deploy`)
-- [ ] T115 [P] Add developer + operator documentation in `docs/` (architecture, deployment topologies, incident runbook)
-- [ ] T116 [P] Add unit-test coverage pass across `backend-go/tests/unit/` for kernel, cost, security, and reliability helpers
-- [ ] T117 Run the full quickstart.md scenarios 1–7 end-to-end and confirm all acceptance criteria pass
+- [ ] T116 [P] Implement the go-live checklist assertion (`make go-live-check`) covering audit, vaulted secrets, sandboxing+approval, trifecta, cost ceilings, reliability, evals-green, cache-read, residency/retention, runbook in `backend-go/cmd/control-plane/golive.go` (FR-045)
+- [ ] T117 [P] Add the cache-read steady-state measurement + >90% assertion to observability in `backend-go/internal/observability/cache_metrics.go` (FR-014)
+- [ ] T118 [P] Implement oversized tool-output offload to object storage with in-context preview + "do not infer success" caveat in `backend-go/internal/tools/offload.go` (FR-010)
+- [ ] T119 [P] Add SLA measurement + alerting (≥99.9% control plane / ≥99.5% run completion; p95 queue-wait, first-token) in `backend-go/internal/observability/sla.go` (SC-008, SC-011)
+- [ ] T120 [P] Author quickstart validation `Makefile` targets referenced by quickstart.md (`verify-isolation`, `verify-approval-timeout`, `verify-skill-promotion`, `chaos-crash`, `load-test`, `trace`, `seed-memory`, `onboard-org`, `deploy`)
+- [ ] T121 [P] Add developer + operator documentation in `docs/` (architecture, deployment topologies, incident runbook)
+- [ ] T122 [P] Add unit-test coverage pass across `backend-go/tests/unit/` for kernel, cost, security, and reliability helpers
+- [ ] T123 Run the full quickstart.md scenarios 1–7 end-to-end and confirm all acceptance criteria pass
 
 ---
 

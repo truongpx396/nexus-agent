@@ -202,7 +202,7 @@ The platform keeps long-running agents alive through transient failures, provide
 ### Functional Requirements — Surfaces & Control Plane
 
 - **FR-028**: The platform MUST expose the agent through thin surface adapters (at minimum CLI, chat, web, REST/gRPC API, email, cron), each translating only input/output.
-- **FR-029**: A control plane MUST enforce authentication (SSO/OIDC), role-based authorization, rate limits, budget checks, and model routing in front of the runtime, separate from agent logic.
+- **FR-029**: A control plane MUST enforce authentication (SSO/OIDC), role-based authorization, rate limits, budget checks, and model routing in front of the runtime, separate from agent logic. The platform MUST NOT issue credentials itself: each tenant configures its own OIDC issuer/client (per-tenant `identity_config`), the control plane validates presented tokens against that issuer's JWKS (`iss`/`aud`/`exp`), and a first valid sign-in just-in-time provisions the `User` (upsert by `(tenant_id, external_subject)`, roles resolved to permission scopes via the tenant `rbac_map`) — no separate in-platform registration step. To keep provider swaps (e.g., Auth0, Casdoor, Keycloak, Entra, Okta, Ory Hydra) config-only, `identity_config` MUST also carry a per-tenant claims mapping declaring which token claims hold the stable subject and the roles/groups (default `sub` and `roles`, overridable per provider); the platform reads only OIDC-standard discovery + JWKS and MUST NOT embed provider-specific SDKs. Non-interactive surfaces (CLI, cron) MUST authenticate via OIDC client-credentials service tokens carrying a delegated, least-privilege scope.
 - **FR-030**: The control plane and data plane MUST be separately deployable behind a versioned contract so the data plane can move into a customer environment by configuration, not a rewrite.
 - **FR-031**: Long-running surface interactions MUST stream or poll progress rather than hold a blocked connection.
 
@@ -245,7 +245,7 @@ The platform keeps long-running agents alive through transient failures, provide
 - **Tool**: A self-describing capability with input schema, per-invocation safety/permission checks, and capability metadata; may be a built-in or a per-tenant permission-scoped connector.
 - **Model/Provider**: A pluggable backend accessed only through one abstraction with a normalized stream contract and deterministic, auditable routing.
 - **Tenant**: The first-class isolation boundary for data, secrets, budgets, rate limits, workspaces, and audit.
-- **User**: The delegated identity whose permission scope the agent acts within.
+- **User**: The delegated identity whose permission scope the agent acts within; provisioned just-in-time on first valid sign-in against the tenant's configured OIDC issuer (identified by `(tenant_id, external_subject)`), never registered separately in-platform.
 - **Skill**: A versioned, progressively disclosed procedure; growable by the agent only through a human/eval promotion gate.
 - **Memory**: Per-tenant, retention-bounded durable knowledge injected immutably at session start after injection screening.
 - **Budget / Cost Record**: Per-task and per-tenant token/cost accounting with hard ceilings and an explicit exhaustion reason.
