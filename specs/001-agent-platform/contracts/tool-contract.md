@@ -16,6 +16,10 @@ gates (FR-011). Safety is judged per invocation on parsed input (FR-009).
   catalog in the prompt prefix stays byte-stable (Constitution III).
 - External connectors register only through the vetted, per-tenant, RBAC-scoped
   MCP catalog (FR-012).
+- Personal connectors (Gmail/Drive/Calendar) are catalog entries with
+  `auth_kind = per_user_oauth`: the calling user authorizes them via per-user OAuth,
+  and step 9 injects that user's vaulted token by `(tenant, user, connector)` at
+  execution time (model sees only a handle) (FR-052, FR-053, FR-054).
 
 ## The three gates (fail-closed)
 

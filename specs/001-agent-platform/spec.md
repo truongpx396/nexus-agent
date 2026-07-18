@@ -143,6 +143,25 @@ The platform keeps long-running agents alive through transient failures, provide
 
 ---
 
+### User Story 8 - Connect personal messaging surfaces and systems of record (Priority: P2)
+
+An end user reaches the agent from the consumer messaging apps they already live in — **Telegram** and **Zalo** — and authorizes the agent to act on their own accounts (e.g., **Gmail**, **Google Drive**, **Google Calendar**) through a one-time consent, exactly like the popular LLM assistants. Once connected, the user can do the common tasks those assistants do — "summarize my unread email," "find the contract in my Drive," "schedule a meeting for Thursday and send the invite," "message me on Telegram when it's done" — with every connector scoped to that user's own permissions, tokens vaulted (never shown to the model), high-impact sends gated by approval, and no kernel fork per connector or per surface.
+
+**Why this priority**: Consumer messaging surfaces and per-user personal connectors are what make the platform recognizably useful as a day-to-day assistant (the OpenClaw/Hermes-style experience). It is high value but strictly layers onto the multi-surface loop (US2) and the trust surface (US3: connector catalog, vaulted secrets, delegated identity, Rule of Two, approval) — it adds new adapters and connectors as configuration, never new control flow.
+
+**Independent Test**: From a Telegram (and a Zalo) chat, submit a task and confirm identical control flow / terminal reason to the API surface; complete a per-user OAuth consent for a Google connector and confirm the token is vaulted per `(tenant, user, connector)`, auto-refreshed, and revocable; confirm the model only ever sees a connector handle; confirm a "send email" action is blocked pending approval; confirm an external chat identity is bound to a platform `User` before any action runs.
+
+**Acceptance Scenarios**:
+
+1. **Given** a user messaging the agent from Telegram or Zalo, **When** the message arrives via the surface's webhook, **Then** it is translated by a thin adapter into the same run model and follows the identical loop, guarantees, and terminal reasons as every other surface — no per-surface fork.
+2. **Given** a user who has not yet linked a connector, **When** they ask for an action needing it, **Then** the platform initiates a per-user OAuth 2.0 authorization-code (with PKCE) consent, and only after consent stores the resulting tokens in the per-tenant vault keyed by `(tenant, user, connector)`.
+3. **Given** a linked connector whose access token has expired, **When** a tool call needs it, **Then** the token is refreshed automatically from the stored refresh token, and a user-initiated revoke immediately removes access.
+4. **Given** any connector tool invocation (Gmail/Drive/Calendar), **When** it executes, **Then** the credential is injected at execution time from the vault and the model only ever sees a handle — never the token — and the action runs within the calling user's own permission scope.
+5. **Given** a high-impact connector action (send an email, delete a file, send a calendar invite externally), **When** the agent attempts it, **Then** it is gated by scoped human approval and constrained by the Rule of Two before proceeding.
+6. **Given** an inbound message from an external chat identity (Telegram/Zalo user id), **When** it is first seen, **Then** it is bound to a platform `User` within a tenant through a verified linking step, and an unverified/unlinked identity cannot run actions.
+
+---
+
 ### Edge Cases
 
 - **Ambiguous model output**: When the model responds in a way the code cannot categorize, the loop branches on a typed classification of the response (tool calls / content / empty), never a fragile string match, and re-prompts a bounded number of times on format errors.
@@ -206,6 +225,14 @@ The platform keeps long-running agents alive through transient failures, provide
 - **FR-030**: The control plane and data plane MUST be separately deployable behind a versioned contract so the data plane can move into a customer environment by configuration, not a rewrite.
 - **FR-031**: Long-running surface interactions MUST stream or poll progress rather than hold a blocked connection.
 
+### Functional Requirements — Consumer Surfaces & Personal Connectors
+
+- **FR-051**: The platform MUST support consumer messaging surfaces (at minimum Telegram and Zalo) as thin webhook-ingress adapters that translate only input/output into the same run model, with identical control flow, safety/cost guarantees, and typed terminal reasons as every other surface — the kernel MUST NOT be forked per surface.
+- **FR-052**: The platform MUST let an individual user authorize a personal connector to their own system of record via OAuth 2.0 authorization-code flow with PKCE; the resulting access and refresh tokens MUST be stored only in the per-tenant vault keyed by `(tenant, user, connector)`, auto-refreshed on expiry, and revocable by the user, and MUST NEVER appear in a prompt, transcript, or log.
+- **FR-053**: The platform MUST ship reference personal connectors (at minimum Gmail, Google Drive, and Google Calendar) in the vetted per-tenant connector catalog, each self-describing with high-signal, consolidated operations (e.g., `gmail_search`/`gmail_send`, `drive_search`, `schedule_event`) rather than chatty low-level calls.
+- **FR-054**: Every personal-connector invocation MUST run within the calling user's own delegated permission scope with the credential injected at execution time (model sees a handle), MUST treat all connector-returned content as untrusted, MUST be constrained by the Rule of Two, and MUST gate high-impact actions (external send, deletion, sharing) behind scoped human approval.
+- **FR-055**: Each inbound consumer-surface identity (e.g., Telegram/Zalo user id) MUST be bound to a platform `User` within a tenant through a verified linking step before any action runs; an unverified or unlinked external identity MUST be denied (fail-closed).
+
 ### Functional Requirements — Security & Trust
 
 - **FR-032**: Defense MUST be layered (channel allowlist, autonomy mode, workspace restriction, shell allow/blocklist, per-tenant sandbox isolation, tamper-evident audit receipts) and fail closed.
@@ -243,6 +270,8 @@ The platform keeps long-running agents alive through transient failures, provide
 - **Conversation / Session**: The only mutable runtime state; an append-only, event-sourced log of typed events (thoughts, actions, observations) keyed first by tenant, replayable and auditable.
 - **Event**: A typed, timestamped, attributable record (action / observation / thought / tool receipt) appended to the log — the single source of truth.
 - **Tool**: A self-describing capability with input schema, per-invocation safety/permission checks, and capability metadata; may be a built-in or a per-tenant permission-scoped connector.
+- **Connector Authorization**: A per-user OAuth grant (access + refresh tokens, scopes, expiry) binding a `User` to an external connector, stored only in the per-tenant vault keyed by `(tenant, user, connector)`, auto-refreshed and user-revocable, never exposed to the model.
+- **Surface Identity**: A verified binding from an external consumer-surface identity (e.g., Telegram/Zalo user id) to a platform `User` within a tenant; required before any action runs from that surface.
 - **Model/Provider**: A pluggable backend accessed only through one abstraction with a normalized stream contract and deterministic, auditable routing.
 - **Tenant**: The first-class isolation boundary for data, secrets, budgets, rate limits, workspaces, and audit.
 - **User**: The delegated identity whose permission scope the agent acts within; provisioned just-in-time on first valid sign-in against the tenant's configured OIDC issuer (identified by `(tenant_id, external_subject)`), never registered separately in-platform.
@@ -267,6 +296,7 @@ The platform keeps long-running agents alive through transient failures, provide
 - **SC-011**: The platform meets a monthly availability SLA of ≥99.9% for the control plane / API and ≥99.5% for agent-run completion; SLA attainment is measured and reported, and breaches trigger an alert.
 - **SC-009**: 100% of prompt/tool/model/skill changes pass the evaluation gate in CI before release — defined as ≥90% pass rate on the eval set and zero regressions versus the current baseline — and the agent cannot edit held-out grader tests.
 - **SC-010**: Every failure is classified before retry with zero silent retries, and identical failing calls are circuit-broken within three attempts.
+- **SC-012**: A user completes representative common tasks (e.g., summarize unread email, find a Drive document, schedule a calendar event) from both a Telegram and a Zalo chat with identical control flow and terminal reasons to the API surface; every personal connector is authorized by per-user OAuth with tokens vaulted per `(tenant, user, connector)` and never present in any prompt/transcript/log; 100% of high-impact connector actions block pending scoped approval; and an unverified external chat identity performs zero actions.
 
 ## Assumptions
 

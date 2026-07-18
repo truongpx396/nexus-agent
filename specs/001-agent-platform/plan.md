@@ -10,7 +10,7 @@ Build **one** model-agnostic AI agent platform: a single reliable kernel loop
 (observe → think → act, an async generator with typed terminal states over an
 append-only event log) wrapped in an engineered harness (tools, cache-stable
 context, cost metering, memory, skills, reliability), exposed through thin surface
-adapters (CLI, chat, web, REST/gRPC, email, cron), fronted by a control plane
+adapters (CLI, chat, web, REST/gRPC, email, cron, Telegram/Zalo), fronted by a control plane
 (auth, RBAC, budgets, routing), and grounded in a trust surface (per-tenant
 isolation, vaulted secrets, audit receipts, evals-in-CI). The same build serves
 multi-tenant SaaS, single-tenant, self-hosted/BYOC, and hybrid topologies by
@@ -75,8 +75,10 @@ a self-hosted in-VPC model so they never leave the trust boundary; default 90-da
 memory retention (tenant-overridable); a required approval unanswered within its
 TTL expires as a denial (`approval_expired`)
 
-**Scale/Scope**: 50 functional requirements across 7 user stories; single reusable
-kernel serving 6+ surfaces; startup (5 people) → enterprise (50,000 people) via
+**Scale/Scope**: 55 functional requirements across 8 user stories; single reusable
+kernel serving 8+ surfaces (CLI, chat, web, REST/gRPC, email, cron, Telegram, Zalo)
+plus per-user personal connectors (Gmail/Drive/Calendar); startup (5 people) →
+enterprise (50,000 people) via
 configuration; four deployment topologies from one build; ~5,000+ concurrent
 sessions per production single-org deployment
 
@@ -143,12 +145,14 @@ backend-go/
 ├── cmd/
 │   ├── control-plane/        # gateway: authN (SSO/OIDC), RBAC, rate limit, budget, routing
 │   ├── runtime-worker/       # stateless worker: pulls a session, runs the kernel loop
-│   └── surface-gateway/      # thin surface adapters entrypoint (CLI/API/chat/email/cron)
+│   └── surface-gateway/      # thin surface adapters entrypoint (CLI/API/chat/email/cron/telegram/zalo)
 ├── kernel/                   # the agent loop: async-generator step, typed terminal states,
 │                             #   response classification, tool_use/tool_result invariant
 ├── internal/
 │   ├── provider/             # provider abstraction + normalized stream contract + adapters
 │   ├── tools/                # registry (self-registering), buildTool factory, exec pipeline
+│   ├── connectors/           # per-user OAuth (auth-code+PKCE), token vault/refresh/revoke,
+│   │                         #   reference connectors (gmail, gdrive, gcalendar)
 │   ├── context/              # two-zone prompt, cache discipline, structured compaction
 │   ├── memory/               # file-first memory, per-tenant, injection screening, retention
 │   ├── skills/               # progressive disclosure + propose→gate→version→promote
@@ -159,7 +163,7 @@ backend-go/
 │   ├── audit/                # immutable audit log + tamper-evident tool receipts
 │   ├── queue/                # durable job queue, session-key routing, admission control
 │   ├── sandbox/              # warm pool, TTL/reclamation, per-tenant caps, isolation
-│   ├── surfaces/             # per-surface adapter translators (cli, api, chat, email, cron)
+│   ├── surfaces/             # per-surface adapter translators (cli, api, chat, email, cron, telegram, zalo)
 │   └── observability/        # OTel spans, structure-only tracing, cost/latency/token spans
 ├── migrations/               # Postgres schema incl. row-level security policies
 └── tests/

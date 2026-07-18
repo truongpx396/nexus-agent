@@ -23,6 +23,9 @@ erDiagram
     TENANT ||--o{ BUDGET : bounded_by
     AGENT ||--o{ SESSION : instantiated_as
     USER ||--o{ SESSION : initiates
+    USER ||--o{ CONNECTOR_AUTHORIZATION : authorizes
+    USER ||--o{ SURFACE_IDENTITY : linked_from
+    CONNECTOR ||--o{ CONNECTOR_AUTHORIZATION : granted_by
     SESSION ||--o{ EVENT : appends
     SESSION ||--o{ COST_RECORD : meters
     SESSION ||--o{ CHECKPOINT : snapshots
@@ -135,9 +138,49 @@ per-tenant, RBAC-scoped catalog (FR-012).
 |-------|------|-------|
 | `connector_id` | UUID (PK) | |
 | `tenant_id` | UUID (FK) | RLS key |
-| `kind` | string | `jira` / `salesforce` / `github` / … |
+| `kind` | string | `jira` / `salesforce` / `github` / `gmail` / `gdrive` / `gcalendar` / … |
 | `secret_handle` | string | Vault handle; never the raw credential (FR-034) |
 | `scope` | jsonb | RBAC scope, per calling user |
+| `auth_kind` | enum | `tenant_service` (admin-configured) / `per_user_oauth` (personal, FR-052) |
+
+### Connector Authorization
+A per-user OAuth grant binding a `User` to a `Connector`, stored only in the
+per-tenant vault and never exposed to the model (FR-052, FR-054). Applies to
+personal connectors (`auth_kind = per_user_oauth`, e.g. Gmail/Drive/Calendar).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `authorization_id` | UUID (PK) | |
+| `tenant_id` | UUID (FK) | RLS key |
+| `user_id` | UUID (FK) | The authorizing user (delegated scope, FR-054) |
+| `connector_id` | UUID (FK) | Unique per `(tenant, user, connector)` |
+| `token_handle` | string | Vault handle for access+refresh tokens; never in prompt/log (FR-052) |
+| `scopes` | string[] | OAuth scopes granted at consent |
+| `expires_at` | timestamptz | Access-token expiry; auto-refresh on/after |
+| `status` | enum | `active` / `expired` / `revoked` |
+| `created_at` | timestamptz | |
+
+- **Uniqueness**: one active row per `(tenant_id, user_id, connector_id)`.
+- **Lifecycle**: `active → expired (auto-refresh) → active`; user revoke → `revoked` (blocks use, fail-closed).
+- **Secret rule**: only `token_handle` is stored; raw tokens live in the vault and never enter a prompt, transcript, or log.
+
+### Surface Identity
+A verified binding from an external consumer-surface identity (e.g. Telegram/Zalo
+user id) to a platform `User` within a tenant; required before any action runs
+from that surface (FR-055).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `surface_identity_id` | UUID (PK) | |
+| `tenant_id` | UUID (FK) | RLS key |
+| `user_id` | UUID (FK) | The bound platform user (delegated identity) |
+| `surface` | enum | `telegram` / `zalo` |
+| `external_id` | string | The surface-native user/chat id |
+| `verified` | bool | Linking step passed; unverified → denied (fail-closed) |
+| `created_at` | timestamptz | |
+
+- **Uniqueness**: one row per `(tenant_id, surface, external_id)`.
+- **Rule**: an unverified or unlinked external identity performs zero actions (FR-055).
 
 ---
 
@@ -289,3 +332,8 @@ trust boundary (FR-047).
   session and the ordering is the source of truth for replay.
 - **Attribution**: every `Event` and `Cost Record` ties to `tenant_id` + `user_id`;
   every mutating action produces an `Audit Receipt` (FR-040).
+- **Per-user connector secrets**: `Connector Authorization` stores only a
+  `token_handle`; raw OAuth tokens live in the vault, are injected at tool-execution
+  time (model sees a handle), auto-refreshed, and user-revocable (FR-052, FR-054).
+- **Verified surface binding**: an external `Surface Identity` (Telegram/Zalo) must
+  be verified-linked to a `User` before any action runs (FR-055).

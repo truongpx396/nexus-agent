@@ -5,10 +5,11 @@ info:
   description: >
     The external REST surface for submitting agent runs and observing progress.
     This is one surface adapter over the single kernel (FR-001, FR-028); the CLI,
-    chat, email, and cron surfaces translate to the same underlying run model.
-    All requests are authenticated (SSO/OIDC) and RBAC-scoped by the control plane
-    (FR-029, FR-035). Long-running interactions stream or poll — never a blocked
-    connection (FR-031).
+    chat, email, cron, and consumer messaging (Telegram/Zalo) surfaces translate to
+    the same underlying run model. Users may link personal connectors
+    (Gmail/Drive/Calendar) via per-user OAuth (FR-052). All requests are
+    authenticated (SSO/OIDC) and RBAC-scoped by the control plane (FR-029, FR-035).
+    Long-running interactions stream or poll — never a blocked connection (FR-031).
 servers:
   - url: https://api.nexus-agent.example/v1
 security:
@@ -120,6 +121,71 @@ paths:
           description: >
             Approval already expired (TTL elapsed, fail-closed); the run has
             terminated with approval_expired and the action did not proceed (FR-036)
+  /connectors:
+    get:
+      summary: List the calling user's linked personal connectors (FR-052)
+      operationId: listConnectors
+      responses:
+        '200':
+          description: Linked connectors for the calling user
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConnectorLink'
+  /connectors/{name}/authorize:
+    post:
+      summary: Begin per-user OAuth authorization for a personal connector (FR-052)
+      description: >
+        Starts an OAuth 2.0 authorization-code flow with PKCE for a personal
+        connector (e.g. gmail, gdrive, gcalendar). Returns the provider consent URL;
+        on completion the tokens are stored in the per-tenant vault keyed by
+        (tenant, user, connector) and never exposed to the model (FR-052, FR-054).
+      operationId: authorizeConnector
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, enum: [gmail, gdrive, gcalendar] }
+      responses:
+        '200':
+          description: Consent URL to complete authorization
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  authorize_url: { type: string, format: uri }
+                  state: { type: string }
+  /connectors/callback:
+    get:
+      summary: OAuth redirect callback that exchanges the code and vaults the tokens (FR-052)
+      operationId: connectorCallback
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema: { type: string }
+        - name: state
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Connector linked; tokens vaulted per (tenant, user, connector) }
+        '400': { description: Invalid/expired state or code (fail-closed) }
+  /connectors/{name}:
+    delete:
+      summary: Revoke a linked personal connector for the calling user (FR-052)
+      operationId: revokeConnector
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, enum: [gmail, gdrive, gcalendar] }
+      responses:
+        '204': { description: Connector revoked; vaulted tokens removed }
+        '404': { description: No such link for this user }
 components:
   securitySchemes:
     oidc:
@@ -185,3 +251,14 @@ components:
         model_id: { type: string, nullable: true }
         terminal_reason: { type: string, nullable: true }
         ts: { type: string, format: date-time }
+    ConnectorLink:
+      type: object
+      description: A per-user personal-connector link (tokens are vaulted, never returned)
+      properties:
+        name: { type: string, enum: [gmail, gdrive, gcalendar] }
+        status: { type: string, enum: [active, expired, revoked] }
+        scopes:
+          type: array
+          items: { type: string }
+        linked_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, nullable: true }

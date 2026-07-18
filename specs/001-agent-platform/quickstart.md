@@ -156,6 +156,36 @@ admission control / fair scheduling / load-shedding (429 + `Retry-After`) and
 degrades gracefully instead of collapsing; identical failing calls circuit-break
 within three attempts with logged reasons (no silent retries).
 
+## Scenario 8 — Consumer surfaces & personal connectors (User Story 8, P2)
+
+**Goal**: reach the same kernel from Telegram/Zalo and let a user authorize personal
+connectors (Gmail/Drive/Calendar) via per-user OAuth, with tokens vaulted, handle-only
+credentials, and approval-gated sends (FR-051–FR-055).
+
+```bash
+# Link an external chat identity to a platform user (verified binding, FR-055):
+make link-surface SURFACE=telegram EXTERNAL_ID=<tg_user_id> USER=<user_id>
+# Message the agent from Telegram and Zalo (webhook ingress → same run model):
+#   send "summarize my unread email" from the Telegram/Zalo chat
+# Authorize a personal connector via per-user OAuth (auth-code + PKCE, FR-052):
+make connect-connector CONNECTOR=gmail USER=<user_id>     # opens consent URL, stores token in vault
+curl -s localhost:8080/v1/connectors -H 'Authorization: Bearer <oidc>'   # list linked accounts
+curl -sX DELETE localhost:8080/v1/connectors/gmail -H 'Authorization: Bearer <oidc>'  # revoke
+```
+
+**Expected**:
+- Telegram and Zalo messages produce identical control flow and terminal reasons to
+  the API surface — thin adapters, no per-surface fork (FR-051).
+- The OAuth consent stores access+refresh tokens in the vault keyed by
+  `(tenant, user, connector)`, auto-refreshes on expiry, and revoke removes access;
+  the token never appears in a prompt/transcript/log (FR-052).
+- A connector tool (e.g. `gmail_search`, `drive_search`, `schedule_event`) runs in
+  the calling user's own scope with the credential injected at execution time (model
+  sees a handle only, FR-054).
+- A high-impact action (`gmail_send`, external calendar invite, file delete) blocks
+  pending scoped approval and is constrained by the Rule of Two (FR-054).
+- An unverified/unlinked Telegram/Zalo identity performs zero actions (FR-055).
+
 ---
 
 ## Go-live gate (FR-045)

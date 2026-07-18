@@ -16,8 +16,9 @@ an eval set that gates every prompt/tool/model/skill change in CI (FR-042, FR-04
 FR-044). These test tasks are therefore first-class, not optional.
 
 **Organization**: Tasks are grouped by user story (P1–P3) so each story is an
-independently testable increment aligned with the six delivery phases in the plan
-(kernel → surfaces → trust → cost/observability → memory/skills → config → scale).
+independently testable increment aligned with the delivery phases in the plan
+(kernel → surfaces → trust → cost/observability → memory/skills → config → scale →
+consumer surfaces/personal connectors).
 
 ## Format: `[ID] [P?] [Story] Description`
 
@@ -320,18 +321,63 @@ graceful degradation (quickstart.md Scenario 7).
 
 ---
 
-## Phase 10: Polish & Cross-Cutting Concerns
+## Phase 10: User Story 8 - Connect personal messaging surfaces and systems of record (Priority: P2)
+
+**Goal**: Reach the same kernel from consumer messaging apps (Telegram, Zalo) as thin
+webhook adapters, and let each user authorize personal connectors (Gmail, Google Drive,
+Google Calendar) via per-user OAuth (auth-code + PKCE) with tokens vaulted per
+`(tenant, user, connector)`, auto-refreshed and revocable — the model sees only a handle,
+connector content is untrusted, the Rule of Two applies, and high-impact sends are
+approval-gated. No kernel fork per surface or per connector.
+
+**Independent Test**: Message the agent from Telegram and Zalo and confirm identical
+control flow/terminal reason to the API surface; complete a per-user OAuth consent and
+confirm the token is vaulted per `(tenant, user, connector)`, auto-refreshed, and
+revocable; confirm the model only sees a handle; confirm a "send email" blocks pending
+approval; confirm an unverified external chat identity runs zero actions (quickstart.md
+Scenario 8).
+
+### Tests for User Story 8 ⚠️ (write first, ensure they FAIL)
+
+- [ ] T116 [P] [US8] Integration test: a Telegram webhook message routes to the kernel with identical control flow + terminal reason to the API surface in `backend-go/tests/integration/telegram_surface_test.go` (FR-051)
+- [ ] T117 [P] [US8] Integration test: a Zalo webhook message routes to the kernel with identical control flow + terminal reason in `backend-go/tests/integration/zalo_surface_test.go` (FR-051)
+- [ ] T118 [P] [US8] Integration test: per-user OAuth auth-code+PKCE consent vaults tokens per `(tenant, user, connector)`, auto-refreshes on expiry, and revoke removes access in `backend-go/tests/integration/connector_oauth_test.go` (FR-052)
+- [ ] T119 [P] [US8] Unit test: connector token never appears in prompt/transcript/log (handle only) in `backend-go/internal/connectors/token_test.go` (FR-052, FR-054)
+- [ ] T120 [P] [US8] Integration test: high-impact connector action (Gmail send) blocks pending scoped approval and is constrained by the Rule of Two in `backend-go/tests/integration/connector_approval_test.go` (FR-054)
+- [ ] T121 [P] [US8] Integration test: an inbound Telegram/Zalo identity must be verified-linked to a `User` before any action; unlinked identity is denied in `backend-go/tests/integration/surface_identity_test.go` (FR-055)
+
+### Implementation for User Story 8
+
+- [ ] T122 [US8] Author the migration for `ConnectorAuthorization` (per `(tenant, user, connector)` OAuth tokens/scopes/expiry) and `SurfaceIdentity` (external chat id → `User`) tables with `tenant_id` row-level-security policies in `backend-go/migrations/0004_connectors.sql` (FR-052, FR-055)
+- [ ] T123 [P] [US8] Implement the per-user OAuth connector authorization service (auth-code + PKCE, `state`/nonce, token exchange) in `backend-go/internal/connectors/oauth.go` (FR-052)
+- [ ] T124 [P] [US8] Implement connector token vault storage + auto-refresh + revoke, keyed per `(tenant, user, connector)`, injected at execution time (model sees a handle) in `backend-go/internal/connectors/vault.go` (FR-052, FR-054)
+- [ ] T125 [US8] Implement the connector authorization REST endpoints (`POST /v1/connectors/{name}/authorize`, `GET /v1/connectors/callback`, `GET /v1/connectors`, `DELETE /v1/connectors/{name}`) in `backend-go/cmd/surface-gateway/connectors.go` (FR-052)
+- [ ] T126 [P] [US8] Implement the Telegram surface adapter (webhook ingress, update parsing, send, stream/poll progress) in `backend-go/internal/surfaces/telegram.go` (FR-051, FR-031)
+- [ ] T127 [P] [US8] Implement the Zalo surface adapter (webhook ingress, OA message parsing, send) in `backend-go/internal/surfaces/zalo.go` (FR-051)
+- [ ] T128 [US8] Implement verified surface-identity binding/linking (map + verify external chat id → `User`; deny unlinked, fail-closed) in `backend-go/internal/surfaces/identity.go` (FR-055)
+- [ ] T129 [P] [US8] Implement the Gmail reference connector tool (consolidated `gmail_search`/`gmail_read`/`gmail_send`, high-signal outputs, delegated scope) in `backend-go/internal/connectors/gmail.go` (FR-053, FR-054)
+- [ ] T130 [P] [US8] Implement the Google Drive reference connector tool (consolidated `drive_search`/`drive_read`/`drive_list`) in `backend-go/internal/connectors/drive.go` (FR-053, FR-054)
+- [ ] T131 [P] [US8] Implement the Google Calendar reference connector tool (consolidated `schedule_event` that finds availability and books) in `backend-go/internal/connectors/calendar.go` (FR-053, FR-054)
+- [ ] T132 [US8] Register the reference connectors in the per-tenant catalog with capability metadata, Rule-of-Two enforcement, and approval-gated high-impact sends (extends T075) in `backend-go/internal/tools/connectors.go` (FR-053, FR-054)
+- [ ] T133 [P] [US8] Implement the frontend connector-management page (connect/disconnect + OAuth consent redirect + linked-account list) in `frontend/src/pages/Connectors.tsx` and `frontend/src/services/connectors.ts` (FR-052)
+
+**Checkpoint**: Consumer messaging surfaces + per-user personal connectors work as
+config-only additions; US1–US7 still work.
+
+---
+
+## Phase 11: Polish & Cross-Cutting Concerns
 
 **Purpose**: Hardening, docs, and the go-live gate spanning all stories
 
-- [ ] T116 [P] Implement the go-live checklist assertion (`make go-live-check`) covering audit, vaulted secrets, sandboxing+approval, trifecta, cost ceilings, reliability, evals-green, cache-read, residency/retention, runbook in `backend-go/cmd/control-plane/golive.go` (FR-045)
-- [ ] T117 [P] Add the cache-read steady-state measurement + >90% assertion to observability in `backend-go/internal/observability/cache_metrics.go` (FR-014)
-- [ ] T118 [P] Implement oversized tool-output offload to object storage with in-context preview + "do not infer success" caveat in `backend-go/internal/tools/offload.go` (FR-010)
-- [ ] T119 [P] Add SLA measurement + alerting (≥99.9% control plane / ≥99.5% run completion; p95 queue-wait, first-token) in `backend-go/internal/observability/sla.go` (SC-008, SC-011)
-- [ ] T120 [P] Author quickstart validation `Makefile` targets referenced by quickstart.md (`verify-isolation`, `verify-approval-timeout`, `verify-skill-promotion`, `chaos-crash`, `load-test`, `trace`, `seed-memory`, `onboard-org`, `deploy`)
-- [ ] T121 [P] Add developer + operator documentation in `docs/` (architecture, deployment topologies, incident runbook)
-- [ ] T122 [P] Add unit-test coverage pass across `backend-go/tests/unit/` for kernel, cost, security, and reliability helpers
-- [ ] T123 Run the full quickstart.md scenarios 1–7 end-to-end and confirm all acceptance criteria pass
+- [ ] T134 [P] Implement the go-live checklist assertion (`make go-live-check`) covering audit, vaulted secrets, sandboxing+approval, trifecta, cost ceilings, reliability, evals-green, cache-read, residency/retention, runbook in `backend-go/cmd/control-plane/golive.go` (FR-045)
+- [ ] T135 [P] Add the cache-read steady-state measurement + >90% assertion to observability in `backend-go/internal/observability/cache_metrics.go` (FR-014)
+- [ ] T136 [P] Implement oversized tool-output offload to object storage with in-context preview + "do not infer success" caveat in `backend-go/internal/tools/offload.go` (FR-010)
+- [ ] T137 [P] Add SLA measurement + alerting (≥99.9% control plane / ≥99.5% run completion; p95 queue-wait, first-token) in `backend-go/internal/observability/sla.go` (SC-008, SC-011)
+- [ ] T138 [P] Author quickstart validation `Makefile` targets referenced by quickstart.md (`verify-isolation`, `verify-approval-timeout`, `verify-skill-promotion`, `chaos-crash`, `load-test`, `trace`, `seed-memory`, `onboard-org`, `deploy`, `connect-connector`)
+- [ ] T139 [P] Add developer + operator documentation in `docs/` (architecture, deployment topologies, incident runbook)
+- [ ] T140 [P] Add unit-test coverage pass across `backend-go/tests/unit/` for kernel, cost, security, and reliability helpers
+- [ ] T141 Run the full quickstart.md scenarios 1–8 end-to-end and confirm all acceptance criteria pass
 
 ---
 
@@ -341,11 +387,11 @@ graceful degradation (quickstart.md Scenario 7).
 
 - **Setup (Phase 1)**: No dependencies — start immediately
 - **Foundational (Phase 2)**: Depends on Setup — BLOCKS all user stories
-- **User Stories (Phases 3–9)**: All depend on Foundational
+- **User Stories (Phases 3–10)**: All depend on Foundational
   - US1 (P1) is the MVP and should land first
-  - US2–US4 (P2) build on US1; US5–US7 (P3) build on the P2 slices
+  - US2–US4 (P2) build on US1; US5–US7 (P3) build on the P2 slices; US8 (P2) builds on US2 + US3
   - Stories are independently testable and can be parallelized across teams after Foundational
-- **Polish (Phase 10)**: Depends on all targeted user stories
+- **Polish (Phase 11)**: Depends on all targeted user stories
 
 ### User Story Dependencies
 
@@ -356,6 +402,7 @@ graceful degradation (quickstart.md Scenario 7).
 - **US5 (P3)**: Foundational + US1 (memory/skills feed the loop's context)
 - **US6 (P3)**: Foundational + US3 (onboarding relies on tenancy/connectors)
 - **US7 (P3)**: Foundational + US1 (reliability wraps the run lifecycle)
+- **US8 (P2)**: Foundational + US2 (new thin surface adapters) + US3 (connector catalog, vaulted secrets, delegated identity, Rule of Two, approval) — adds surfaces/connectors as config, no kernel fork
 
 ### Within Each User Story
 
@@ -394,6 +441,23 @@ Task: "Implement Provider adapter in backend-go/internal/provider/anthropic.go"
 Task: "Implement cost meter in backend-go/internal/cost/meter.go"
 ```
 
+### User Story 8 (Phase 10)
+
+```bash
+# Tests first, in parallel:
+Task: "Telegram surface test in backend-go/tests/integration/telegram_surface_test.go"
+Task: "Zalo surface test in backend-go/tests/integration/zalo_surface_test.go"
+Task: "Connector OAuth vault/refresh/revoke test in backend-go/tests/integration/connector_oauth_test.go"
+
+# Then independent implementation pieces (disjoint files):
+Task: "Implement OAuth authorization service in backend-go/internal/connectors/oauth.go"
+Task: "Implement Telegram adapter in backend-go/internal/surfaces/telegram.go"
+Task: "Implement Zalo adapter in backend-go/internal/surfaces/zalo.go"
+Task: "Implement Gmail connector in backend-go/internal/connectors/gmail.go"
+Task: "Implement Drive connector in backend-go/internal/connectors/drive.go"
+Task: "Implement Calendar connector in backend-go/internal/connectors/calendar.go"
+```
+
 ---
 
 ## Implementation Strategy
@@ -412,13 +476,14 @@ Task: "Implement cost meter in backend-go/internal/cost/meter.go"
 2. US1 (kernel) → MVP
 3. US2 (surfaces) + US3 (trust) + US4 (cost/observability) → the P2 platform
 4. US5 (memory/skills) + US6 (config/deploy) + US7 (reliability/scale) → full platform
-5. Polish + go-live gate → production launch
+5. US8 (consumer surfaces + personal connectors) → the day-to-day-assistant experience
+6. Polish + go-live gate → production launch
 
 ### Parallel Team Strategy
 
 After Foundational completes, staff US1 first, then fan out US2/US3/US4 in parallel;
-US5/US6/US7 follow once their P2 prerequisites land. Each story integrates without
-breaking earlier stories.
+US5/US6/US7 follow once their P2 prerequisites land, and US8 follows once US2 + US3
+land. Each story integrates without breaking earlier stories.
 
 ---
 
