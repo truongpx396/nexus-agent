@@ -101,6 +101,7 @@ or a per-tenant permission-scoped connector (FR-007, FR-011).
 | `connector_id` | UUID (FK, nullable) | Set when tool is a connector |
 
 - **Note**: safety is judged **per invocation on parsed input**, not stored per tool (FR-009).
+- **Built-ins**: the platform ships built-in tools — workspace-restricted filesystem (`file_read`/`file_write`/`file_search`/…), a sandboxed shell/code-execution tool, and web search/fetch (egress-allowlisted, untrusted results) — governed by the same three gates and per-invocation safety (FR-056–FR-058).
 
 ### Model / Provider
 A pluggable backend accessed only through one abstraction with a normalized stream
@@ -138,7 +139,7 @@ per-tenant, RBAC-scoped catalog (FR-012).
 |-------|------|-------|
 | `connector_id` | UUID (PK) | |
 | `tenant_id` | UUID (FK) | RLS key |
-| `kind` | string | `jira` / `salesforce` / `github` / `gmail` / `gdrive` / `gcalendar` / … |
+| `kind` | string | `jira` / `salesforce` / `github` / `gmail` / `gdrive` / `gcalendar` / `notion` / … |
 | `secret_handle` | string | Vault handle; never the raw credential (FR-034) |
 | `scope` | jsonb | RBAC scope, per calling user |
 | `auth_kind` | enum | `tenant_service` (admin-configured) / `per_user_oauth` (personal, FR-052) |
@@ -307,8 +308,9 @@ timestamp (FR-040; Security section).
 | `created_at` | timestamptz | Immutable |
 
 ### Sandbox / Workspace
-Per-tenant isolated execution environment from a warm pool with TTLs and caps; the
-trust boundary (FR-047).
+Per-tenant isolated execution environment from a warm pool with TTLs, caps, and
+hard resource limits; the trust boundary for all code/shell execution
+(FR-047, FR-059).
 
 | Field | Type | Notes |
 |-------|------|-------|
@@ -317,7 +319,13 @@ trust boundary (FR-047).
 | `session_id` | UUID (FK, nullable) | Bound while in use |
 | `state` | enum | `warm` / `assigned` / `reclaimed` |
 | `ttl_expires_at` | timestamptz | Hard TTL → reclamation |
-| `isolation` | enum | `microvm` / `gvisor` / `container` (by topology) |
+| `isolation` | enum | `e2b` (default) / `microvm` / `gvisor` / `container` (by topology) |
+| `cpu_limit` | numeric | Hard CPU cap (cores); breach → terminate + reclaim |
+| `mem_limit_mb` | int | Hard memory cap; breach → terminate + reclaim |
+| `pid_limit` | int | Max process/PID count (fork-bomb guard) |
+| `wallclock_limit_s` | int | Hard wall-clock cap per execution |
+| `network_policy` | enum | `deny` (default) / `allowlist` (egress only via FR-037 domain allowlist) |
+| `reclaim_reason` | enum (nullable) | `ttl` / `terminal` / `stuck` / `cpu` / `mem` / `pid` / `wallclock` / `egress_denied` |
 
 ---
 

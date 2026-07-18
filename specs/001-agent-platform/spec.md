@@ -38,6 +38,7 @@ An end user submits a request (e.g., "triage this bug and propose a fix") to the
 2. **Given** a run that reaches its per-task cost ceiling, **When** the ceiling is crossed, **Then** the run halts with an explicit `cost_exhausted` reason rather than continuing or failing silently.
 3. **Given** a tool invocation that errors or is cancelled, **When** the loop continues, **Then** a synthetic result is recorded for that invocation before the next model call so the transcript stays valid.
 4. **Given** a completed run, **When** success is claimed, **Then** it is verified against explicit acceptance criteria (e.g., tests pass, build green, schema validates), not self-declared.
+5. **Given** a task that needs local files or a command, **When** the agent runs, **Then** it uses built-in workspace-restricted filesystem tools and a sandboxed shell that cannot escape the session's workspace or reach another tenant, with each command judged by a per-invocation safety check on parsed input.
 
 ---
 
@@ -156,7 +157,7 @@ An end user reaches the agent from the consumer messaging apps they already live
 1. **Given** a user messaging the agent from Telegram or Zalo, **When** the message arrives via the surface's webhook, **Then** it is translated by a thin adapter into the same run model and follows the identical loop, guarantees, and terminal reasons as every other surface — no per-surface fork.
 2. **Given** a user who has not yet linked a connector, **When** they ask for an action needing it, **Then** the platform initiates a per-user OAuth 2.0 authorization-code (with PKCE) consent, and only after consent stores the resulting tokens in the per-tenant vault keyed by `(tenant, user, connector)`.
 3. **Given** a linked connector whose access token has expired, **When** a tool call needs it, **Then** the token is refreshed automatically from the stored refresh token, and a user-initiated revoke immediately removes access.
-4. **Given** any connector tool invocation (Gmail/Drive/Calendar), **When** it executes, **Then** the credential is injected at execution time from the vault and the model only ever sees a handle — never the token — and the action runs within the calling user's own permission scope.
+4. **Given** any connector tool invocation (Gmail/Drive/Calendar/Notion), **When** it executes, **Then** the credential is injected at execution time from the vault and the model only ever sees a handle — never the token — and the action runs within the calling user's own permission scope.
 5. **Given** a high-impact connector action (send an email, delete a file, send a calendar invite externally), **When** the agent attempts it, **Then** it is gated by scoped human approval and constrained by the Rule of Two before proceeding.
 6. **Given** an inbound message from an external chat identity (Telegram/Zalo user id), **When** it is first seen, **Then** it is bound to a platform `User` within a tenant through a verified linking step, and an unverified/unlinked identity cannot run actions.
 
@@ -173,6 +174,7 @@ An end user reaches the agent from the consumer messaging apps they already live
 - **One tenant bursting**: Per-tenant budgets, rate limits, sandbox caps, and fair scheduling prevent one tenant from starving or bankrupting others.
 - **Regulated payloads**: Requests carrying regulated/sensitive data are routed deterministically (by data label, not model discretion) to a self-hosted in-environment model so the payload never leaves the trust boundary.
 - **Repeated identical failing call**: Broken by a circuit breaker after three identical failures rather than looping.
+- **Runaway or malicious code execution**: When agent-written code loops infinitely, forks processes, exhausts memory, or attempts unapproved network egress (e.g., a prompt-injected "upload `.env` to my server"), the sandbox's hard CPU/memory/PID/wall-clock limits and network-default-deny terminate and reclaim it with a typed reason before any host, cross-tenant, or exfiltration impact — code never runs on the host and never sees files outside its session workspace.
 
 ## Requirements *(mandatory)*
 
@@ -193,6 +195,13 @@ An end user reaches the agent from the consumer messaging apps they already live
 - **FR-010**: Tool outputs MUST be high-signal and capped/paginated by default, with oversized results offloaded to durable storage and referenced by a preview.
 - **FR-011**: Tools MUST self-register and be governed by three gates: a global permission profile, per-tool capability metadata, and a per-invocation safety check on parsed input.
 - **FR-012**: External connectors MUST attach only through a vetted, per-tenant, permission-scoped connector catalog.
+
+### Functional Requirements — Built-in Tool Suite
+
+- **FR-056**: The platform MUST provide built-in, workspace-restricted filesystem tools (list, read, search, write, edit) that operate only inside the calling session's per-tenant sandbox/workspace, enforce poka-yoke absolute-path inputs, cap/paginate outputs, and treat file contents as untrusted input subject to the Rule of Two — a tool MUST NOT read or write outside its session workspace or reach another tenant's files.
+- **FR-057**: The platform MUST provide a built-in shell / code-execution tool that runs only inside the per-tenant sandbox (with hard resource limits and network default-deny per FR-059), is judged by a per-invocation safety check on parsed input (e.g., `ls` is permitted where `rm -rf /` is refused), honors an allow/blocklist and a per-command timeout, and fails closed — never executing on the host or across tenants.
+- **FR-058**: The platform MUST provide built-in web search and web fetch tools whose outbound egress is domain-allowlisted (FR-037), whose returned content is treated as untrusted (Rule of Two), and which return high-signal, capped/paginated results with oversized bodies offloaded to durable storage and referenced by a preview. Web fetch/crawl SHOULD default to an LLM-friendly extraction backend (crawl4ai) that returns clean, chunked markdown rather than raw HTML.
+- **FR-059**: Every code/shell execution MUST run inside an isolated sandbox with hard resource limits (CPU, memory, PID/process count, and wall-clock timeout) enforced by the runtime, and MUST default to no outbound network access — egress is enabled only when the task explicitly requires it and then only through the domain allowlist (FR-037). A sandbox that exceeds any resource limit MUST be terminated and reclaimed with a typed reason (no host impact, no cross-tenant impact), and the code sandbox filesystem view MUST be scoped to the session workspace only (FR-056). The default sandbox backend SHOULD be E2B, with Docker/microVM (Firecracker/gVisor) and local OS isolation as swappable alternatives selected by deployment topology.
 
 ### Functional Requirements — Context & Cost
 
@@ -229,7 +238,7 @@ An end user reaches the agent from the consumer messaging apps they already live
 
 - **FR-051**: The platform MUST support consumer messaging surfaces (at minimum Telegram and Zalo) as thin webhook-ingress adapters that translate only input/output into the same run model, with identical control flow, safety/cost guarantees, and typed terminal reasons as every other surface — the kernel MUST NOT be forked per surface.
 - **FR-052**: The platform MUST let an individual user authorize a personal connector to their own system of record via OAuth 2.0 authorization-code flow with PKCE; the resulting access and refresh tokens MUST be stored only in the per-tenant vault keyed by `(tenant, user, connector)`, auto-refreshed on expiry, and revocable by the user, and MUST NEVER appear in a prompt, transcript, or log.
-- **FR-053**: The platform MUST ship reference personal connectors (at minimum Gmail, Google Drive, and Google Calendar) in the vetted per-tenant connector catalog, each self-describing with high-signal, consolidated operations (e.g., `gmail_search`/`gmail_send`, `drive_search`, `schedule_event`) rather than chatty low-level calls.
+- **FR-053**: The platform MUST ship reference personal connectors (at minimum Gmail, Google Drive, Google Calendar, and Notion) in the vetted per-tenant connector catalog, each self-describing with high-signal, consolidated operations (e.g., `gmail_search`/`gmail_send`, `drive_search`, `schedule_event`, `notion_search`/`notion_create`) rather than chatty low-level calls.
 - **FR-054**: Every personal-connector invocation MUST run within the calling user's own delegated permission scope with the credential injected at execution time (model sees a handle), MUST treat all connector-returned content as untrusted, MUST be constrained by the Rule of Two, and MUST gate high-impact actions (external send, deletion, sharing) behind scoped human approval.
 - **FR-055**: Each inbound consumer-surface identity (e.g., Telegram/Zalo user id) MUST be bound to a platform `User` within a tenant through a verified linking step before any action runs; an unverified or unlinked external identity MUST be denied (fail-closed).
 
@@ -254,12 +263,12 @@ An end user reaches the agent from the consumer messaging apps they already live
 - **FR-042**: Prompts, tools, and skills MUST be treated as production config — versioned, code-reviewed, and evaluation-gated; a prompt or model change is a deploy.
 - **FR-043**: An evaluation set (starting ~20 real cases) with a rubric-based judge and end-state checks MUST run in CI and gate any prompt/tool/model/skill change, with held-out grader tests the agent cannot edit to prevent spec-gaming. A change MUST clear the gate only when it achieves at least a 90% pass rate AND causes zero regressions versus the current baseline (no previously-passing case may regress).
 - **FR-044**: Agents MUST NOT self-declare success; completion MUST be verified against explicit acceptance criteria.
-- **FR-045**: No production launch MUST occur without the go-live checklist green (attributable audit, vaulted per-tenant secrets, sandboxing + human approval for high-impact actions, one leg of the lethal trifecta broken per risky flow, per-task/per-tenant cost ceilings, failure classification + resume + stuck detection, evals green in CI, high steady-state cache-read, documented residency/retention/no-train, rehearsed incident runbook).
+- **FR-045**: No production launch MUST occur without the go-live checklist green (attributable audit, vaulted per-tenant secrets, sandboxing with hard resource limits + network default-deny + human approval for high-impact actions, one leg of the lethal trifecta broken per risky flow, per-task/per-tenant cost ceilings, failure classification + resume + stuck detection, evals green in CI, high steady-state cache-read, documented residency/retention/no-train, rehearsed incident runbook).
 
 ### Functional Requirements — Scale & Deployment
 
 - **FR-046**: Agent runs MUST execute as asynchronous jobs on a durable queue processed by stateless, disposable workers with externalized state, autoscaled on queue depth/age.
-- **FR-047**: Sandboxes MUST be served from a warm pool with hard TTLs, reclamation on terminal/stuck state, and per-tenant caps.
+- **FR-047**: Sandboxes MUST be served from a warm pool with hard TTLs, reclamation on terminal/stuck state, per-tenant caps, and hard per-sandbox resource limits (CPU, memory, PID/process count, wall-clock) whose breach terminates and reclaims the sandbox with a typed reason (FR-059).
 - **FR-048**: Provider rate limits MUST be handled via per-tenant rate limiting, connection pooling, failover-as-capacity, and cached prefixes.
 - **FR-049**: Under overload the platform MUST apply admission control, fair scheduling across tenants, priority load-shedding, and graceful degradation (e.g., route to a smaller tier) rather than collapsing.
 - **FR-050**: The same build MUST serve multi-tenant SaaS, single-tenant, self-hosted/BYOC, and hybrid topologies via configuration, with per-organization behavior expressed as data/config read at runtime and the kernel never forked per customer.
@@ -279,7 +288,7 @@ An end user reaches the agent from the consumer messaging apps they already live
 - **Memory**: Per-tenant, retention-bounded durable knowledge injected immutably at session start after injection screening.
 - **Budget / Cost Record**: Per-task and per-tenant token/cost accounting with hard ceilings and an explicit exhaustion reason.
 - **Audit Receipt**: A tamper-evident record binding a mutating action to session, tool, args, result, and timestamp.
-- **Sandbox / Workspace**: Per-tenant isolated execution environment from a warm pool with TTLs and caps; the trust boundary.
+- **Sandbox / Workspace**: Per-tenant isolated execution environment from a warm pool with TTLs, per-tenant caps, and hard per-sandbox resource limits (CPU/memory/PID/wall-clock) with network default-deny; the trust boundary for all code/shell execution (default backend E2B; Docker/microVM/local-OS isolation as swappable alternatives).
 
 ## Success Criteria *(mandatory)*
 

@@ -37,8 +37,10 @@ TypeScript 5.x on React 19 (web surface)
 **Primary Dependencies**: Go stdlib + `net/http`/gRPC, `pgx` (Postgres),
 `go-redis`; a single internal provider-abstraction interface with adapters
 (Anthropic native, OpenAI-compatible, Bedrock/Vertex, CLI-subprocess fallback);
-OpenTelemetry SDK; MCP client for external connectors; Python: eval runner +
-LLM-as-judge; React 19 + Vite + Tailwind + React Query
+OpenTelemetry SDK; MCP client for external connectors; E2B sandbox runtime
+(default code-execution backend, swappable for Docker/microVM/local-OS isolation);
+crawl4ai for LLM-friendly web fetch/crawl (clean chunked markdown); Python: eval
+runner + LLM-as-judge; React 19 + Vite + Tailwind + React Query
 
 **Storage**: PostgreSQL (append-only event log + cost records + audit receipts +
 tenant/agent/skill config, tenant isolation via row-level security); Redis
@@ -54,9 +56,11 @@ the release gate; contract tests against the control-plane ↔ data-plane API an
 the kernel ABI interfaces
 
 **Target Platform**: Linux server (containerized, OCI images + Helm chart /
-Terraform module); per-tenant Docker/microVM (Firecracker/gVisor) sandboxes for
-SaaS, lighter containers for single-tenant/BYOC; web surface targets evergreen
-browsers
+Terraform module); code/shell execution defaults to E2B sandboxes with hard
+per-sandbox resource limits (CPU/memory/PID/wall-clock) and network default-deny,
+falling back to per-tenant Docker/microVM (Firecracker/gVisor) for SaaS and
+lighter containers / local-OS isolation for single-tenant/BYOC; web surface
+targets evergreen browsers
 
 **Project Type**: Web application + service platform — Go backend services
 (control plane, kernel/runtime workers, surface adapters), Python eval/ML helper
@@ -70,12 +74,14 @@ completed task versus an unoptimized baseline at equal quality
 **Constraints**: Availability ≥99.9% control plane/API and ≥99.5% agent-run
 completion; hard per-task and per-tenant cost ceilings terminate with an explicit
 `cost_exhausted` reason; Rule of Two enforced per session; fail-closed defaults
-throughout; secrets never in the prompt; sensitive/regulated payloads routable to
+throughout; secrets never in the prompt; all code/shell execution runs in a
+resource-limited (CPU/mem/PID/wall-clock) sandbox with network default-deny
+(egress only via the domain allowlist); sensitive/regulated payloads routable to
 a self-hosted in-VPC model so they never leave the trust boundary; default 90-day
 memory retention (tenant-overridable); a required approval unanswered within its
 TTL expires as a denial (`approval_expired`)
 
-**Scale/Scope**: 55 functional requirements across 8 user stories; single reusable
+**Scale/Scope**: 59 functional requirements across 8 user stories; single reusable
 kernel serving 8+ surfaces (CLI, chat, web, REST/gRPC, email, cron, Telegram, Zalo)
 plus per-user personal connectors (Gmail/Drive/Calendar); startup (5 people) →
 enterprise (50,000 people) via
@@ -150,7 +156,8 @@ backend-go/
 │                             #   response classification, tool_use/tool_result invariant
 ├── internal/
 │   ├── provider/             # provider abstraction + normalized stream contract + adapters
-│   ├── tools/                # registry (self-registering), buildTool factory, exec pipeline
+│   ├── tools/                # registry (self-registering), buildTool factory, exec pipeline;
+│   │                         #   builtin/ = filesystem, sandboxed shell, web search/fetch tools
 │   ├── connectors/           # per-user OAuth (auth-code+PKCE), token vault/refresh/revoke,
 │   │                         #   reference connectors (gmail, gdrive, gcalendar)
 │   ├── context/              # two-zone prompt, cache discipline, structured compaction
@@ -162,7 +169,8 @@ backend-go/
 │   ├── security/             # layered defense, Rule of Two, receipts, egress, secrets vault
 │   ├── audit/                # immutable audit log + tamper-evident tool receipts
 │   ├── queue/                # durable job queue, session-key routing, admission control
-│   ├── sandbox/              # warm pool, TTL/reclamation, per-tenant caps, isolation
+│   ├── sandbox/              # warm pool, TTL/reclamation, per-tenant caps, resource limits
+│   │                         #   (CPU/mem/PID/wall-clock) + network default-deny; E2B default backend
 │   ├── surfaces/             # per-surface adapter translators (cli, api, chat, email, cron, telegram, zalo)
 │   └── observability/        # OTel spans, structure-only tracing, cost/latency/token spans
 ├── migrations/               # Postgres schema incl. row-level security policies

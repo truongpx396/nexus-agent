@@ -147,7 +147,7 @@ paths:
         - name: name
           in: path
           required: true
-          schema: { type: string, enum: [gmail, gdrive, gcalendar] }
+          schema: { type: string, enum: [gmail, gdrive, gcalendar, notion] }
       responses:
         '200':
           description: Consent URL to complete authorization
@@ -182,7 +182,7 @@ paths:
         - name: name
           in: path
           required: true
-          schema: { type: string, enum: [gmail, gdrive, gcalendar] }
+          schema: { type: string, enum: [gmail, gdrive, gcalendar, notion] }
       responses:
         '204': { description: Connector revoked; vaulted tokens removed }
         '404': { description: No such link for this user }
@@ -255,7 +255,7 @@ components:
       type: object
       description: A per-user personal-connector link (tokens are vaulted, never returned)
       properties:
-        name: { type: string, enum: [gmail, gdrive, gcalendar] }
+        name: { type: string, enum: [gmail, gdrive, gcalendar, notion] }
         status: { type: string, enum: [active, expired, revoked] }
         scopes:
           type: array

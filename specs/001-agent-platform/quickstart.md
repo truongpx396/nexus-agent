@@ -54,6 +54,11 @@ curl -N localhost:8080/v1/runs/<session_id>/events   # SSE, structure only
   model call (inspect `pair_ref`; synthetic result on any error path).
 - Terminal event carries a typed `terminal_reason` from the enum in
   [contracts/kernel-abi.md](contracts/kernel-abi.md).
+- The agent uses built-in workspace-restricted filesystem tools and a sandboxed
+  shell; neither can escape the session workspace or reach another tenant (FR-056,
+  FR-057). Code runs in an E2B-default sandbox with hard CPU/memory/PID/wall-clock
+  limits and network default-deny — a runaway loop is killed and reclaimed, and an
+  unapproved egress attempt is denied (FR-059).
 - Force the ceiling (`budget_per_task_usd` small) → run ends `cost_exhausted` with
   an alert, never a runaway.
 
@@ -169,6 +174,7 @@ make link-surface SURFACE=telegram EXTERNAL_ID=<tg_user_id> USER=<user_id>
 #   send "summarize my unread email" from the Telegram/Zalo chat
 # Authorize a personal connector via per-user OAuth (auth-code + PKCE, FR-052):
 make connect-connector CONNECTOR=gmail USER=<user_id>     # opens consent URL, stores token in vault
+make connect-connector CONNECTOR=notion USER=<user_id>    # per-user OAuth for Notion
 curl -s localhost:8080/v1/connectors -H 'Authorization: Bearer <oidc>'   # list linked accounts
 curl -sX DELETE localhost:8080/v1/connectors/gmail -H 'Authorization: Bearer <oidc>'  # revoke
 ```

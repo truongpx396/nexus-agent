@@ -12,6 +12,12 @@ gates (FR-011). Safety is judged per invocation on parsed input (FR-009).
 ## Registration
 
 - Tools self-register at import time into the registry.
+- Built-in tools ship first-party: workspace-restricted filesystem
+  (`file_read`/`file_write`/`file_search`/…), a sandboxed shell/code-execution tool
+  (hard CPU/memory/PID/wall-clock limits, network default-deny — FR-059),
+  and web search/fetch (egress-allowlisted, untrusted results; crawl4ai backend
+  returning clean chunked markdown) — governed by the
+  three gates below and per-invocation safety (FR-056–FR-059).
 - Cache-aware ordering: `sort(builtins) ++ sort(mcpTools)` so the tool-schema
   catalog in the prompt prefix stays byte-stable (Constitution III).
 - External connectors register only through the vetted, per-tenant, RBAC-scoped
@@ -44,7 +50,9 @@ Ordered steps applied to every call (FR-007, FR-010):
 7. **PreToolUse hooks**
 8. **Permission resolution chain** (profile → capability → per-invocation)
 9. **Secret injection** at execution time from vault (model saw only a handle, FR-034)
-10. **Execute** in the per-tenant sandbox (egress allowlisted, FR-037)
+10. **Execute** in the per-tenant sandbox — default E2B backend, hard resource
+    limits (CPU/memory/PID/wall-clock; breach → terminate + reclaim) and network
+    default-deny (egress only via the domain allowlist, FR-037, FR-059)
 11. **Result budgeting** — cap/paginate (~25K tokens); spill oversized output to
     object storage, return a preview + "do not infer success from the preview"
     banner (FR-010)
