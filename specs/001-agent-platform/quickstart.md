@@ -153,13 +153,16 @@ make chaos-crash SESSION=<long_task>   # kill the worker mid-run
 # → job re-queues; resumes from last checkpoint, not from scratch
 make deploy-during-run                 # rainbow deploy while a run is active
 make load-test CONCURRENCY=5000        # drive past capacity
+make capacity-check                    # measure SC-008 SLAs + gate high-concurrency go-live
 ```
 
 **Expected**: the run resumes from its last checkpoint preserving partial work;
 in-flight runs are not cut over mid-task; under overload the system applies
 admission control / fair scheduling / load-shedding (429 + `Retry-After`) and
 degrades gracefully instead of collapsing; identical failing calls circuit-break
-within three attempts with logged reasons (no silent retries).
+within three attempts with logged reasons (no silent retries); the measured p95
+queue-wait / first-token / completion-rate meet the SC-008 targets under sustained
+concurrency.
 
 ## Scenario 8 — Consumer surfaces & personal connectors (User Story 8, P2)
 

@@ -35,7 +35,9 @@ Python 3.12 (eval harness, LLM-as-judge, context condenser / summarizer helpers)
 TypeScript 5.x on React 19 (web surface)
 
 **Primary Dependencies**: Go stdlib + `net/http`/gRPC, `pgx` (Postgres),
-`go-redis`; a single internal provider-abstraction interface with adapters
+`go-redis`; NATS JetStream (`nats.go`) as the default durable-queue + event-plane
+adapter behind an abstract queue port (SQS/Redis Streams/Temporal-class swappable);
+a single internal provider-abstraction interface with adapters
 (Anthropic native, OpenAI-compatible, Bedrock/Vertex, CLI-subprocess fallback);
 OpenTelemetry SDK; MCP client for external connectors; E2B sandbox runtime
 (default code-execution backend, swappable for Docker/microVM/local-OS isolation);
@@ -44,8 +46,10 @@ runner + LLM-as-judge; React 19 + Vite + Tailwind + React Query
 
 **Storage**: PostgreSQL (append-only event log + cost records + audit receipts +
 tenant/agent/skill config, tenant isolation via row-level security); Redis
-(session locks, rate-limit token buckets, sandbox-pool metadata, hot session
-cache); object storage (S3-compatible) for offloaded oversized tool outputs and
+(session-key serial locks, rate-limit token buckets, sandbox-pool metadata, hot
+session cache); NATS JetStream (durable job queue + persisted-consumer redelivery
++ structure-only run-event pub/sub, default adapter behind the swappable queue
+port); object storage (S3-compatible) for offloaded oversized tool outputs and
 large artifacts, referenced by path from the event log; external secrets vault
 (secrets injected at tool-execution time, never in the prompt)
 
@@ -168,7 +172,8 @@ backend-go/
 │   ├── tenancy/              # tenant context, RLS scoping, per-tenant budgets/limits
 │   ├── security/             # layered defense, Rule of Two, receipts, egress, secrets vault
 │   ├── audit/                # immutable audit log + tamper-evident tool receipts
-│   ├── queue/                # durable job queue, session-key routing, admission control
+│   ├── queue/                # durable job queue (NATS JetStream default adapter,
+│   │                         #   swappable port), session-key routing, admission control
 │   ├── sandbox/              # warm pool, TTL/reclamation, per-tenant caps, resource limits
 │   │                         #   (CPU/mem/PID/wall-clock) + network default-deny; E2B default backend
 │   ├── surfaces/             # per-surface adapter translators (cli, api, chat, email, cron, telegram, zalo)
@@ -177,6 +182,7 @@ backend-go/
 └── tests/
     ├── contract/             # kernel ABI + control/data-plane + run-API contract tests
     ├── integration/          # multi-tenant isolation, resume, cost-ceiling, HITL
+    ├── load/                 # concurrency + endurance-soak harness, SC-008 SLA assertions
     └── unit/
 
 ml-python/                    # Python 3.12 helper service (off the paying loop)
@@ -194,7 +200,8 @@ frontend/                     # React 19 web surface (a thin surface adapter)
 └── tests/
 
 deploy/                       # OCI image set + Helm chart / Terraform module;
-                              #   KEDA/HPA autoscale-on-queue-depth policy for BYOC
+                              #   KEDA/HPA autoscale-on-queue-depth policy for BYOC;
+                              #   load/ = concurrency-soak driver for the SC-008 capacity gate
 ```
 
 **Structure Decision**: Web-application + multi-service platform layout. The Go

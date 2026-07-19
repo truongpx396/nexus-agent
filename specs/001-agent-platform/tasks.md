@@ -79,7 +79,7 @@ ALL user stories build on. No user-story work begins until this phase completes.
 
 - [ ] T020 [P] Implement tenant context propagation + RLS session scoping (set `tenant_id` GUC per connection) in `backend-go/internal/tenancy/context.go` (FR-038)
 - [ ] T021 [P] Implement the Postgres event-log store (append event, read by session `seq`) in `backend-go/internal/queue/eventlog.go` (FR-006)
-- [ ] T022 [P] Implement the durable job queue + session-key router (per-session serial lock via Redis, cross-session concurrent) in `backend-go/internal/queue/queue.go` (FR-041, FR-046)
+- [ ] T022 [P] Implement the abstract durable-queue port with a NATS JetStream default adapter (persisted-consumer redelivery for re-queue-from-checkpoint) in `backend-go/internal/queue/queue.go`, plus a broker-agnostic Redis session-key serial lock (per-session serial, cross-session concurrent) in `backend-go/internal/queue/sessionlock.go` (FR-041, FR-046)
 - [ ] T023 [P] Implement structured error handling + typed failure taxonomy skeleton in `backend-go/internal/reliability/errors.go`
 - [ ] T024 [P] Implement OpenTelemetry span bootstrap (structure-only, no content) + logging config in `backend-go/internal/observability/otel.go` (FR-040)
 - [ ] T025 [P] Implement runtime configuration loader (tenant/agent/config read at runtime, never forked) in `backend-go/internal/tenancy/config.go` (FR-050)
@@ -158,7 +158,7 @@ identical control flow, safety/cost guarantees, and no per-surface fork (quickst
 - [ ] T055 [P] [US2] Implement the cron/scheduled-trigger surface adapter in `backend-go/internal/surfaces/cron.go`
 - [ ] T056 [P] [US2] Implement the gRPC run surface in `backend-go/internal/surfaces/grpc.go` (FR-028)
 - [ ] T057 [P] [US2] Implement the React web surface: run submission + SSE/WS event stream + polling in `frontend/src/services/runs.ts` and `frontend/src/pages/Run.tsx` (FR-031)
-- [ ] T058 [US2] Implement stream/poll progress emission shared by all surfaces (no blocked connection) in `backend-go/internal/surfaces/emit.go` (FR-031)
+- [ ] T058 [US2] Implement stream/poll progress emission shared by all surfaces (structure-only run events over the JetStream pub/sub plane, no blocked connection) in `backend-go/internal/surfaces/emit.go` (FR-031)
 
 **Checkpoint**: The same agent is reachable identically from multiple surfaces; US1 still works.
 
@@ -384,10 +384,48 @@ config-only additions; US1–US7 still work.
 - [ ] T144 [P] Add the cache-read steady-state measurement + >90% assertion to observability in `backend-go/internal/observability/cache_metrics.go` (FR-014)
 - [ ] T145 [P] Implement oversized tool-output offload to object storage with in-context preview + "do not infer success" caveat in `backend-go/internal/tools/offload.go` (FR-010)
 - [ ] T146 [P] Add SLA measurement + alerting (≥99.9% control plane / ≥99.5% run completion; p95 queue-wait, first-token) in `backend-go/internal/observability/sla.go` (SC-008, SC-011)
-- [ ] T147 [P] Author quickstart validation `Makefile` targets referenced by quickstart.md (`verify-isolation`, `verify-approval-timeout`, `verify-skill-promotion`, `chaos-crash`, `load-test`, `trace`, `seed-memory`, `onboard-org`, `deploy`, `connect-connector`)
+- [ ] T147 [P] Author quickstart validation `Makefile` targets referenced by quickstart.md (`verify-isolation`, `verify-approval-timeout`, `verify-skill-promotion`, `chaos-crash`, `load-test`, `capacity-check`, `trace`, `seed-memory`, `onboard-org`, `deploy`, `connect-connector`)
 - [ ] T148 [P] Add developer + operator documentation in `docs/` (architecture, deployment topologies, incident runbook)
 - [ ] T149 [P] Add unit-test coverage pass across `backend-go/tests/unit/` for kernel, cost, security, and reliability helpers
 - [ ] T150 Run the full quickstart.md scenarios 1–8 end-to-end and confirm all acceptance criteria pass
+
+---
+
+## Phase 12: Scale Validation & Capacity Hardening
+
+**Purpose**: Turn "designed to scale" into "measured to scale". Prove SC-008
+(thousands of concurrent long-running sessions, p95 queue-wait < 5s interactive /
+< 60s batch, first-token < 2s) under real load, then remove the specific
+bottlenecks that surface at thousands of concurrent sessions — the shared event-log
+write path, database connection exhaustion, the hot Redis session lock, sandbox-pool
+capacity, and external provider rate limits. This phase gates high-concurrency
+go-live (extends the T143 go-live gate).
+
+**Independent Test**: Ramp to the target concurrent-session count on a production-like
+environment and confirm the SC-008 SLAs hold; sustain that load for a multi-hour soak
+with zero resource-leak drift (goroutines / DB connections / memory) and no cascading
+collapse.
+
+### Load & soak harness
+
+- [ ] T151 [P] Implement the concurrency load harness that ramps to N concurrent long-running sessions and measures the SC-008 SLAs (p95 queue-wait interactive/batch, first-token, run-completion rate) with a pass/fail assertion in `backend-go/tests/load/concurrency_soak_test.go` and a driver script in `deploy/load/soak.js` (SC-008, FR-046) — wire to the `make load-test` target from T147
+- [ ] T152 [P] Implement the endurance soak (sustained target concurrency for hours) asserting zero drift in goroutines, DB/Redis/JetStream connections, and memory, and no p95 degradation over time in `backend-go/tests/load/endurance_test.go` (SC-008)
+
+### Bottleneck hardening
+
+- [ ] T153 Implement the event-log write-scaling strategy — partition the Postgres event log (by `tenant_id`/time), batch/pipeline appends, and split the hot append path from analytical reads — in `backend-go/migrations/0005_eventlog_partitioning.sql` and `backend-go/internal/queue/eventlog.go` (FR-006, SC-008)
+- [ ] T154 [P] Define and enforce the database connection budget — per-worker `pgx` pool sizing tied to worker concurrency, plus a PgBouncer (transaction-pooling) tier in front of Postgres — in `backend-go/internal/tenancy/config.go` and `deploy/helm/` (SC-008, FR-048)
+- [ ] T155 [P] Harden the Redis session-key lock for the hot path (extends T022) — bounded TTL with fencing-token renewal, defined mid-run Redis-failover behavior (fail-closed, re-queue), and thundering-herd/contention backoff — in `backend-go/internal/queue/sessionlock.go` (FR-041, FR-046)
+- [ ] T156 [P] Implement the sandbox-pool sizing model + demand-driven pool autoscaler (warm-headroom target vs. concurrent-run demand, per-tenant caps, reclamation under pressure) so pool capacity — not queue throughput — is a known, tunable ceiling in `backend-go/internal/sandbox/pool.go` and `deploy/helm/` (FR-047, SC-008)
+- [ ] T157 [P] Implement per-provider rate-limit accounting (TPM/RPM quota pooling per account/region) with 429/`Retry-After` backpressure that feeds the gateway admission controller (T121) instead of failing runs, in `backend-go/internal/provider/quota.go` (FR-027, FR-049)
+
+### Capacity gate
+
+- [ ] T158 Add the capacity/SLA validation gate (`make capacity-check`) that runs the load + soak harness, captures the measured SC-008 numbers into a capacity report, and blocks high-concurrency go-live on a regression, extending the go-live checklist in `backend-go/cmd/control-plane/golive.go` (SC-008, FR-045)
+
+**Checkpoint**: The SC-008 concurrency SLAs are measured (not just asserted), the
+known bottlenecks (event-log writes, DB connections, session lock, sandbox pool,
+provider quotas) are hardened, and high-concurrency go-live is gated on real numbers.
 
 ---
 
@@ -402,6 +440,7 @@ config-only additions; US1–US7 still work.
   - US2–US4 (P2) build on US1; US5–US7 (P3) build on the P2 slices; US8 (P2) builds on US2 + US3
   - Stories are independently testable and can be parallelized across teams after Foundational
 - **Polish (Phase 11)**: Depends on all targeted user stories
+- **Scale Validation & Capacity Hardening (Phase 12)**: Depends on US7 (reliability/scale primitives) being in place; runs against a production-like build. Gates high-concurrency go-live.
 
 ### User Story Dependencies
 
@@ -489,6 +528,7 @@ Task: "Implement Notion connector in backend-go/internal/connectors/notion.go"
 4. US5 (memory/skills) + US6 (config/deploy) + US7 (reliability/scale) → full platform
 5. US8 (consumer surfaces + personal connectors) → the day-to-day-assistant experience
 6. Polish + go-live gate → production launch
+7. Scale validation + capacity hardening (Phase 12) → measured SC-008 SLAs before high-concurrency go-live
 
 ### Parallel Team Strategy
 

@@ -55,19 +55,33 @@ Technical Context — so no `NEEDS CLARIFICATION` remains before Phase 1.
 
 ## 4. Concurrency & scale model
 
-- **Decision**: Agent runs are asynchronous jobs on a durable queue
-  (SQS/NATS/Redis Streams/Temporal-class), pulled by stateless disposable workers
-  with all state externalized. Route by `session_key` (tenant-first) →
-  per-session serial, cross-session concurrent. Autoscale on queue depth/age.
-  Admission control + weighted-fair scheduling + priority load-shedding + graceful
-  degradation at the gateway.
+- **Decision**: Agent runs are asynchronous jobs on a durable queue, pulled by
+  stateless disposable workers with all state externalized. Route by `session_key`
+  (tenant-first) → per-session serial, cross-session concurrent. Autoscale on queue
+  depth/age. Admission control + weighted-fair scheduling + priority load-shedding +
+  graceful degradation at the gateway.
+- **Queue tech**: The queue is an abstract port (`internal/queue/`) so it never
+  pins the platform to one broker. **NATS JetStream is the documented default
+  adapter**: a single embeddable Go binary that travels into a customer VPC with no
+  extra managed service (FR-030/BYOC), native ack/redelivery + persisted-consumer
+  state for survive-worker-death re-queue-from-checkpoint (FR-024), core pub/sub
+  that doubles as the structure-only `StreamEvents` fan-out plane (no Postgres
+  polling), and built-in flow control for backpressure/admission (FR-049).
+  SQS/Redis Streams/Temporal-class remain drop-in alternates behind the same port.
+- **Session serialization stays broker-agnostic**: JetStream ordering is
+  per-stream/subject, not "exactly one in-flight per `session_key`", so the
+  per-session serial lock is enforced by a Redis lock keyed on `session_key`
+  (independent of which broker carries the work) — NATS provides transport,
+  durability, and the event plane, not the session-serialization primitive.
 - **Rationale**: A run holds a "connection" for minutes across many round-trips and
   must survive deploys — it is a job, not a request. Externalized state makes a
   killed worker lose nothing (re-queue from checkpoint); session-key routing gives
   linear horizontal scale with no history races (FR-041, FR-046, FR-049).
 - **Alternatives considered**: Synchronous request-thread-per-run (rejected —
   blocks threads, dies on deploy); CPU-based autoscaling (rejected — workers are
-  I/O-bound on the model, CPU is a misleading signal).
+  I/O-bound on the model, CPU is a misleading signal); Redis Streams as the primary
+  broker (viable alternate, but weaker native pub/sub fan-out for the event plane
+  and an extra hop versus one embeddable JetStream binary in BYOC).
 
 ## 5. Sandbox isolation
 
@@ -199,7 +213,7 @@ Technical Context — so no `NEEDS CLARIFICATION` remains before Phase 1.
 | Kernel loop shape | Typed-union async-generator loop (§1) |
 | Provider dependency | One abstraction + normalized stream + failover (§2) |
 | Storage / isolation | Postgres + RLS, Redis, object storage (§3) |
-| Scale/concurrency | Durable queue + stateless workers, session-key routing (§4) |
+| Scale/concurrency | Durable queue (NATS JetStream default) + stateless workers, Redis session-key lock (§4) |
 | Sandbox | Warm per-tenant pool, TTL/reclamation (§5) |
 | Context/cache | Two-zone prompt, off-loop structured compaction (§6) |
 | Cost/routing | Per-turn meter + ceilings + deterministic two-axis routing (§7) |
