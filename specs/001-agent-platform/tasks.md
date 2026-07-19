@@ -113,9 +113,11 @@ terminal reason (per quickstart.md Scenario 1).
 - [ ] T031a [P] [US1] Integration test: the pre-model-call hygiene pass drops orphan `tool_result`s, backfills a synthetic result for any unpaired `tool_use`, and never sends malformed history to the provider in `backend-go/tests/integration/loop_hygiene_test.go` (FR-060)
 - [ ] T032 [P] [US1] Integration test: per-task cost ceiling breach terminates with `cost_exhausted` in `backend-go/tests/integration/cost_ceiling_test.go` (FR-017)
 - [ ] T033 [P] [US1] Unit test: response classifier returns `TOOL_CALLS`/`CONTENT`/`EMPTY` (no string matching) in `backend-go/kernel/classify_test.go` (FR-002)
+- [ ] T033a [P] [US1] Unit test: every model call carries a bounded `max_tokens` + stop sequences and the model's own reply is schema/grammar-constrained (no conversational filler) in `backend-go/internal/provider/output_controls_test.go` (FR-073)
 - [ ] T034 [P] [US1] Integration test: built-in filesystem tools are workspace-restricted (path-escape/`..` denied, no cross-tenant access), outputs capped/paginated, contents flagged untrusted in `backend-go/tests/integration/fs_tools_test.go` (FR-056)
 - [ ] T035 [P] [US1] Integration test: the built-in shell tool applies per-invocation parsed-input safety (`ls` allowed, `rm -rf /` denied), a per-command timeout, and runs only in the sandbox in `backend-go/tests/integration/shell_tool_test.go` (FR-057)
 - [ ] T035a [P] [US1] Integration test: a turn's tool calls are partitioned into a parallel concurrency-safe batch and serial exclusive calls, an exclusive call never runs concurrently, and results are returned in submission order (fail-closed to serial when metadata absent) in `backend-go/tests/integration/tool_concurrency_test.go` (FR-061)
+- [ ] T035b [P] [US1] Integration test: a re-issued state-changing tool call (retry / at-least-once redelivery / resume-from-checkpoint) executes its external effect exactly once via a durable tenant-scoped idempotency key in `backend-go/tests/integration/tool_idempotency_test.go` (FR-071)
 
 ### Implementation for User Story 1
 
@@ -127,9 +129,11 @@ terminal reason (per quickstart.md Scenario 1).
 - [ ] T040 [P] [US1] Implement a first concrete `Provider` adapter (Anthropic-native or CLI-subprocess fallback) with normalized chunk streaming in `backend-go/internal/provider/anthropic.go` (FR-027)
 - [ ] T040a [US1] Extend the normalized provider contract to persist and round-trip opaque `reasoning_content` (replayed on tool-call-referencing turns, kept out of user-visible output, treated as untrusted) in `backend-go/internal/provider/reasoning.go` (FR-064; depends on T015, T040)
 - [ ] T040b [P] [US1] Implement per-provider tool JSON-schema normalization (strip/rewrite keywords a backend rejects, e.g. `pattern`/`minLength`/`$ref`) in `backend-go/internal/provider/schema.go` (FR-065)
+- [ ] T040c [P] [US1] Implement output-side generation controls (bounded default `max_tokens` + stop sequences + schema/grammar-constrained reply decoding + terse-reasoning style) in `backend-go/internal/provider/output_controls.go` (FR-073)
 - [ ] T041 [P] [US1] Implement the tool execution pipeline (validate → permission → execute → result-budget → telemetry) + self-registering registry + `buildTool` factory in `backend-go/internal/tools/registry.go` (FR-007, FR-011)
 - [ ] T041a [US1] Implement per-turn tool-call concurrency partitioning (read-only/concurrency-safe/exclusive metadata → parallel-safe batch + serial exclusive calls, results yielded in submission order, fail-closed to serial) in `backend-go/internal/tools/concurrency.go` (FR-061, FR-008; depends on T041)
 - [ ] T041b [P] [US1] Implement deferred tool disclosure + `tool_search` (advertise name+description for deferred tools, load full schema on demand to keep the cache-stable prefix small) in `backend-go/internal/tools/deferred.go` (FR-062, FR-013)
+- [ ] T041c [US1] Implement per-effect idempotency-key derivation + durable tenant-scoped dedup in the tool execution pipeline (state-changing tools/connectors execute exactly once under retry/redelivery/resume) in `backend-go/internal/tools/idempotency.go` (FR-071; extends T041)
 - [ ] T042 [P] [US1] Implement built-in workspace-restricted filesystem tools (`file_list`/`file_read`/`file_search`/`file_write`/`file_edit`, poka-yoke absolute paths, capped/paginated output, contents treated as untrusted) in `backend-go/internal/tools/builtin/fs.go` (FR-056)
 - [ ] T043 [P] [US1] Implement the built-in shell / code-execution tool (sandbox-scoped with hard resource limits + network default-deny per FR-059, per-invocation parsed-input safety, allow/blocklist, per-command timeout, fail-closed) in `backend-go/internal/tools/builtin/shell.go` (FR-057, FR-059)
 - [ ] T044 [P] [US1] Implement per-turn token/cost metering attributed to task+tenant and the per-task ceiling check → `cost_exhausted` in `backend-go/internal/cost/meter.go` (FR-016, FR-017)
@@ -238,17 +242,23 @@ the eval set (quickstart.md Scenario 4).
 - [ ] T082 [P] [US4] Integration test: per-tenant ceiling breach stops further runs with cost-exhausted + alert in `backend-go/tests/integration/tenant_budget_test.go` (FR-017)
 - [ ] T083 [P] [US4] Integration test: trace view exposes structure/cost/latency/token spans without conversation content in `backend-go/tests/integration/trace_structure_test.go` (FR-040)
 - [ ] T084 [P] [US4] Eval-gate test: a regressing prompt/model change is blocked (≥90% pass AND zero regressions) in `ml-python/tests/test_eval_gate.py` (FR-043)
+- [ ] T084a [P] [US4] Integration test: feature-demand routing sends a sub-agent-spawning request to an at-or-above-floor model and a feature-light grounded-QA request to the cheaper tier, with above-floor features disabled on the fast tier in `backend-go/tests/integration/feature_routing_test.go` (FR-076, FR-077)
+- [ ] T084b [P] [US4] Integration test: the front-of-model response cache serves a repeat/near-duplicate request without a model call, never serves a cross-tenant hit, and is bypassable per request in `backend-go/tests/integration/response_cache_test.go` (FR-072)
 
 ### Implementation for User Story 4
 
 - [ ] T085 [P] [US4] Implement per-tenant budget enforcement (rolling sums vs `Budget`) + alert on breach in `backend-go/internal/cost/budget.go` (FR-017)
+- [ ] T085a [P] [US4] Implement the optional front-of-model response cache (exact + semantic vector match, similarity-threshold + TTL, tenant-scoped, non-state-dependent only, per-request bypass) in `backend-go/internal/cost/response_cache.go` (FR-072)
 - [ ] T086 [P] [US4] Implement deterministic two-axis model routing (data-label + difficulty, auditable, regulated → self-hosted) in `backend-go/internal/provider/routing.go` (FR-037)
+- [ ] T086a [P] [US4] Extend routing to capability-floor-aware feature-demand selection (route by the orchestration features a request will exercise — sub-agents/playbooks/heavy MCP → at-or-above-floor model — composed with data-label routing) in `backend-go/internal/provider/routing.go` (FR-076; extends T086)
+- [ ] T086b [P] [US4] Implement per-model-tier harness feature profiles (scope the exposed tool catalog and disable above-floor features like delegation below a model's reliability floor; config-driven, no kernel fork) in `backend-go/internal/provider/feature_tiers.go` (FR-077)
 - [ ] T087 [P] [US4] Implement quality-per-dollar (η$) and completions-per-million-token reporting in `backend-go/internal/cost/report.go` (FR-018)
 - [ ] T088 [P] [US4] Implement structure-only trace spans (decision structure + per-turn cost/latency/token) with content gated behind an authorized debug scope in `backend-go/internal/observability/trace.go` (FR-040)
 - [ ] T089 [US4] Implement the control-plane rate limits + budget checks + routing front door in `backend-go/cmd/control-plane/gateway.go` (FR-029)
 - [ ] T090 [P] [US4] Implement the eval runner (~20 real cases, end-state checks) in `ml-python/src/evals/runner.py` (FR-043)
 - [ ] T091 [P] [US4] Implement the LLM-as-judge rubric scorer + held-out grader protection in `ml-python/src/judge/rubric.py` (FR-043)
 - [ ] T092 [US4] Wire the eval gate into CI (≥90% pass AND zero regressions vs baseline) in `.github/workflows/ci.yml` and `ml-python/src/evals/gate.py` (FR-042, FR-043)
+- [ ] T092a [P] [US4] Implement model + connector/MCP version pinning with eval-gated adoption, supply-chain scope vetting, and revert-on-regression (a snapshot/version bump is an eval-gated deploy) in `backend-go/internal/provider/pinning.go` and `ml-python/src/evals/version_gate.py` (FR-078, FR-042, FR-043)
 
 **Checkpoint**: Cost governance, structure-only observability, and the CI eval gate are live; US1–US3 still work.
 
@@ -267,14 +277,19 @@ skill loading, and that an agent-proposed skill is not auto-promoted (quickstart
 
 - [ ] T093 [P] [US5] Integration test: memory injected at session start (not mid-session), tenant-scoped, screened first in `backend-go/tests/integration/memory_injection_test.go` (FR-019)
 - [ ] T094 [P] [US5] Integration test: agent-proposed skill requires human+eval gate, never auto-promoted in `backend-go/tests/integration/skill_promotion_test.go` (FR-021)
+- [ ] T094a [P] [US5] Integration test: a sub-agent runs read-only in an isolated context and returns only a capped distilled summary, its token spend is metered to the parent, and single-thread remains the default in `backend-go/tests/integration/subagent_firewall_test.go` (FR-079)
+- [ ] T094b [P] [US5] Integration test: the retrieval tier injects only the top-K reranked chunks and ingestion rejects an unauthenticated/anomalous document while retrieved content stays tagged untrusted in `backend-go/tests/integration/retrieval_precision_test.go` (FR-074, FR-075)
 
 ### Implementation for User Story 5
 
 - [ ] T095 [P] [US5] Implement file-first memory load (immutable snapshot at session start) + append (takes effect next session) in `backend-go/internal/memory/store.go` (FR-019)
+- [ ] T095a [P] [US5] Implement retrieval reranking + top-K (default ~2–3) injection for the FR-022 retrieval tier (configurable K and rerank strategy) in `backend-go/internal/memory/rerank.go` (FR-074, FR-022)
 - [ ] T096 [P] [US5] Implement injection/exfiltration screening + per-tenant retention enforcement (default 90-day, overridable) in `backend-go/internal/memory/screen.go` (FR-019)
+- [ ] T096a [P] [US5] Implement access-controlled, provenance-tracked corpus ingestion with a poisoning/backdoor anomaly scan before indexing (no open ingestion path; retrieved content stays untrusted) in `backend-go/internal/memory/ingest.go` (FR-075, FR-022)
 - [ ] T097 [P] [US5] Implement progressive-disclosure skills (brief description always visible, body on demand) in `backend-go/internal/skills/registry.go` (FR-020)
 - [ ] T098 [US5] Implement the skill promotion pipeline (propose → human/eval gate → version → promote; never auto) in `backend-go/internal/skills/promote.go` (FR-021)
 - [ ] T099 [P] [US5] Implement the off-loop structured context condenser/summarizer helper (cheaper model, keep recent + verbatim requirements) in `ml-python/src/condenser/compact.py` (FR-015)
+- [ ] T099a [P] [US5] Implement sub-agent delegation as isolated read-only context firewalls (own clean context, bounded ~1–2k-token distilled summary return, parent keeps sole decision authority, per-sub-agent token metering attributed to the parent, capability-floor gated; single-thread by default) in `backend-go/internal/context/subagent.go` (FR-079, FR-076, FR-016)
 - [ ] T100 [US5] Wire context compaction at ~80% budget into the kernel (two-zone prompt, byte-stable prefix) in `backend-go/internal/context/compaction.go` (FR-013, FR-014, FR-015)
 - [ ] T100a [P] [US5] Implement output-token slot reservation (bounded default `max_tokens`, escalate on truncation/`max_output_tokens` signal via a bounded retry, no silent truncation) in `backend-go/internal/context/token_budget.go` (FR-063)
 
