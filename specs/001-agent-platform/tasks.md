@@ -110,10 +110,12 @@ terminal reason (per quickstart.md Scenario 1).
 
 - [ ] T030 [P] [US1] Contract test for `POST /v1/runs` + `GET /v1/runs/{id}` + `/events` per run-api.openapi.yaml in `backend-go/tests/contract/run_api_test.go`
 - [ ] T031 [P] [US1] Integration test: multi-turn tool-using run pairs every `tool_use` with a `tool_result` (synthetic on error) in `backend-go/tests/integration/loop_pairing_test.go` (FR-003)
+- [ ] T031a [P] [US1] Integration test: the pre-model-call hygiene pass drops orphan `tool_result`s, backfills a synthetic result for any unpaired `tool_use`, and never sends malformed history to the provider in `backend-go/tests/integration/loop_hygiene_test.go` (FR-060)
 - [ ] T032 [P] [US1] Integration test: per-task cost ceiling breach terminates with `cost_exhausted` in `backend-go/tests/integration/cost_ceiling_test.go` (FR-017)
 - [ ] T033 [P] [US1] Unit test: response classifier returns `TOOL_CALLS`/`CONTENT`/`EMPTY` (no string matching) in `backend-go/kernel/classify_test.go` (FR-002)
 - [ ] T034 [P] [US1] Integration test: built-in filesystem tools are workspace-restricted (path-escape/`..` denied, no cross-tenant access), outputs capped/paginated, contents flagged untrusted in `backend-go/tests/integration/fs_tools_test.go` (FR-056)
 - [ ] T035 [P] [US1] Integration test: the built-in shell tool applies per-invocation parsed-input safety (`ls` allowed, `rm -rf /` denied), a per-command timeout, and runs only in the sandbox in `backend-go/tests/integration/shell_tool_test.go` (FR-057)
+- [ ] T035a [P] [US1] Integration test: a turn's tool calls are partitioned into a parallel concurrency-safe batch and serial exclusive calls, an exclusive call never runs concurrently, and results are returned in submission order (fail-closed to serial when metadata absent) in `backend-go/tests/integration/tool_concurrency_test.go` (FR-061)
 
 ### Implementation for User Story 1
 
@@ -121,8 +123,13 @@ terminal reason (per quickstart.md Scenario 1).
 - [ ] T037 [P] [US1] Implement the terminal-reason resolver (exhaustive `TerminalReason` enum) in `backend-go/kernel/terminal.go` (FR-004)
 - [ ] T038 [US1] Implement the async-generator kernel step loop (observe → think → act, dispatch on classification) in `backend-go/kernel/loop.go` (FR-001, FR-002; depends on T036, T037)
 - [ ] T039 [US1] Enforce the `tool_use`→`tool_result` invariant with synthetic results on cancel/error before the next model call in `backend-go/kernel/invariant.go` (FR-003)
+- [ ] T039a [US1] Implement the pre-model-call loop-hygiene pass (drop orphan `tool_result`s, backfill missing `tool_result`s, prune/condense stale tool observations) in `backend-go/kernel/hygiene.go` (FR-060; depends on T039)
 - [ ] T040 [P] [US1] Implement a first concrete `Provider` adapter (Anthropic-native or CLI-subprocess fallback) with normalized chunk streaming in `backend-go/internal/provider/anthropic.go` (FR-027)
+- [ ] T040a [US1] Extend the normalized provider contract to persist and round-trip opaque `reasoning_content` (replayed on tool-call-referencing turns, kept out of user-visible output, treated as untrusted) in `backend-go/internal/provider/reasoning.go` (FR-064; depends on T015, T040)
+- [ ] T040b [P] [US1] Implement per-provider tool JSON-schema normalization (strip/rewrite keywords a backend rejects, e.g. `pattern`/`minLength`/`$ref`) in `backend-go/internal/provider/schema.go` (FR-065)
 - [ ] T041 [P] [US1] Implement the tool execution pipeline (validate → permission → execute → result-budget → telemetry) + self-registering registry + `buildTool` factory in `backend-go/internal/tools/registry.go` (FR-007, FR-011)
+- [ ] T041a [US1] Implement per-turn tool-call concurrency partitioning (read-only/concurrency-safe/exclusive metadata → parallel-safe batch + serial exclusive calls, results yielded in submission order, fail-closed to serial) in `backend-go/internal/tools/concurrency.go` (FR-061, FR-008; depends on T041)
+- [ ] T041b [P] [US1] Implement deferred tool disclosure + `tool_search` (advertise name+description for deferred tools, load full schema on demand to keep the cache-stable prefix small) in `backend-go/internal/tools/deferred.go` (FR-062, FR-013)
 - [ ] T042 [P] [US1] Implement built-in workspace-restricted filesystem tools (`file_list`/`file_read`/`file_search`/`file_write`/`file_edit`, poka-yoke absolute paths, capped/paginated output, contents treated as untrusted) in `backend-go/internal/tools/builtin/fs.go` (FR-056)
 - [ ] T043 [P] [US1] Implement the built-in shell / code-execution tool (sandbox-scoped with hard resource limits + network default-deny per FR-059, per-invocation parsed-input safety, allow/blocklist, per-command timeout, fail-closed) in `backend-go/internal/tools/builtin/shell.go` (FR-057, FR-059)
 - [ ] T044 [P] [US1] Implement per-turn token/cost metering attributed to task+tenant and the per-task ceiling check → `cost_exhausted` in `backend-go/internal/cost/meter.go` (FR-016, FR-017)
@@ -185,6 +192,9 @@ approval and expires as denial (quickstart.md Scenario 3).
 - [ ] T062 [P] [US3] Integration test: Rule of Two blocks the third leg of the lethal trifecta unattended in `backend-go/tests/integration/rule_of_two_test.go` (FR-033)
 - [ ] T063 [P] [US3] Integration test: built-in web fetch/search is egress domain-allowlisted (blocked domain denied) and returned content is treated as untrusted under the Rule of Two in `backend-go/tests/integration/web_tool_test.go` (FR-058)
 - [ ] T064 [P] [US3] Unit test: secret handle never appears in prompt/transcript in `backend-go/internal/security/secrets_test.go` (FR-034)
+- [ ] T064a [P] [US3] Integration test: the egress sanitizer strips leaked `<tool_call>`/`<think>` fragments and stutter, and the credential scrubber redacts secret-shaped tokens from model/tool output before delivery in `backend-go/tests/integration/output_sanitizer_test.go` (FR-068)
+- [ ] T064b [P] [US3] Integration test: the input guard flags/blocks prompt-injection patterns (instruction-override, role-reassignment, delimiter escape) per mode and fails closed on a high-severity match in `backend-go/tests/integration/input_guard_test.go` (FR-069)
+- [ ] T064c [P] [US3] Integration test: an MCP server runs isolated, its content is treated as untrusted under the Rule of Two and never executed as inline shell, and it gets no host/cross-tenant/non-allowlisted network access in `backend-go/tests/integration/mcp_isolation_test.go` (FR-070)
 - [ ] T065 [P] [US3] Integration test: first-time sign-in JIT-provisions a `User`, and invalid/expired/wrong-issuer tokens are rejected in `backend-go/tests/integration/auth_provisioning_test.go` (FR-029, FR-035)
 
 ### Implementation for User Story 3
@@ -192,7 +202,9 @@ approval and expires as denial (quickstart.md Scenario 3).
 - [ ] T066 [P] [US3] Implement the secrets vault client injecting credentials at tool-execution time (model sees a handle), per-tenant isolated in `backend-go/internal/security/secrets.go` (FR-034)
 - [ ] T067 [P] [US3] Implement delegated-identity (act-as calling user) enforcement at the tool boundary in `backend-go/internal/security/identity.go` (FR-035)
 - [ ] T068 [P] [US3] Implement layered fail-closed defense (channel allowlist, autonomy mode, workspace restriction, shell allow/blocklist) in `backend-go/internal/security/defense.go` (FR-032)
+- [ ] T068a [P] [US3] Implement the egress output sanitizer (strip leaked `<tool_call>`/`<think>` markup, echoed system framing, duplicated stutter) + credential scrubber (redact secret-shaped tokens) applied to all model/tool output before delivery or persistence in `backend-go/internal/security/sanitize.go` (FR-068)
 - [ ] T069 [P] [US3] Implement the Rule of Two evaluator over {untrusted input, private data, external state change} per session in `backend-go/internal/security/rule_of_two.go` (FR-033)
+- [ ] T069a [P] [US3] Implement the inbound-message input guard (injection/jailbreak pattern screening with off/log/warn/block modes, fail-closed on high-severity match) in `backend-go/internal/security/input_guard.go` (FR-069)
 - [ ] T070 [P] [US3] Implement egress allowlist + by-class PII/PHI/secret redaction before leaving the trust boundary in `backend-go/internal/security/egress.go` (FR-037)
 - [ ] T071 [P] [US3] Implement built-in web search + web fetch tools (egress-allowlisted via T070, crawl4ai as the fetch/crawl backend returning clean chunked markdown, untrusted-content handling under the Rule of Two, high-signal capped/paginated results, oversized bodies offloaded) in `backend-go/internal/tools/builtin/web.go` (FR-058, FR-037, FR-033)
 - [ ] T072 [P] [US3] Implement the immutable audit log + HMAC tamper-evident tool receipts in `backend-go/internal/audit/receipt.go` (FR-040)
@@ -205,6 +217,7 @@ approval and expires as denial (quickstart.md Scenario 3).
 - [ ] T079 [P] [US3] Implement service/machine identity for the CLI & cron surfaces (OIDC client-credentials service tokens carrying a delegated, least-privilege scope) in `backend-go/internal/security/service_identity.go` (FR-035)
 - [ ] T080 [P] [US3] Implement the web-surface OAuth2/PKCE login + redirect callback + session handling in `frontend/src/services/auth.ts` and `frontend/src/pages/Login.tsx` (FR-029)
 - [ ] T081 [US3] Implement the per-tenant permission-scoped connector catalog (MCP) in `backend-go/internal/tools/connectors.go` (FR-012)
+- [ ] T081a [US3] Enforce the MCP isolation boundary (MCP servers as isolated untrusted processes reached only via the catalog; MCP content untrusted under the Rule of Two, never executed as inline shell; no host/cross-tenant/non-allowlisted egress) in `backend-go/internal/tools/mcp_isolation.go` (FR-070, FR-012, FR-033; extends T081)
 
 **Checkpoint**: Enterprise trust surface enforced at the data layer; US1–US2 still work.
 
@@ -263,6 +276,7 @@ skill loading, and that an agent-proposed skill is not auto-promoted (quickstart
 - [ ] T098 [US5] Implement the skill promotion pipeline (propose → human/eval gate → version → promote; never auto) in `backend-go/internal/skills/promote.go` (FR-021)
 - [ ] T099 [P] [US5] Implement the off-loop structured context condenser/summarizer helper (cheaper model, keep recent + verbatim requirements) in `ml-python/src/condenser/compact.py` (FR-015)
 - [ ] T100 [US5] Wire context compaction at ~80% budget into the kernel (two-zone prompt, byte-stable prefix) in `backend-go/internal/context/compaction.go` (FR-013, FR-014, FR-015)
+- [ ] T100a [P] [US5] Implement output-token slot reservation (bounded default `max_tokens`, escalate on truncation/`max_output_tokens` signal via a bounded retry, no silent truncation) in `backend-go/internal/context/token_budget.go` (FR-063)
 
 **Checkpoint**: Memory + skills compound capability; US1–US4 still work.
 
@@ -307,7 +321,9 @@ graceful degradation (quickstart.md Scenario 7).
 ### Tests for User Story 7 ⚠️
 
 - [ ] T108 [P] [US7] Integration test: worker crash mid-run resumes from last checkpoint, preserving partial work in `backend-go/tests/integration/resume_test.go` (FR-024)
+- [ ] T108a [P] [US7] Integration test: a fatal error path resolves to a degraded success returning the best partial artifact from the last checkpoint with the correct typed reason (never a bare crash) in `backend-go/tests/integration/autosubmit_test.go` (FR-067)
 - [ ] T109 [P] [US7] Integration test: identical failing call circuit-breaks within three attempts with logged reasons (no silent retries) in `backend-go/tests/integration/circuit_breaker_test.go` (FR-023)
+- [ ] T109a [P] [US7] Integration test: a stalled model stream is aborted by the idle watchdog and retried once non-streaming without stalling the run in `backend-go/tests/integration/idle_watchdog_test.go` (FR-066)
 - [ ] T110 [P] [US7] Integration test: deploy during an active run does not cut it over mid-task in `backend-go/tests/integration/rainbow_deploy_test.go` (FR-026)
 - [ ] T111 [P] [US7] Integration test: overload triggers admission control / fair scheduling / load-shedding (429 + `Retry-After`) in `backend-go/tests/integration/overload_test.go` (FR-049)
 - [ ] T112 [P] [US7] Integration test: runaway code (infinite loop / fork bomb / memory blow-up) is killed by the sandbox CPU/memory/PID/wall-clock caps with a typed reclaim reason, and a sandbox egress attempt to a non-allowlisted domain is denied in `backend-go/tests/integration/sandbox_limits_test.go` (FR-059, FR-047, FR-037)
@@ -317,8 +333,10 @@ graceful degradation (quickstart.md Scenario 7).
 - [ ] T113 [P] [US7] Implement the typed failure classifier + backoff-with-jitter retry policy in `backend-go/internal/reliability/classify.go` (FR-023)
 - [ ] T114 [P] [US7] Implement the circuit breaker (break after 3 identical failing calls, logged reasons) in `backend-go/internal/reliability/breaker.go` (FR-023)
 - [ ] T115 [P] [US7] Implement durable checkpointing + resume-from-last-checkpoint (Postgres event log + WAL) in `backend-go/internal/reliability/checkpoint.go` (FR-024)
+- [ ] T115a [P] [US7] Implement autosubmit / degraded-success on fatal & terminal error paths (return the best partial artifact from the last checkpoint with the correct typed reason instead of crashing) in `backend-go/internal/reliability/autosubmit.go` (FR-067, FR-024, FR-004; depends on T115)
 - [ ] T116 [P] [US7] Implement stuck detection (repeated actions / oscillation / zero net change over K steps) breaking the loop with a clear reason in `backend-go/internal/reliability/stuck.go` (FR-025)
 - [ ] T117 [P] [US7] Implement provider retry → cooldown → failover across backends in `backend-go/internal/provider/failover.go` (FR-027)
+- [ ] T117a [P] [US7] Implement the streaming idle watchdog + non-streaming fallback (abort a no-progress stream after a bounded interval, retry once non-streaming, disabled while speculative/streaming tool execution is active) in `backend-go/internal/provider/watchdog.go` (FR-066)
 - [ ] T118 [P] [US7] Implement the warm sandbox pool (hard TTLs, reclamation on terminal/stuck, per-tenant caps, isolation by topology, E2B default backend) in `backend-go/internal/sandbox/pool.go` (FR-047)
 - [ ] T119 [P] [US7] Implement per-sandbox resource-limit enforcement (CPU/memory/PID/wall-clock caps → terminate + reclaim with a typed reason) and network default-deny (egress only via the FR-037 domain allowlist) with E2B as the default backend and Docker/microVM (Firecracker/gVisor)/local-OS isolation as swappable fallbacks in `backend-go/internal/sandbox/limits.go` (FR-059, FR-047, FR-037)
 - [ ] T120 [P] [US7] Implement per-tenant rate limiting + connection pooling + cached-prefix handling in `backend-go/internal/queue/ratelimit.go` (FR-048)

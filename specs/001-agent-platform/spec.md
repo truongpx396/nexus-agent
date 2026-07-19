@@ -175,6 +175,10 @@ An end user reaches the agent from the consumer messaging apps they already live
 - **Regulated payloads**: Requests carrying regulated/sensitive data are routed deterministically (by data label, not model discretion) to a self-hosted in-environment model so the payload never leaves the trust boundary.
 - **Repeated identical failing call**: Broken by a circuit breaker after three identical failures rather than looping.
 - **Runaway or malicious code execution**: When agent-written code loops infinitely, forks processes, exhausts memory, or attempts unapproved network egress (e.g., a prompt-injected "upload `.env` to my server"), the sandbox's hard CPU/memory/PID/wall-clock limits and network-default-deny terminate and reclaim it with a typed reason before any host, cross-tenant, or exfiltration impact — code never runs on the host and never sees files outside its session workspace.
+- **Malformed or orphaned tool history**: If a turn leaves a `tool_use` without a paired `tool_result` (or vice versa), a hygiene pass repairs the transcript — backfilling synthetic results and dropping orphans — before the next model call, so a structurally invalid request is never sent to the provider.
+- **Stalled or non-conforming model stream**: A streaming response that stops making progress is aborted by an idle watchdog and retried once non-streaming, so a hung or malformed upstream cannot stall a run indefinitely.
+- **Direct prompt injection in the user message**: The user-input channel itself is screened by an input guard for instruction-override / role-reassignment / delimiter-escape patterns and fails closed on a high-severity match — the direct channel is not exempt from untrusted-content handling.
+- **Leaked control markup or secrets in output**: All model/tool output is sanitized before delivery — leaked `<tool_call>`/`<think>` fragments and stutter are stripped and secret-shaped tokens are redacted — so raw control markup or credentials never reach a user or a log.
 
 ## Requirements *(mandatory)*
 
@@ -186,6 +190,7 @@ An end user reaches the agent from the consumer messaging apps they already live
 - **FR-004**: The loop MUST end in an explicit, typed terminal reason (e.g., completed, max turns, cost exhausted, error, aborted, prompt too long, hook stopped, approval expired) that callers can handle exhaustively.
 - **FR-005**: The platform MUST allow a human to steer or correct an in-flight run through a mid-run input mechanism.
 - **FR-006**: Agent, tool, model, and configuration objects MUST be immutable; the only mutable runtime state MUST be the conversation state, changed only by appending typed events to an append-only log.
+- **FR-060**: Before each model call the loop MUST run a hygiene pass over conversation state — dropping orphaned `tool_result`s (results with no matching `tool_use`), backfilling a synthetic result for any `tool_use` still missing one, and pruning or condensing stale tool observations — so every request sent to the provider is structurally valid and no malformed history reaches the model.
 
 ### Functional Requirements — Tools
 
@@ -195,6 +200,8 @@ An end user reaches the agent from the consumer messaging apps they already live
 - **FR-010**: Tool outputs MUST be high-signal and capped/paginated by default, with oversized results offloaded to durable storage and referenced by a preview.
 - **FR-011**: Tools MUST self-register and be governed by three gates: a global permission profile, per-tool capability metadata, and a per-invocation safety check on parsed input.
 - **FR-012**: External connectors MUST attach only through a vetted, per-tenant, permission-scoped connector catalog.
+- **FR-061**: Each tool MUST carry concurrency metadata (at least: read-only, concurrency-safe, exclusive). Within a single turn the platform MUST partition the requested tool calls into concurrency-safe batches that MAY execute in parallel and exclusive calls that execute serially, MUST NOT run an exclusive call concurrently with any other call, and MUST return every result in the model's original submission order regardless of completion order — failing closed to fully serial execution when the metadata is absent (per FR-008).
+- **FR-062**: When the available tool/connector catalog is large, the platform MUST support deferred tool disclosure — advertising only a name and brief description for deferred tools and loading a full tool schema on demand through a tool-search capability — so the cache-stable prompt prefix (FR-013) stays small and the model is not flooded with unused tool definitions.
 
 ### Functional Requirements — Built-in Tool Suite
 
@@ -211,6 +218,7 @@ An end user reaches the agent from the consumer messaging apps they already live
 - **FR-016**: The platform MUST meter input and output tokens per turn and attribute cost to the requesting task chain and tenant.
 - **FR-017**: The platform MUST enforce hard per-task and per-tenant cost ceilings that terminate with an explicit cost-exhausted reason; iteration count and wall-clock time are backstops only.
 - **FR-018**: Quality-per-dollar and completions-per-million-tokens MUST be reported alongside quality in every release gate.
+- **FR-063**: The platform MUST reserve an explicit output-token budget per model call (a bounded default `max_tokens`) and, on a truncation / `max_output_tokens` signal, MUST escalate that reservation on a bounded retry rather than silently truncating — recovering usable context headroom without emitting partial, unterminated output.
 
 ### Functional Requirements — Memory & Skills
 
@@ -226,6 +234,10 @@ An end user reaches the agent from the consumer messaging apps they already live
 - **FR-025**: Stuck detection (repeated actions, oscillation, or zero net change over K steps) MUST break the loop and terminate with a clear reason.
 - **FR-026**: Deploys MUST NOT cut a running agent over mid-task (rolling/rainbow deploy).
 - **FR-027**: Provider access MUST go through one abstraction with a single normalized stream contract, with retry → cooldown → failover across multiple backends; native tool-calling only (no parsing tools from free-form text).
+- **FR-064**: The normalized provider contract MUST preserve and round-trip provider reasoning/thinking segments opaquely — persisting any `reasoning_content` alongside the turn and replaying it on subsequent calls that reference prior tool calls — because some providers reject tool-call history whose reasoning segments are dropped; reasoning content MUST be treated as untrusted and excluded from user-visible output unless explicitly authorized.
+- **FR-065**: The provider abstraction MUST normalize tool JSON schemas per backend (stripping or rewriting keywords a given provider rejects, e.g. unsupported `pattern`, `minLength`, or `$ref`) so one tool definition works across providers without a per-provider tool fork.
+- **FR-066**: Streaming model calls MUST be guarded by an idle watchdog that aborts a stalled stream after a bounded no-progress interval and retries once in non-streaming mode (the fallback disabled while speculative/streaming tool execution is active), so a hung or non-conforming upstream response cannot stall a run indefinitely.
+- **FR-067**: Every fatal or terminal error path MUST resolve to a degraded success that returns the best partial artifact captured from the last durable checkpoint (FR-024) rather than a bare crash, and MUST still terminate with the appropriate typed reason (FR-004).
 
 ### Functional Requirements — Surfaces & Control Plane
 
@@ -250,6 +262,9 @@ An end user reaches the agent from the consumer messaging apps they already live
 - **FR-035**: The agent MUST act with the calling user's permission scope (delegated identity), never a superuser service account, enforced at the tool boundary.
 - **FR-036**: High-impact actions (payments, deletions, external sends, production changes) MUST be gated by scoped human approval. An approval that is not granted within a configurable timeout MUST expire as a denial (fail-closed), terminating the run with a typed `approval_expired` reason recorded in the audit log; the high-impact action MUST NOT proceed on timeout.
 - **FR-037**: Outbound domains MUST be allowlisted and sensitive data (PII/secrets/PHI/card data) MUST be masked by class before leaving the trust boundary; regulated payloads MUST be routable to a self-hosted in-environment model.
+- **FR-068**: All model output and tool output MUST pass an egress sanitizer before delivery to a user or persistence — stripping leaked control markup (e.g., `<tool_call>` / `<think>` fragments, echoed system framing, duplicated stutter) — and a credential scrubber MUST redact secret-shaped tokens (keys, bearer tokens, connector credentials) from any output, as defense-in-depth complementing vault-only secret handling (FR-034).
+- **FR-069**: Inbound user messages MUST pass a configurable input guard that screens for prompt-injection / jailbreak patterns (e.g., instruction-override, role-reassignment, delimiter/system-tag escapes) with selectable enforcement modes (off / log / warn / block); this complements the untrusted-content handling for tool and retrieved content (FR-033) by covering the direct user-input channel, and MUST fail closed in block mode on a matched high-severity pattern.
+- **FR-070**: External MCP (Model Context Protocol) servers MUST run as isolated, untrusted processes reached only through the vetted per-tenant connector catalog (FR-012); MCP-provided content MUST be treated as untrusted data under the Rule of Two (FR-033) and MUST NEVER be executed as inline shell or trusted instructions, and an MCP server MUST NOT gain host, cross-tenant, or non-allowlisted network access (FR-037, FR-059).
 
 ### Functional Requirements — Multi-Tenancy, Audit & Observability
 
