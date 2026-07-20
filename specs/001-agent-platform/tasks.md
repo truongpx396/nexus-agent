@@ -358,6 +358,7 @@ graceful degradation (quickstart.md Scenario 7).
 - [ ] T118 [P] [US7] Implement the warm sandbox pool (hard TTLs, reclamation on terminal/stuck, per-tenant caps, isolation by topology, E2B default backend) in `backend-go/internal/sandbox/pool.go` (FR-047)
 - [ ] T119 [P] [US7] Implement per-sandbox resource-limit enforcement (CPU/memory/PID/wall-clock caps → terminate + reclaim with a typed reason) and network default-deny (egress only via the FR-037 domain allowlist) with E2B as the default backend and Docker/microVM (Firecracker/gVisor)/local-OS isolation as swappable fallbacks in `backend-go/internal/sandbox/limits.go` (FR-059, FR-047, FR-037)
 - [ ] T120 [P] [US7] Implement per-tenant rate limiting + connection pooling + cached-prefix handling in `backend-go/internal/queue/ratelimit.go` (FR-048)
+- [ ] T120a [P] [US7] Integration test: a throttled provider (mocked 429) is transparently retried/rerouted at the provider-abstraction layer without a surface-level error; per-tenant rate-limit counter increments correctly and a ceiling breach stops further provider calls for that tenant (isolated from gateway admission control) in `backend-go/tests/integration/provider_ratelimit_test.go` (FR-048)
 - [ ] T121 [US7] Implement admission control + weighted-fair scheduling + priority load-shedding + graceful degradation at the gateway in `backend-go/cmd/control-plane/admission.go` (FR-049)
 - [ ] T122 [US7] Implement rainbow (rolling) deploy support keeping in-flight runs alive in `backend-go/internal/queue/deploy.go` and `deploy/helm/` (FR-026)
 - [ ] T123 [US7] Implement autoscale-on-queue-depth/age worker signals in `backend-go/cmd/runtime-worker/scale.go` (FR-046)
@@ -416,13 +417,14 @@ config-only additions; US1–US7 still work.
 
 **Purpose**: Hardening, docs, and the go-live gate spanning all stories
 
-- [ ] T143 [P] Implement the go-live checklist assertion (`make go-live-check`) covering audit, vaulted secrets, sandboxing+approval, trifecta, cost ceilings, reliability, evals-green, cache-read, residency/retention, runbook in `backend-go/cmd/control-plane/golive.go` (FR-045)
+- [ ] T143 [P] Implement the go-live checklist assertion (`make go-live-check`) covering audit, vaulted secrets, sandboxing+approval, trifecta, cost ceilings, reliability, evals-green, cache-read, residency/retention, runbook in `backend-go/cmd/control-plane/golive.go` (FR-045); the check MUST assert that the incident runbook (`docs/runbook.md`) and residency/retention policy doc (`docs/data-policy.md`) exist and are non-empty
 - [ ] T144 [P] Add the cache-read steady-state measurement + >90% assertion to observability in `backend-go/internal/observability/cache_metrics.go` (FR-014)
 - [ ] T144a [P] Integration test: an oversized tool output is offloaded to object storage and returned as an in-context preview carrying the "do not infer success from the preview" caveat (referenced by path from the event log) in `backend-go/tests/integration/output_offload_test.go` (FR-010)
 - [ ] T145 [P] Implement oversized tool-output offload to object storage with in-context preview + "do not infer success" caveat in `backend-go/internal/tools/offload.go` (FR-010)
 - [ ] T146 [P] Add SLA measurement + alerting (≥99.9% control plane / ≥99.5% run completion; p95 queue-wait, first-token) in `backend-go/internal/observability/sla.go` (SC-008, SC-011)
 - [ ] T147 [P] Author quickstart validation `Makefile` targets referenced by quickstart.md (`verify-isolation`, `verify-approval-timeout`, `verify-skill-promotion`, `chaos-crash`, `load-test`, `capacity-check`, `trace`, `seed-memory`, `onboard-org`, `deploy`, `connect-connector`)
-- [ ] T148 [P] Add developer + operator documentation in `docs/` (architecture, deployment topologies, incident runbook)
+- [ ] T148 [P] Author developer + operator documentation in `docs/` including: architecture overview, deployment topologies, and a rehearsed behavioral-incident runbook at `docs/runbook.md` (covering detection, triage, mitigation, and rollback steps for the five most critical failure modes: kernel loop stall, cost ceiling breach, cross-tenant data leak, approval TTL expiry under load, and provider outage) referenced by the T143 go-live gate (FR-045)
+- [ ] T148a [P] Author the data-residency, retention, and no-train policy document at `docs/data-policy.md` (covering per-deployment-tier data residency / region-pinning options, the 90-day default memory retention and tenant-override process, the no-training guarantee, and the DSAR support procedure for GDPR/CCPA-tier tenants) referenced by the T143 go-live gate (FR-045)
 - [ ] T149 [P] Add unit-test coverage pass across `backend-go/tests/unit/` for kernel, cost, security, and reliability helpers
 - [ ] T150 Run the full quickstart.md scenarios 1–8 end-to-end and confirm all acceptance criteria pass
 

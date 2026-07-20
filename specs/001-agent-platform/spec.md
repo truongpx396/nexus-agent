@@ -30,7 +30,7 @@ An end user submits a request (e.g., "triage this bug and propose a fix") to the
 
 **Why this priority**: This is the irreducible core — a reliable single-agent loop that completes tasks under a cost bound. Without it, nothing else has value. It is a viable MVP on its own: a user can get real work done safely.
 
-**Independent Test**: Give the agent a multi-turn task requiring at least one tool call; confirm it holds the conversation, pairs every tool invocation with a result, stops on the configured cost cap, and reports a typed terminal reason (completed / cost exhausted / max turns / error / aborted).
+**Independent Test**: Give the agent a multi-turn task requiring at least one tool call; confirm it holds the conversation, pairs every tool invocation with a result, stops on the configured cost cap, and reports a typed terminal reason — all 8 values must be exhaustively handled: `completed` / `max_turns` / `cost_exhausted` / `error` / `aborted` / `prompt_too_long` / `hook_stopped` / `approval_expired` (per FR-004 and kernel-abi.md).
 
 **Acceptance Scenarios**:
 
@@ -324,12 +324,12 @@ An end user reaches the agent from the consumer messaging apps they already live
 
 - **SC-001**: A user can complete a representative multi-turn, tool-using task end-to-end through the agent, with completion verified against explicit acceptance criteria on at least 90% of a 20-case evaluation set.
 - **SC-002**: 100% of runs terminate with an explicit typed reason; no run exceeds its per-task or per-tenant cost ceiling, and ceiling breaches always stop with a cost-exhausted reason plus an alert (zero surprise overruns).
-- **SC-003**: Steady-state turns achieve greater than 90% cache-read, and orchestration delivers a materially lower cost and latency per completed task versus an unoptimized baseline (target directionally: roughly −40% cost and −40% latency at equal quality).
+- **SC-003**: Steady-state turns achieve greater than 90% cache-read (measurable gate: ≥90% in CI observability). Orchestration cost and latency per completed task must be measurably lower than an unoptimized baseline; the directional target is −40% cost and −40% latency at equal quality (aspirational benchmark, not a binary pass/fail gate — tracked as η$ and CPM metrics per FR-018 and SC-009).
 - **SC-004**: 100% of actions are attributable to a specific user and tenant in an immutable audit log, and cross-tenant data/secret/budget access is impossible in isolation tests (zero leakage).
 - **SC-005**: 100% of high-impact actions (payments, deletions, external sends, production changes) are blocked pending scoped human approval, and no session performs all three legs of the lethal trifecta unattended.
 - **SC-006**: A run interrupted mid-task resumes from its last checkpoint and completes without restarting from scratch; a deploy during active runs cuts over zero in-flight tasks mid-task.
 - **SC-007**: The same build is deployed in at least two topologies (e.g., multi-tenant SaaS and self-hosted) purely by configuration, and a new organization is onboarded with zero kernel code changes.
-- **SC-008**: The platform sustains thousands of concurrent long-running sessions with a met queue-wait SLA — p95 queue-wait under 5s for interactive runs and under 60s for batch/async runs, with first-token latency under 2s for interactive runs — and under overload it degrades gracefully (admission control / fair scheduling / load-shedding) with zero cascading collapse.
+- **SC-008**: The platform sustains ≥5,000 concurrent long-running sessions with a met queue-wait SLA — p95 queue-wait under 5s for interactive runs and under 60s for batch/async runs, with first-token latency under 2s for interactive runs — and under overload it degrades gracefully (admission control / fair scheduling / load-shedding) with zero cascading collapse.
 - **SC-011**: The platform meets a monthly availability SLA of ≥99.9% for the control plane / API and ≥99.5% for agent-run completion; SLA attainment is measured and reported, and breaches trigger an alert.
 - **SC-009**: 100% of prompt/tool/model/skill changes pass the evaluation gate in CI before release — defined as ≥90% pass rate on the eval set and zero regressions versus the current baseline — and the agent cannot edit held-out grader tests.
 - **SC-010**: Every failure is classified before retry with zero silent retries, and identical failing calls are circuit-broken within three attempts.
