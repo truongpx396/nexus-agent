@@ -85,7 +85,7 @@ a self-hosted in-VPC model so they never leave the trust boundary; default 90-da
 memory retention (tenant-overridable); a required approval unanswered within its
 TTL expires as a denial (`approval_expired`)
 
-**Scale/Scope**: 59 functional requirements across 8 user stories; single reusable
+**Scale/Scope**: 79 functional requirements across 8 user stories; single reusable
 kernel serving 8+ surfaces (CLI, chat, web, REST/gRPC, email, cron, Telegram, Zalo)
 plus per-user personal connectors (Gmail/Drive/Calendar); startup (5 people) →
 enterprise (50,000 people) via

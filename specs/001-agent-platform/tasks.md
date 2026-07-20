@@ -118,6 +118,8 @@ terminal reason (per quickstart.md Scenario 1).
 - [ ] T035 [P] [US1] Integration test: the built-in shell tool applies per-invocation parsed-input safety (`ls` allowed, `rm -rf /` denied), a per-command timeout, and runs only in the sandbox in `backend-go/tests/integration/shell_tool_test.go` (FR-057)
 - [ ] T035a [P] [US1] Integration test: a turn's tool calls are partitioned into a parallel concurrency-safe batch and serial exclusive calls, an exclusive call never runs concurrently, and results are returned in submission order (fail-closed to serial when metadata absent) in `backend-go/tests/integration/tool_concurrency_test.go` (FR-061)
 - [ ] T035b [P] [US1] Integration test: a re-issued state-changing tool call (retry / at-least-once redelivery / resume-from-checkpoint) executes its external effect exactly once via a durable tenant-scoped idempotency key in `backend-go/tests/integration/tool_idempotency_test.go` (FR-071)
+- [ ] T035c [P] [US1] Integration test: the normalized provider contract persists and round-trips opaque `reasoning_content` (replayed on a subsequent tool-call-referencing turn so the provider does not reject the history, kept out of user-visible output, treated as untrusted) in `backend-go/tests/integration/reasoning_roundtrip_test.go` (FR-064)
+- [ ] T035d [P] [US1] Integration test: mid-run steering input alters an in-flight run (a `POST /v1/runs/{id}/input` message is incorporated on the next turn without restarting the run) in `backend-go/tests/integration/mid_run_steering_test.go` (FR-005)
 
 ### Implementation for User Story 1
 
@@ -244,6 +246,7 @@ the eval set (quickstart.md Scenario 4).
 - [ ] T084 [P] [US4] Eval-gate test: a regressing prompt/model change is blocked (≥90% pass AND zero regressions) in `ml-python/tests/test_eval_gate.py` (FR-043)
 - [ ] T084a [P] [US4] Integration test: feature-demand routing sends a sub-agent-spawning request to an at-or-above-floor model and a feature-light grounded-QA request to the cheaper tier, with above-floor features disabled on the fast tier in `backend-go/tests/integration/feature_routing_test.go` (FR-076, FR-077)
 - [ ] T084b [P] [US4] Integration test: the front-of-model response cache serves a repeat/near-duplicate request without a model call, never serves a cross-tenant hit, and is bypassable per request in `backend-go/tests/integration/response_cache_test.go` (FR-072)
+- [ ] T084c [P] [US4] Integration test: the release gate report includes quality-per-dollar (η$) and completions-per-million-token metrics alongside quality (a change cannot pass the gate without them present) in `ml-python/tests/test_release_gate_metrics.py` (FR-018)
 
 ### Implementation for User Story 4
 
@@ -415,6 +418,7 @@ config-only additions; US1–US7 still work.
 
 - [ ] T143 [P] Implement the go-live checklist assertion (`make go-live-check`) covering audit, vaulted secrets, sandboxing+approval, trifecta, cost ceilings, reliability, evals-green, cache-read, residency/retention, runbook in `backend-go/cmd/control-plane/golive.go` (FR-045)
 - [ ] T144 [P] Add the cache-read steady-state measurement + >90% assertion to observability in `backend-go/internal/observability/cache_metrics.go` (FR-014)
+- [ ] T144a [P] Integration test: an oversized tool output is offloaded to object storage and returned as an in-context preview carrying the "do not infer success from the preview" caveat (referenced by path from the event log) in `backend-go/tests/integration/output_offload_test.go` (FR-010)
 - [ ] T145 [P] Implement oversized tool-output offload to object storage with in-context preview + "do not infer success" caveat in `backend-go/internal/tools/offload.go` (FR-010)
 - [ ] T146 [P] Add SLA measurement + alerting (≥99.9% control plane / ≥99.5% run completion; p95 queue-wait, first-token) in `backend-go/internal/observability/sla.go` (SC-008, SC-011)
 - [ ] T147 [P] Author quickstart validation `Makefile` targets referenced by quickstart.md (`verify-isolation`, `verify-approval-timeout`, `verify-skill-promotion`, `chaos-crash`, `load-test`, `capacity-check`, `trace`, `seed-memory`, `onboard-org`, `deploy`, `connect-connector`)
