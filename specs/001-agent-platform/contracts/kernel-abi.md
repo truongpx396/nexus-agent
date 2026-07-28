@@ -71,6 +71,63 @@ type TaintDeclaration = {                       // FR-087; every field defaults 
   sub-agent firewall or an operator-scoped re-baseline), and every transition is
   appended to the event log.
 
+## `Delegation` — the sub-agent seam (FR-079, FR-098–FR-101)
+
+A sub-agent is a second locus of execution holding real credentials and spending
+real money, so delegation is a **tool invocation through the same pipeline**
+(`tool-contract.md`), not a side channel around it. It therefore inherits the
+paired-result invariant, the permission chain, and the audit receipt for free.
+
+```
+interface Delegation {
+  // Scope MUST be provably a subset of the parent's at call time (FR-098).
+  delegate(spec: DelegationSpec, ctx: RunContext) -> DelegationResult
+  // Reaps children on parent terminal/cancel/ceiling breach (FR-100).
+  reap(parent_session_id, reason: ReapReason): void
+}
+
+type DelegationSpec = {
+  goal: string                       // the child's whole instruction
+  context: string                    // relevant trace, not just messages (FR-079)
+  scope: ScopeRef                    // subset selector over the PARENT's scope
+  return_schema: JSONSchema          // validated on return, not trusted
+  acceptance: AcceptanceCriterion    // checked before folding in (FR-044, FR-100)
+  max_summary_tokens: int            // default ~1-2k / ~8 KB; platform truncates
+  max_iterations: int                // per-child loop bound
+  ceiling_usd: numeric               // per-child draw from the parent envelope
+}
+
+type DelegationResult = {
+  summary: string                    // ALWAYS untrusted content (FR-087, FR-100)
+  taint_engaged: TaintDeclaration    // folded into the parent on return
+  usage: Usage                       // metered to parent AND root (FR-101)
+  outcome: "accepted" | "rejected_schema" | "rejected_acceptance"
+         | "bound_exceeded" | "child_error" | "reaped"
+}
+
+type ReapReason = "parent_terminal" | "parent_cancelled" | "ceiling_exhausted"
+```
+
+- **Descent is one-way** (FR-098): `scope` selects a **subset** of the parent's
+  live scope. There is no model-facing parameter that widens tools, connectors,
+  egress, data label, or region — a compromised parent cannot escalate through a
+  child. Approval scopes never descend.
+- **Taint ascends** (FR-087): `taint_engaged` folds into the parent's `TaintState`
+  on return. A `summary` never clears the untrusted leg; only an operator-scoped
+  re-baseline does.
+- **Bounds fail closed** (FR-099): `depth ≤ 1`, `concurrent_children ≤ 3`,
+  `children_per_run ≤ 16` by default, configured per tier (FR-077) and per tenant.
+  A bound breach returns `bound_exceeded` as a **non-retryable** synthetic result —
+  the classifier must not drive a retry loop against a hard cap.
+- **Cost is reserved as an envelope** (FR-099, FR-083): the parent reserves the
+  aggregate worst case **before the first child starts** and children draw from it.
+  Per-child reservation against the tenant counter is prohibited — it lets one
+  fan-out starve every sibling session in the tenant.
+- **Every result is paired** (FR-003): reap, timeout, bound breach, and child error
+  all produce a synthetic `tool_result` before the parent's next `Provider.stream`.
+- **Chain, not parent** (FR-101): `root_session_id` + `parent_session_id` + `depth`
+  ride on every session, cost record, receipt, and span in the tree.
+
 ## `Memory` — durable knowledge (FR-019)
 
 ```
@@ -128,6 +185,9 @@ interface RunControl {
 - `cancel` still honors the paired-result invariant: any outstanding `tool_use`
   receives a synthetic `tool_result` before termination, and the run returns its
   best partial artifact (FR-003, FR-067).
+- `cancel` and every terminal path **reap the run's children** via
+  `Delegation.reap` before the parent terminates (FR-100). A child outliving its
+  parent is a defect, not a leak to reconcile later.
 
 ## The loop terminal contract (FR-002, FR-004)
 

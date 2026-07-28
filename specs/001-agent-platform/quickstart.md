@@ -150,6 +150,28 @@ make verify-skill-promotion            # an agent-proposed skill is NOT auto-pro
 tenant, screened for injection first; only a skill's brief description is always
 visible; an agent-proposed skill requires human + eval approval before promotion.
 
+## Scenario 5b — Bounded delegation (User Story 5, P3)
+
+**Goal**: a sub-agent can only ever hold *less* than its parent, cannot launder
+taint, cannot outlive its parent, and cannot hide its cost (FR-098–FR-101).
+
+```bash
+make delegate-escalation-probe          # child requests a tool/connector the parent lacks
+make delegate-fanout N=32               # exceed the per-run child bound on purpose
+make delegate-cancel-parent             # cancel a parent mid-fan-out
+```
+
+**Expected**: every escalation attempt fails closed (the child's resolved scope is
+a proven subset of the parent's, and approval scopes never descend); the fan-out
+stops at the configured bound with a **non-retryable** result and the agent routes
+around it rather than looping; the fan-out never overspends its pre-reserved
+envelope nor starves a concurrent sibling session in the same tenant; cancelling
+the parent leaves **zero** children spending tokens and each outstanding delegation
+carries a synthetic paired result; a returned summary is truncated by the platform,
+schema-validated, judged against its acceptance criterion, and still counts as
+untrusted content; every cost record and receipt in the tree resolves to root +
+parent + depth.
+
 ## Scenario 6 — Config, not forks (User Story 6, P3)
 
 **Goal**: onboard a new org and deploy in ≥2 topologies with zero kernel changes
@@ -221,6 +243,34 @@ curl -sX DELETE localhost:8080/v1/connectors/gmail -H 'Authorization: Bearer <oi
 - A high-impact action (`gmail_send`, external calendar invite, file delete) blocks
   pending scoped approval and is constrained by the Rule of Two (FR-054).
 - An unverified/unlinked Telegram/Zalo identity performs zero actions (FR-055).
+
+## Scenario 9 — Deterministic multi-step processes (User Story 9, P2)
+
+**Goal**: a recurring process is a versioned, reviewed, eval-gated artifact whose
+control flow the platform evaluates at **zero model-token cost** — the model works
+inside a step, never between steps (FR-102).
+
+```bash
+make plan-validate PLAN=specs/plans/triage.yaml   # reachability, bounded loops, closed predicates, scope subset
+make plan-enable PLAN=triage                       # refused until eval gate + governance sign-off
+make run-plan PLAN=triage@3 INPUT=<incident_id>    # run the pinned version
+make run-plan PLAN=triage@3 INPUT=<incident_id>    # run it again — same path
+make plan-replay RUN=<run_id>                      # reconstruct from the event log alone
+```
+
+**Expected**: validation rejects an unreachable step, an unbounded loop, a predicate
+that is not a closed expression, or a step requesting a capability the plan
+principal lacks — before the plan can ever run; `plan-enable` is refused while the
+plan lacks an eval-gate run or a recorded governance sign-off; the two runs take the
+**identical** path and the run report shows **zero model tokens spent on transitions
+between steps**; an in-flight run finishes on the agent version and model route
+pinned at plan start even if a deploy lands mid-run, and an edit publishes a new
+version rather than mutating the running one; an `approval_gate` step suspends
+durably at zero ongoing token cost and an unanswered approval expires as a denial of
+that step; `plan-replay` reconstructs every step entry, **the predicate that matched
+at each transition**, each outcome, and the terminal reason from the log alone; and
+an interrupted run resumes at the last completed step with its cost envelope
+reconciled rather than double-reserved.
 
 ---
 

@@ -173,7 +173,9 @@ rather than implicitly assumed.
 | E2B / microVM sandbox pool + warm-pool autoscaler | Multi-tenant hostile isolation is required (single-tenant containers suffice first) |
 | Control-plane / data-plane **physical** split | A customer requires BYOC; the *contract* and package boundaries exist from day one so the split is a deployment change |
 | Telegram/Zalo + personal connectors (US8) | After the trust surface (US3) — they are the highest-risk ingress and depend on FR-082 |
-| Memory tiers beyond files, skills promotion, sub-agents | The file-first tier is exhausted (~1M tokens durable knowledge) |
+| Memory tiers beyond files, skills promotion | The file-first tier is exhausted (~1M tokens durable knowledge) |
+| Sub-agent delegation (behavior) | A single continuous context stops being sufficient for a real workload. **The delegation *seams* are not deferred** — the chain columns (`root_session_id`/`parent_session_id`/`depth`, receipt `delegation_path`) and the `Delegation` interface ship in Increment 1, because retrofitting a chain onto historical cost records and audit receipts is exactly the event-log migration this cut line exists to prevent |
+| The orchestration plane (US9, P2) | The first customer process that must run the same way twice. It follows US3 + US4 (it needs approval gates and cost/eval governance) but **not** US5 — plans without `delegate_fanout` steps need no delegation machinery. Deferred from Increment 1 as *behavior*, not as a seam: the `plan_*` event types and `Session.plan_id`/`plan_version` are in the Foundational taxonomy so a plan run replays from a log written before plans existed |
 | Multi-region residency, BYOK, chargeback export | A tenant contract requires them; the schema seams (`region`, `Encryption Key`, cost dimensions) exist from day one so they are additive |
 | Four-topology packaging, Helm/Terraform, rainbow deploy | Increment 3 — before the first customer-operated deployment |
 
@@ -286,8 +288,25 @@ declare away. Each is resolved by an explicit mechanism, not by assertion.
 | **Control/data-plane split before any customer needs BYOC** | Principle-mandated, and "move the data plane into the customer VPC" is only a flag if the planes never bled together in the first place. | Building one plane and splitting later is the rewrite the constitution's Delivery section exists to prevent. | The **contract and package boundary** ship in Increment 1; the *physical* split is deferred until a BYOC customer exists (see cut line). |
 
 **Sub-agent policy divergence** (recorded, not a violation): FR-079 is
-deliberately stricter than the reference material — read-only context firewalls
-only, no parallel decision-making children. This trades away the breadth-first
-research win for a single locus of decision authority, clean cost attribution,
-and a tractable taint model (FR-087). Revisiting it is a governed change under
+deliberately stricter than the comparable systems — read-only context firewalls
+only, no parallel decision-making children spawned at the model's discretion.
+This trades away the model-driven breadth-first research win for a single locus
+of decision authority, clean cost attribution, and a tractable taint model
+(FR-087). The parallelism is relocated rather than abandoned: **FR-102** recovers
+it through declarative orchestration plans, where fan-out is reviewed, versioned,
+eval-gated configuration evaluated at zero model-token cost — which is the same
+trade the constitution already makes for routing (deterministic and auditable,
+never model discretion). Widening FR-079 itself remains a governed change under
 FR-096.
+
+The one-line rule FR-079 used to be is now a sub-contract, because a sub-agent is
+a second locus of execution holding real credentials and spending real money:
+**FR-098** (capability descends monotonically, taint ascends monotonically),
+**FR-099** (depth / concurrency / per-run bounds and a pre-reserved fan-out cost
+envelope, so one delegation cannot starve its own tenant), **FR-100** (return
+validation, acceptance criteria, and child reaping), and **FR-101** (full
+delegation-chain attribution, not just an immediate parent). FR-087's sanitization
+boundary is correspondingly narrowed: summarization reduces volume and may clear
+the private-data leg, but **never** the untrusted-content leg — a model
+summarizing injected text can carry the injection into its summary, so only an
+attributable operator re-baseline clears that leg.

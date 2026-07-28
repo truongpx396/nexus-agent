@@ -43,6 +43,10 @@ erDiagram
     USER ||--o{ CONNECTOR_AUTHORIZATION : authorizes
     USER ||--o{ SURFACE_IDENTITY : linked_from
     CONNECTOR ||--o{ CONNECTOR_AUTHORIZATION : granted_by
+    TENANT ||--o{ ORCHESTRATION_PLAN : governs
+    ORCHESTRATION_PLAN ||--o{ SESSION : drives
+    SESSION ||--o{ DELEGATION : spawns
+    DELEGATION ||--o| SESSION : creates_child
     SESSION ||--o{ EVENT : appends
     SESSION ||--o{ COST_RECORD : meters
     SESSION ||--o{ CHECKPOINT : snapshots
@@ -253,6 +257,11 @@ tenant, replayable and auditable (FR-006, FR-041).
 | `execution_class` | enum | `interactive` / `batch` — the field priority load-shedding reads (FR-049, FR-088) |
 | `priority` | int | Scheduling weight within the class |
 | `region` | string | Placement region; a run outside the tenant's pin fails closed (FR-091) |
+| `parent_session_id` | UUID (nullable) | Immediate parent in a delegation tree; NULL for a root run (FR-101) |
+| `root_session_id` | UUID | Root of the delegation tree; equals `session_id` for a root run — the key cost rolls up to (FR-101) |
+| `depth` | int | 0 for a root run; bounded by the FR-099 depth limit (default 1) |
+| `delegation_role` | enum | `root` / `leaf` — a `leaf` cannot delegate further (FR-098, FR-099) |
+| `plan_id` / `plan_version` | UUID / int (nullable) | The orchestration plan version driving this run, pinned at start (FR-102) |
 | `taint_state` | jsonb | Rule-of-Two legs engaged so far, plus the last sanitization boundary (FR-087) — *projection* |
 | `status` | enum | `queued` / `running` / `suspended` / `terminal` — *projection* |
 | `terminal_reason` | enum (nullable) | `completed` / `max_turns` / `cost_exhausted` / `error` / `aborted` / `prompt_too_long` / `hook_stopped` / `approval_expired` (FR-004) — *projection* |
@@ -260,6 +269,8 @@ tenant, replayable and auditable (FR-006, FR-041).
 
 - **Concurrency**: per-session serial (lock on `session_key`), cross-session concurrent.
 - **Projections**: `status`, `terminal_reason`, and `taint_state` are derived from the event log and rebuildable by replay; they are read paths, not truth (FR-086).
+- **Delegation chain**: `root_session_id` + `parent_session_id` + `depth` are written at session creation and never updated. They are a **foundational seam, not a later feature** — retrofitting a chain onto historical cost records and receipts is exactly the migration the append-only log exists to avoid, so the columns ship in Increment 1 even though delegation itself is deferred (see plan.md "MVP cut line").
+- **Scope descent**: a child session's resolved scope (tool catalog, connector authorizations, egress allowlist, `data_label`, `region`) is a **subset** of its parent's at creation time and is never widened afterward (FR-098).
 - **Suspension**: a session awaiting human approval or a long external job sits in `suspended` at **zero ongoing token cost**, resumed by an event rather than polled (FR-036).
 
 ### Event
@@ -294,10 +305,62 @@ log alone, and identical to the externally published event contract (FR-085):
 | Human | `user_message` (the mid-run steering input of FR-005) |
 | Approval | `approval_requested` · `approval_granted` · `approval_denied` · `approval_expired` |
 | Safety | `taint_transition` · `sanitization_boundary` (FR-087) |
+| Delegation | `delegation_requested` · `delegation_refused` (bound/scope/admission) · `delegation_returned` · `delegation_reaped` (FR-098–FR-101) |
+| Orchestration | `plan_started` · `plan_step_entered` · `plan_transition` · `plan_step_exited` · `plan_completed` (FR-102) |
 | Lifecycle | `error` · `terminal` (carries the FR-004 typed reason) · `erasure` (FR-080) |
 
 - **Invariant**: every `tool_use` has a paired `tool_result` (synthetic on cancel/error) before the next model call — a **total** invariant over all histories, therefore property-tested (FR-097).
 - **Replay completeness**: a run whose steering, approval outcome, or termination cannot be reconstructed from these events alone violates FR-006.
+
+### Delegation
+The bounded parent→child record that makes a delegation tree attributable and
+replayable (FR-079, FR-098–FR-101). One row per delegation attempt, including
+refused and reaped ones — a delegation that never ran is itself audit-relevant.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `delegation_id` | UUID (PK) | |
+| `tenant_id` | UUID (FK) | RLS key |
+| `parent_session_id` | UUID (FK) | The delegating run |
+| `child_session_id` | UUID (FK, nullable) | NULL when admission was refused before a child existed |
+| `root_session_id` | UUID (FK) | Tree root (FR-101) |
+| `depth` | int | Child's depth; refused when > the FR-099 limit |
+| `pair_ref` | UUID | The parent `tool_use` this delegation answers — the paired-result invariant applies (FR-003) |
+| `scope_snapshot` | jsonb | The child's resolved scope, proven a subset of the parent's at call time (FR-098) |
+| `taint_at_spawn` | jsonb | Parent taint when the child was created (context for the return fold) |
+| `taint_engaged` | jsonb | Legs the child actually engaged; folded into the parent on return (FR-087) |
+| `return_schema` | jsonb | Validated on return, never trusted (FR-100) |
+| `acceptance` | jsonb | The criterion the summary is judged against — no self-declared success (FR-044) |
+| `max_summary_tokens` | int | Platform-enforced by truncation (default ~1–2k / ~8 KB) |
+| `ceiling_usd` | numeric | This child's draw from the parent's fan-out envelope (FR-099) |
+| `outcome` | enum | `accepted` / `rejected_schema` / `rejected_acceptance` / `bound_exceeded` / `child_error` / `reaped` |
+| `reap_reason` | enum (nullable) | `parent_terminal` / `parent_cancelled` / `ceiling_exhausted` |
+| `created_at` / `closed_at` | timestamptz | |
+
+- **Immutable once closed**; the lifecycle is reconstructable from the delegation events below.
+- **Refusals are rows too**: a `bound_exceeded` admission refusal is recorded, so a runaway fan-out attempt is visible rather than silent.
+- **Scope is snapshotted, not referenced** — proving descent after the fact requires the scope as it stood at spawn time, not as it stands now.
+
+### Orchestration Plan
+A versioned, tenant-scoped, immutable declaration of control flow the platform
+evaluates at **zero model-token cost** (FR-102). See
+[contracts/orchestration-plane.md](contracts/orchestration-plane.md).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `plan_id` | UUID (PK) | |
+| `tenant_id` | UUID (FK) | RLS key — one tenant may neither enumerate nor run another's plans |
+| `version` | int (PK part) | Immutable; a change publishes a new version |
+| `status` | enum | `draft` / `gated` / `enabled` / `retired` |
+| `steps` | jsonb | Steps, transitions, bounded loops, approval gates, fan-outs |
+| `pinned_routes` | jsonb | Per-step `agent_version` + `route_model_id`, frozen at enable (FR-088) |
+| `cost_envelope_usd` | numeric | Reserved before step 1 (FR-083, FR-099) |
+| `eval_run_id` | UUID (nullable) | The gate run that cleared it (FR-043) |
+| `governance_signoff` | jsonb (nullable) | Recorded approver + timestamp; required to reach `enabled` (FR-096) |
+| `created_at` | timestamptz | |
+
+- **A plan version cannot reach `enabled`** without both `eval_run_id` and `governance_signoff` — the same bar a new tool or connector clears.
+- **In-flight runs finish on the version they started with** (FR-026).
 
 ### Checkpoint
 Durable snapshot enabling resume-from-last-checkpoint rather than restart (FR-024).
@@ -331,11 +394,14 @@ exhaustion reason (FR-016, FR-017).
 | `price_book_version` | string (FK) | Which price table produced `cost_usd` (FR-084) |
 | `cost_usd` | numeric | Derived, reproducible from tokens × price book |
 | `latency_ms` | int | |
-| `parent_session_id` | UUID (nullable) | Sub-agent spend attributed to the parent task (FR-079) |
+| `parent_session_id` | UUID (nullable) | Immediate parent — sub-agent spend attributed to the parent task (FR-079) |
+| `root_session_id` | UUID | Root of the delegation tree; the key ceilings, showback, and chargeback roll up to (FR-101, FR-093) |
+| `depth` | int | Position in the tree; 0 for a root run |
 | `model_id` | string | |
 
 - **Cache-read rate** = `input_tokens_cache_read / (uncached + cache_read + cache_write)`, computed from recorded measurements, never estimated (SC-017).
 - **Enforcement is pre-spend**: see `Budget Reservation` below. Post-hoc rolling sums reconcile; they do not gate.
+- **Tree roll-up**: a run's true cost is `SUM(cost_usd) WHERE root_session_id = :root`. Attributing only to `parent_session_id` cannot reconstruct a multi-hop delegation and understates a nested tree (FR-101, SC-022).
 
 ### Budget
 Per-task and per-tenant ceilings.
@@ -412,12 +478,17 @@ timestamp (FR-040; Security section).
 | `receipt_id` | UUID (PK) | |
 | `event_id` | UUID (FK) | The mutating action |
 | `tenant_id` | UUID (FK) | RLS key |
-| `user_id` | UUID (FK) | Attribution |
+| `user_id` | UUID (FK) | Attribution — the human whose delegated scope authorized this |
+| `session_id` | UUID (FK) | The run that acted |
+| `root_session_id` | UUID (FK) | Tree root — with `delegation_path`, answers "through which chain of agents" (FR-101) |
+| `delegation_path` | UUID[] | Ordered root→…→acting session; empty for a root run. A receipt naming only its immediate parent cannot reconstruct a multi-hop delegation |
 | `chain_seq` | bigint | Monotonic per session — a gap is detectable tampering |
 | `prev_digest` | bytea | Digest of the preceding receipt: **the chain** (FR-081) |
-| `digest` | bytea | Over `prev_digest` + session + tool + arg/result **digests** + timestamp — never plaintext, so a lawful redaction cannot break verification |
+| `digest` | bytea | Over `prev_digest` + session + `delegation_path` + tool + arg/result **digests** + timestamp — never plaintext, so a lawful redaction cannot break verification |
 | `signature` | bytea | Produced by a **sign-only** KMS/HSM key the data plane cannot read |
 | `created_at` | timestamptz | Immutable |
+
+- **Two chains, one record**: `chain_seq`/`prev_digest` prove *integrity* over time; `root_session_id`/`delegation_path` prove *authority* across a delegation tree. Neither substitutes for the other (FR-081, FR-101).
 
 ### Audit Anchor
 The external commitment that makes the chain tamper-*evident* rather than merely
@@ -484,8 +555,17 @@ hard resource limits; the trust boundary for all code/shell execution
   reassigns connections between tenants (FR-039). Isolation tests run through
   that pooler (SC-013).
 - **Immutability**: `Agent`, `Tool`, `Model`, `Price Book`, `Skill` (per version),
-  `Event`, `Audit Receipt`, `Audit Anchor` are write-once. Config changes create
-  new versioned rows.
+  `Orchestration Plan` (per version), `Event`, `Audit Receipt`, `Audit Anchor` are
+  write-once. Config changes create new versioned rows.
+- **Delegation is one-way down, one-way up**: capability is monotonically
+  non-increasing down a chain (`Delegation.scope_snapshot` ⊆ parent scope) and
+  taint is monotonically non-decreasing up it (`taint_engaged` folds into the
+  parent's `taint_state` on return). A returned summary never clears the
+  untrusted-content leg (FR-087, FR-098).
+- **Chain, not parent**: `root_session_id` + `parent_session_id` + `depth` ride on
+  `Session`, `Cost Record`, `Delegation`, and `Audit Receipt` so cost rolls up to
+  the root task and any receipt's full authorization chain is reconstructable
+  without cross-record correlation (FR-101).
 - **Append-only**: `Event` is never updated or deleted; `seq` is monotonic per
   session and the ordering is the source of truth for replay. Every event carries
   a `schema_version` and an upcasting path keeps old events replayable (FR-086).
