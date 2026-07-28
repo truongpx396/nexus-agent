@@ -31,11 +31,17 @@ gates (FR-011). Safety is judged per invocation on parsed input (FR-009).
 
 ```
 Gate 1 — Global profile      : read_only | coding | messaging | full
-Gate 2 — Capability metadata : read-only vs mutating ; concurrency-safe?
+Gate 2 — Capability metadata : read-only vs mutating ; concurrency class ;
+                               taint declaration {returns_untrusted,
+                               reads_private_data, mutates_external} ; effect class
 Gate 3 — Per-invocation check: safety classifier on PARSED input (fail closed)
 ```
 
 - Any gate denies → the invocation is refused; default is deny.
+- **Taint declarations are mandatory metadata** (FR-087). They are the inputs the
+  Rule-of-Two evaluator combines with the session's accumulated taint state; a
+  tool whose declaration is missing or unclassifiable is treated as engaging all
+  three legs and therefore requires approval.
 
 ## The single execution pipeline (`checkPermissionsAndCallTool`)
 
@@ -45,10 +51,15 @@ Ordered steps applied to every call (FR-007, FR-010):
 2. **Abort check** (cancellation / stop hook)
 3. **Schema validation** (`inputSchema`) — instructive error on failure
 4. **Semantic validation** (`validateInput`)
-5. **Speculative permission classifier** (parsed input; Rule of Two check, FR-033)
+5. **Speculative permission classifier** (parsed input; Rule of Two evaluated from
+   the tool's declared taint legs plus the session's accumulated taint state,
+   FR-033, FR-087)
 6. **Input backfill** (defaults, absolute-path coercion — poka-yoke, FR-007)
 7. **PreToolUse hooks**
 8. **Permission resolution chain** (profile → capability → per-invocation)
+8a. **Idempotency key derivation + durable dedup** for state-changing effects, so
+   a retry, redelivery, or resume executes the external effect exactly once
+   (FR-071)
 9. **Secret injection** at execution time from vault (model saw only a handle, FR-034)
 10. **Execute** in the per-tenant sandbox — default E2B backend, hard resource
     limits (CPU/memory/PID/wall-clock; breach → terminate + reclaim) and network
@@ -57,9 +68,15 @@ Ordered steps applied to every call (FR-007, FR-010):
     object storage, return a preview + "do not infer success from the preview"
     banner (FR-010)
 12. **PostToolUse hooks**
-13. **Emit audit receipt** for mutating actions (HMAC, FR-040)
-14. **Append `tool_result`** to the event log (paired with `tool_use`, FR-003)
-15. **Error classification + telemetry** (typed failure class, per-turn cost span)
+13. **Emit audit receipt** for mutating actions — hash-chained to its predecessor
+    and signed by a sign-only KMS/HSM key, over **digests** rather than plaintext
+    so a lawful redaction cannot break verification (FR-040, FR-081)
+14. **Append `tool_result`** to the event log (paired with `tool_use`, FR-003),
+    payload envelope-encrypted under the tenant's content key (FR-089)
+15. **Record taint transition** — the tool's declared legs are folded into the
+    session's taint state as an event (FR-087)
+16. **Error classification + telemetry** (typed failure class, per-turn cost span
+    split by token class: uncached / cache-read / cache-write / output, FR-016)
 
 ## Invariants
 
@@ -69,9 +86,16 @@ Ordered steps applied to every call (FR-007, FR-010):
   order, not completion order.
 - **High-impact gate**: payments, deletions, external sends, and production changes
   require scoped human approval before execute (step 10 blocks pending approval,
-  FR-036); an unanswered approval expires as denial → run ends `approval_expired`.
+  FR-036). While pending, the run **suspends durably at zero token cost**. An
+  unanswered approval expires as a denial of *the action*, returned to the loop as
+  a typed synthetic `tool_result` so the agent may replan; the run ends
+  `approval_expired` only if it cannot proceed without it. Approval scopes name a
+  tool and effect class and carry an expiry — none permanently ungates a class.
 - **Untrusted output**: tool output and retrieved content are never fed straight
   into execution (FR-033).
+- **Exactly-once effects**: a state-changing call re-issued by a retry,
+  at-least-once redelivery, or resume-from-checkpoint executes its external effect
+  once, deduplicated on a durable tenant-scoped idempotency key (FR-071).
 
 ## Example tool descriptor
 
@@ -81,7 +105,31 @@ Ordered steps applied to every call (FR-007, FR-010):
   "description": "Search Asana tasks by query; returns high-signal fields only.",
   "inputSchema": { "type": "object", "properties": { "query": {"type":"string"} }, "required": ["query"] },
   "capability": "read_only",
-  "concurrency_safe": true,
+  "concurrency": "concurrency_safe",
+  "taint": {
+    "returns_untrusted": true,
+    "reads_private_data": true,
+    "mutates_external": false
+  },
+  "effect_class": null,
   "response_format": ["concise", "detailed"]
+}
+```
+
+A mutating counterpart declares its effect class and idempotency derivation, which
+is what an approval scope binds to and what dedup keys off:
+
+```json
+{
+  "name": "gmail_send",
+  "capability": "mutating",
+  "concurrency": "exclusive",
+  "taint": {
+    "returns_untrusted": false,
+    "reads_private_data": true,
+    "mutates_external": true
+  },
+  "effect_class": "external_send",
+  "idempotency_key_spec": { "fields": ["to", "subject", "body_digest"], "scope": "tenant" }
 }
 ```

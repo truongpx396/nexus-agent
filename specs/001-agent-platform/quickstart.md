@@ -29,8 +29,10 @@ make run-control-plane &                        # auth, RBAC, budgets, routing
 make run-worker &                               # stateless kernel worker
 ```
 
-Expected: `make migrate` reports RLS enabled on every tenant-scoped table; the
-control plane logs a `v1` control/data-plane handshake
+Expected: `make migrate` reports RLS enabled on every tenant-scoped table **and
+that tenant scope is set transaction-locally** (`SET LOCAL`), which is what keeps
+isolation intact behind the transaction-pooling tier; the control plane logs a
+`v1` control/data-plane handshake
 ([contracts/control-data-plane.md](contracts/control-data-plane.md)).
 
 ---
@@ -59,8 +61,15 @@ curl -N localhost:8080/v1/runs/<session_id>/events   # SSE, structure only
   FR-057). Code runs in an E2B-default sandbox with hard CPU/memory/PID/wall-clock
   limits and network default-deny — a runaway loop is killed and reclaimed, and an
   unapproved egress attempt is denied (FR-059).
-- Force the ceiling (`budget_per_task_usd` small) → run ends `cost_exhausted` with
-  an alert, never a runaway.
+- Force the ceiling (`budget_per_task_usd` small) → the *next turn's reservation is
+  refused before the model call*, so the run ends `cost_exhausted` without ever
+  overshooting — never a runaway (FR-083).
+- Per-turn cost records split input tokens into uncached / cache-read / cache-write
+  and name a `price_book_version`, so the cache-read rate is measured rather than
+  estimated (FR-016, FR-084).
+- Cancel the run (`POST /v1/runs/<session_id>/cancel`) → it terminates `aborted`,
+  any outstanding `tool_use` gets a synthetic `tool_result`, and the best partial
+  artifact is returned (FR-004, FR-067).
 
 ## Scenario 2 — Same agent, many surfaces (User Story 2, P2)
 
@@ -81,20 +90,33 @@ surface-specific fork of agent logic; long runs stream/poll (no blocked connecti
 and human approval on high-impact actions (FR-032–FR-040).
 
 ```bash
-# Run the same task for two tenants concurrently, then attempt a cross-tenant read:
+# Run the same task for two tenants concurrently, then attempt a cross-tenant read
+# — routed THROUGH the PgBouncer transaction-pooling tier used in production:
 make verify-isolation TENANT_A=acme TENANT_B=globex
 # Trigger a high-impact action (e.g. external send) and leave the approval unanswered:
 make verify-approval-timeout
+# Prove the audit log is tamper-evident, and that erasure preserves it:
+make verify-audit-chain
+make verify-erasure SUBJECT=<user_id>
 ```
 
 **Expected**:
-- Cross-tenant query returns zero rows (Postgres RLS — FR-039); no leakage of data,
-  secrets, or budgets.
+- Cross-tenant query returns zero rows (Postgres RLS — FR-039) **including on a
+  pooled connection previously used by the other tenant**; no leakage of data,
+  secrets, or budgets. A test asserting isolation against a direct connection only
+  does not satisfy this scenario (SC-013).
 - Every mutating action has an immutable audit receipt binding user + tenant + tool
-  + args + result + timestamp (FR-040).
+  + args + result + timestamp, **hash-chained** to its predecessor and covered by a
+  current external anchor; injected tampering (modify / delete / reorder) is
+  detected by `make verify-audit-chain` (FR-040, FR-081, SC-015).
 - The vault-injected credential never appears in the prompt/transcript (FR-034).
-- The unanswered approval expires as denial after its TTL → run ends
-  `approval_expired`; the gated action did **not** proceed (FR-036).
+- The unanswered approval expires as a denial of **the action** after its TTL: the
+  agent receives a typed denial and may replan; only a run that cannot proceed
+  ends `approval_expired`, still returning its partial artifact. The gated action
+  did **not** proceed either way (FR-036, FR-067).
+- `make verify-erasure` destroys the subject's content key: payloads become
+  unrecoverable while the event log still replays and the audit chain still
+  verifies — no event row deleted or rewritten (FR-080, SC-014).
 
 ## Scenario 4 — Cost governance & observability (User Story 4, P2)
 
@@ -154,6 +176,7 @@ make chaos-crash SESSION=<long_task>   # kill the worker mid-run
 make deploy-during-run                 # rainbow deploy while a run is active
 make load-test CONCURRENCY=5000        # drive past capacity
 make capacity-check                    # measure SC-008 SLAs + gate high-concurrency go-live
+make restore-drill                     # measure RPO/RTO; chain must verify + log must replay
 ```
 
 **Expected**: the run resumes from its last checkpoint preserving partial work;
@@ -162,7 +185,8 @@ admission control / fair scheduling / load-shedding (429 + `Retry-After`) and
 degrades gracefully instead of collapsing; identical failing calls circuit-break
 within three attempts with logged reasons (no silent retries); the measured p95
 queue-wait / first-token / completion-rate meet the SC-008 targets under sustained
-concurrency.
+concurrency; and `make restore-drill` meets RPO ≤5 min / RTO ≤4 h with the audit
+chain verifying and the event log replaying after restore (FR-090, SC-018).
 
 ## Scenario 8 — Consumer surfaces & personal connectors (User Story 8, P2)
 
@@ -183,6 +207,9 @@ curl -sX DELETE localhost:8080/v1/connectors/gmail -H 'Authorization: Bearer <oi
 ```
 
 **Expected**:
+- A forged, replayed, or flooding webhook delivery is rejected **before** adapter
+  translation — zero kernel invocations and zero token spend — while a correctly
+  signed delivery proceeds (FR-082, SC-019).
 - Telegram and Zalo messages produce identical control flow and terminal reasons to
   the API surface — thin adapters, no per-surface fork (FR-051).
 - The OAuth consent stores access+refresh tokens in the vault keyed by
@@ -199,12 +226,16 @@ curl -sX DELETE localhost:8080/v1/connectors/gmail -H 'Authorization: Bearer <oi
 
 ## Go-live gate (FR-045)
 
-Before any production launch, confirm the checklist is green: attributable audit,
-vaulted per-tenant secrets, sandboxing + human approval for high-impact actions,
-one leg of the lethal trifecta broken per risky flow, per-task/per-tenant cost
-ceilings, failure classification + resume + stuck detection, evals green in CI,
->90% steady-state cache-read, documented residency/retention/no-train, and a
-rehearsed incident runbook.
+Before any production launch, confirm the checklist is green: attributable audit
+with a **verifying hash chain and a current anchor**, vaulted per-tenant secrets,
+**content encrypted at rest with an exercised erasure path**, sandboxing + human
+approval for high-impact actions, one leg of the lethal trifecta broken per risky
+flow, **pre-spend** per-task/per-tenant cost ceilings, failure classification +
+resume + stuck detection, evals green in CI, >90% steady-state cache-read measured
+from recorded token classes, **isolation verified through the connection pooler**,
+a **restore drill within the last quarter meeting RPO/RTO**, SBOM + signed
+artifacts, error-budget alerting wired to the runbook, documented
+residency/retention/no-train, and a rehearsed incident runbook.
 
 ```bash
 make go-live-check     # asserts every checklist item; non-green blocks launch

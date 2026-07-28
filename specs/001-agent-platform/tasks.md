@@ -15,6 +15,15 @@ run-API), multi-tenant isolation / resume / cost-ceiling / HITL integration test
 an eval set that gates every prompt/tool/model/skill change in CI (FR-042, FR-043,
 FR-044). These test tasks are therefore first-class, not optional.
 
+Two rules govern how they run (FR-097): correctness tests execute against the
+**deterministic recorded/fake provider** (T015a) — never a live model, which would
+be flaky and billed — and the transcript-hygiene invariants are **property-tested**
+over generated event sequences (T033b), because they are total invariants over all
+histories rather than a set of examples. Live-model calls are confined to the eval
+suite. The eval gate itself is **Foundational** (T026e–T026g), not a later phase:
+it must exist before the first behavior-bearing slice, or the window where changes
+have the largest effect sizes goes unmeasured.
+
 **Organization**: Tasks are grouped by user story (P1–P3) so each story is an
 independently testable increment aligned with the delivery phases in the plan
 (kernel → surfaces → trust → cost/observability → memory/skills → config → scale →
@@ -59,39 +68,70 @@ ALL user stories build on. No user-story work begins until this phase completes.
 
 **⚠️ CRITICAL**: Blocks every user story below.
 
+This phase carries the decisions that are **expensive to retrofit and cheap to make
+now** — the event envelope and taxonomy, transaction-local tenant scoping, the
+encryption/erasure model, the audit chain, the pre-spend budget gate, the
+deterministic provider, and the eval gate. Everything later in this file is
+additive against them; none of it requires migrating the event log, the audit
+chain, or the encryption model. That is what makes the MVP cut line in plan.md
+safe (see "MVP cut line" — infrastructure is deferred, seams are not).
+
 ### Data model & tenant isolation (data-model.md)
 
-- [ ] T010 Author the Postgres migration framework and base schema for immutable config tables (`Tenant`, `User`, `Agent`, `Tool`, `Model`, `Skill`, `Connector`) in `backend-go/migrations/0001_config.sql`
-- [ ] T011 Author the append-only runtime-state migration (`Session`, `Event`, `Checkpoint`, `Cost Record`, `Budget`, `Memory`, `Approval`, `Audit Receipt`, `Sandbox`) in `backend-go/migrations/0002_runtime.sql`
-- [ ] T012 Add Postgres row-level-security policies keyed on `tenant_id` for every tenant-scoped table (zero rows without tenant context) in `backend-go/migrations/0003_rls.sql` (FR-038, FR-039)
-- [ ] T013 [P] Define immutable config domain types (`Tenant`, `User`, `Agent`, `Tool`, `Model`, `Skill`, `Connector`) in `backend-go/internal/tenancy/model.go` and `backend-go/internal/tools/model.go`
-- [ ] T014 [P] Define append-only runtime types (`Session`, `Event`, `Checkpoint`, `CostRecord`, `Budget`, `Memory`, `Approval`, `AuditReceipt`, `Sandbox`) with the typed `Event.type` and `TerminalReason` enums in `backend-go/kernel/types.go`
+- [ ] T010 Author the Postgres migration framework and base schema for immutable config tables (`Tenant`, `User`, `Agent`, `Tool`, `Model`, `PriceBook`, `Skill`, `Connector`) in `backend-go/migrations/0001_config.sql` — `Tool` carries a nullable `tenant_id` (NULL only for global built-ins) plus taint declarations (`returns_untrusted` / `reads_private_data` / `mutates_external`, all defaulting TRUE), `concurrency` class, `effect_class`, and `idempotency_key_spec` (FR-011, FR-087); `Model` carries `pinned_snapshot` and `regions_allowed` (FR-078, FR-091)
+- [ ] T010a [P] Author the versioned, effective-dated `PriceBook` schema + loader (per-model, per-token-class rates; cost never computed from constants in code) in `backend-go/migrations/0001_config.sql` and `backend-go/internal/cost/pricebook.go` (FR-084)
+- [ ] T011 Author the append-only runtime-state migration (`Session`, `Event`, `Checkpoint`, `Cost Record`, `Budget`, `BudgetReservation`, `Memory`, `Approval`, `Audit Receipt`, `Audit Anchor`, `Encryption Key`, `Sandbox`) in `backend-go/migrations/0002_runtime.sql` — `Event` carries `schema_version`, `payload_digest`, `key_id`, and `actor`; `Session` carries pinned `agent_version`, `data_label`, `route_model_id`/`route_reason`, `execution_class`/`priority`, `region`, and `taint_state`; `Cost Record` splits input tokens by class and references `price_book_version` (FR-016, FR-085, FR-086, FR-088)
+- [ ] T012 Add Postgres row-level-security policies keyed on `tenant_id` for every tenant-scoped table — including `Tool` where `tenant_id IS NOT NULL` (zero rows without tenant context) in `backend-go/migrations/0003_rls.sql` (FR-011, FR-038, FR-039)
+- [ ] T012a **Establish the expand/contract migration discipline** (additive-first, destructive cleanup deferred a release; every migration verified in CI against the immediately preceding application version so a rolling deploy never needs two schemas at once) in `backend-go/migrations/README.md` and `.github/workflows/ci.yml` (FR-094, FR-026)
+- [ ] T013 [P] Define immutable config domain types (`Tenant`, `User`, `Agent`, `Tool` incl. `TaintDeclaration`, `Model`, `PriceBook`, `Skill`, `Connector`) in `backend-go/internal/tenancy/model.go` and `backend-go/internal/tools/model.go` (FR-087)
+- [ ] T014 [P] Define append-only runtime types (`Session`, `Event`, `Checkpoint`, `CostRecord`, `Budget`, `BudgetReservation`, `Memory`, `Approval`, `AuditReceipt`, `AuditAnchor`, `EncryptionKey`, `Sandbox`) with the **full** typed `Event.type` taxonomy (model output, tool, context, `user_message`, approval lifecycle, taint transitions, `error`, `terminal`, `erasure`), the event `schema_version` envelope, and the `TerminalReason` enum in `backend-go/kernel/types.go` (FR-085, FR-086)
+- [ ] T014a [P] Implement the event **envelope versioning + upcasting registry** (read an event written under any prior `schema_version` into the current in-memory shape; replay across schema change is covered by a test) in `backend-go/kernel/eventversion.go` (FR-086)
 
 ### Kernel/harness interface seams (contracts/kernel-abi.md)
 
-- [ ] T015 [P] Declare the `Provider` interface + normalized `Chunk` stream contract in `backend-go/internal/provider/provider.go` (FR-027)
-- [ ] T016 [P] Declare the `Tool` interface (self-describing, per-invocation checks) in `backend-go/internal/tools/tool.go` (FR-007, FR-008, FR-009, FR-011)
+- [ ] T015 [P] Declare the `Provider` interface + normalized `Chunk` stream contract — with `usage` split into `input_uncached` / `input_cache_read` / `input_cache_write` / `output_tokens`, and an opaque `reasoning` chunk — in `backend-go/internal/provider/provider.go` (FR-016, FR-027, FR-064)
+- [ ] T015a [P] Implement the **deterministic recorded/fake `Provider`** satisfying the same contract (scripted turns plus truncation, stall, malformed-stream, and failover paths; fixtures versioned with the contract) so the correctness suite is reproducible and never bills a live model, in `backend-go/internal/provider/fake/fake.go` and `backend-go/internal/provider/fake/fixtures/` (FR-097)
+- [ ] T016 [P] Declare the `Tool` interface (self-describing, per-invocation checks, **required `TaintDeclaration` defaulting to all three legs true**, `effectClass`) in `backend-go/internal/tools/tool.go` (FR-007, FR-008, FR-009, FR-011, FR-087)
+- [ ] T016a [P] Declare the `RunControl` interface (`steer` / `cancel` / `resume`) and the `BudgetGate` interface (`reserve` / `reconcile`) in `backend-go/kernel/control.go` and `backend-go/internal/cost/gate.go` (FR-005, FR-083)
 - [ ] T017 [P] Declare the `Memory` interface in `backend-go/internal/memory/memory.go` (FR-019)
 - [ ] T018 [P] Declare the `Workspace`/`Sandbox` interface in `backend-go/internal/sandbox/workspace.go` (FR-047)
 - [ ] T019 [P] Declare the `Surface` adapter interface in `backend-go/internal/surfaces/surface.go` (FR-001, FR-028, FR-031)
 
 ### Cross-cutting infrastructure
 
-- [ ] T020 [P] Implement tenant context propagation + RLS session scoping (set `tenant_id` GUC per connection) in `backend-go/internal/tenancy/context.go` (FR-038)
-- [ ] T021 [P] Implement the Postgres event-log store (append event, read by session `seq`) in `backend-go/internal/queue/eventlog.go` (FR-006)
+- [ ] T020 [P] Implement tenant context propagation + RLS scoping using a **transaction-local** `SET LOCAL app.tenant_id` (or `SET ROLE LOCAL`) issued inside each transaction — session-level `SET` is prohibited and MUST be blocked by a lint/assertion, because the production PgBouncer tier runs in transaction-pooling mode and reassigns a connection between tenants between statements — in `backend-go/internal/tenancy/context.go` (FR-039)
+- [ ] T020a [P] Implement per-tenant envelope encryption for event payloads and other customer content (`EncryptionKey` custody in vault/KMS, platform-managed and BYOK/CMK modes, `payload_digest` computed over plaintext so the audit chain survives redaction) in `backend-go/internal/security/envelope.go` (FR-089, FR-080)
+- [ ] T021 [P] Implement the Postgres event-log store (append event with `schema_version` + digest + `key_id`, read by session `seq`, upcast on read) in `backend-go/internal/queue/eventlog.go` (FR-006, FR-086)
 - [ ] T022 [P] Implement the abstract durable-queue port with a NATS JetStream default adapter (persisted-consumer redelivery for re-queue-from-checkpoint) in `backend-go/internal/queue/queue.go`, plus a broker-agnostic Redis session-key serial lock (per-session serial, cross-session concurrent) in `backend-go/internal/queue/sessionlock.go` (FR-041, FR-046)
 - [ ] T023 [P] Implement structured error handling + typed failure taxonomy skeleton in `backend-go/internal/reliability/errors.go`
 - [ ] T024 [P] Implement OpenTelemetry span bootstrap (structure-only, no content) + logging config in `backend-go/internal/observability/otel.go` (FR-040)
 - [ ] T025 [P] Implement runtime configuration loader (tenant/agent/config read at runtime, never forked) in `backend-go/internal/tenancy/config.go` (FR-050)
-- [ ] T026 Implement the versioned control-plane ↔ data-plane handshake per contracts/control-data-plane.md in `backend-go/internal/queue/controlplane.go` (FR-030)
+- [ ] T026 Implement the versioned control-plane ↔ data-plane handshake per contracts/control-data-plane.md — including the enumerated **structure-only egress list** and the `audit_sink_mode` / `telemetry_sink_mode` = `upstream` | `local` switch so a customer-boundary deployment can emit nothing at all — in `backend-go/internal/queue/controlplane.go` (FR-030, FR-091)
+
+### Cost, audit & erasure foundations (must exist before behavior is tuned)
+
+- [ ] T026a Implement the **pre-spend budget gate**: atomic per-tenant/per-task reservation counters in Redis with TTL-bounded holds, refusal → `cost_exhausted` *before* the model call, and reconciliation releasing the unused remainder — plus a worker-local hard per-run budget enforced synchronously so enforcement never depends on a cross-plane round trip — in `backend-go/internal/cost/reservation.go` (FR-083, FR-017)
+- [ ] T026b Implement the **hash-chained audit receipt** writer (`chain_seq` + `prev_digest` + digest over arg/result **digests**, signed by a sign-only KMS/HSM key the data plane cannot read) and the periodic **chain anchor** publisher in `backend-go/internal/audit/chain.go` and `backend-go/internal/audit/anchor.go` (FR-081, FR-040)
+- [ ] T026c [P] Implement the scheduled **audit-chain verifier** (walks the chain, proves continuity, sequence completeness, signature validity, and agreement with the latest anchor; alerts on any break or gap) in `backend-go/internal/audit/verify.go` (FR-081, SC-015)
+- [ ] T026d Implement the **erasure / crypto-shredding** path (destroy the tenant/subject content key, append a typed `erasure` event + receipt, never delete or rewrite an event row) and the DSAR **access** export enumerating data held for a subject across events, memory, cost records, and connector authorizations, in `backend-go/internal/security/erasure.go` (FR-080, SC-014)
+
+### Foundational evals & test harness (Constitution IX — before any behavior-bearing slice)
+
+- [ ] T026e [P] Implement the eval runner over a versioned ~20-real-case set with end-state checks in `ml-python/src/evals/runner.py` (FR-043) *(moved earlier from US4 — the gate must precede the changes it grades)*
+- [ ] T026f [P] Implement the LLM-as-judge rubric scorer + held-out grader protection in `ml-python/src/judge/rubric.py` (FR-043)
+- [ ] T026g Wire the eval gate into CI (≥90% pass AND zero regressions vs baseline) in `.github/workflows/ci.yml` and `ml-python/src/evals/gate.py` (FR-042, FR-043)
 
 ### Foundational contract tests
 
-- [ ] T027 [P] Contract test asserting the kernel ABI interfaces compile with ≥1 stub impl each in `backend-go/tests/contract/kernel_abi_test.go`
-- [ ] T028 [P] Contract test for the control/data-plane versioned handshake in `backend-go/tests/contract/control_data_plane_test.go`
-- [ ] T029 [P] Integration test asserting RLS returns zero cross-tenant rows (testcontainers Postgres) in `backend-go/tests/integration/rls_isolation_test.go` (FR-039)
+- [ ] T027 [P] Contract test asserting the kernel ABI interfaces compile with ≥1 stub impl each — including the fake `Provider`, a `TaintDeclaration`-bearing `Tool`, `RunControl`, and `BudgetGate` in `backend-go/tests/contract/kernel_abi_test.go`
+- [ ] T028 [P] Contract test for the control/data-plane versioned handshake, including that only enumerated structure-only fields cross the boundary and that `audit_sink_mode=local` emits nothing upstream, in `backend-go/tests/contract/control_data_plane_test.go` (FR-030, FR-091)
+- [ ] T029 [P] Integration test asserting RLS returns zero cross-tenant rows **executed through the production PgBouncer transaction-pooling tier** (testcontainers Postgres + PgBouncer), including an interleaved two-tenant workload on a shared pooled connection; a variant asserting session-level `SET` leaks documents *why* the transaction-local form is mandatory in `backend-go/tests/integration/rls_isolation_test.go` (FR-039, SC-013)
+- [ ] T029a [P] Integration test: an event written under an older `schema_version` still replays correctly after a schema change (upcasting registry) in `backend-go/tests/integration/event_versioning_test.go` (FR-086)
+- [ ] T029b [P] Integration test: audit-chain verification detects injected tampering — record modification, deletion, and reordering — and passes on an untampered chain in `backend-go/tests/integration/audit_chain_test.go` (FR-081, SC-015)
+- [ ] T029c [P] Integration test: erasure destroys the key, renders payloads unrecoverable, and leaves the event sequence replayable and the audit chain verifying (no row deleted) in `backend-go/tests/integration/erasure_test.go` (FR-080, SC-014)
+- [ ] T029d [P] Integration test: a concurrent burst of sessions in one tenant against a nearly-exhausted budget never exceeds the ceiling (pre-spend reservation), and reserved-but-unused budget is fully released with no drift over a sustained run in `backend-go/tests/integration/budget_reservation_test.go` (FR-083, SC-016)
 
-**Checkpoint**: Foundation ready — data layer + RLS + interface seams + queue exist. User stories can now begin.
+**Checkpoint**: Foundation ready — data layer with transaction-local RLS proven through the pooler, encryption/erasure, chained audit, pre-spend budget gate, deterministic provider, and a live eval gate. User stories can now begin, and every change from here is measured.
 
 ---
 
@@ -113,6 +153,9 @@ terminal reason (per quickstart.md Scenario 1).
 - [ ] T031a [P] [US1] Integration test: the pre-model-call hygiene pass drops orphan `tool_result`s, backfills a synthetic result for any unpaired `tool_use`, and never sends malformed history to the provider in `backend-go/tests/integration/loop_hygiene_test.go` (FR-060)
 - [ ] T032 [P] [US1] Integration test: per-task cost ceiling breach terminates with `cost_exhausted` in `backend-go/tests/integration/cost_ceiling_test.go` (FR-017)
 - [ ] T033 [P] [US1] Unit test: response classifier returns `TOOL_CALLS`/`CONTENT`/`EMPTY` (no string matching) in `backend-go/kernel/classify_test.go` (FR-002)
+- [ ] T033b [P] [US1] **Property-based** test: over generated event sequences (interleaved tool calls, cancels, errors, truncations, resumes), every `tool_use` always has exactly one paired `tool_result` before the next model call and no orphan result survives the hygiene pass — a total invariant, so property-tested rather than sampled by examples, in `backend-go/kernel/invariant_property_test.go` (FR-003, FR-060, FR-097)
+- [ ] T033c [P] [US1] Integration test: cancelling an in-flight run terminates it with `aborted`, backfills a synthetic `tool_result` for any outstanding `tool_use`, and returns the best partial artifact — proving every terminal reason has a producer — in `backend-go/tests/integration/cancel_run_test.go` (FR-004, FR-005, FR-067, SC-020)
+- [ ] T033d [P] [US1] Integration test: per-turn cost records split input tokens into uncached / cache-read / cache-write, resolve to a `price_book_version`, and recompute `cost_usd` identically from the price book — so the >90% cache-read gate is measured, not estimated — in `backend-go/tests/integration/cost_measurement_test.go` (FR-016, FR-084, SC-017)
 - [ ] T033a [P] [US1] Unit test: every model call carries a bounded `max_tokens` + stop sequences and the model's own reply is schema/grammar-constrained (no conversational filler) in `backend-go/internal/provider/output_controls_test.go` (FR-073)
 - [ ] T034 [P] [US1] Integration test: built-in filesystem tools are workspace-restricted (path-escape/`..` denied, no cross-tenant access), outputs capped/paginated, contents flagged untrusted in `backend-go/tests/integration/fs_tools_test.go` (FR-056)
 - [ ] T035 [P] [US1] Integration test: the built-in shell tool applies per-invocation parsed-input safety (`ls` allowed, `rm -rf /` denied), a per-command timeout, and runs only in the sandbox in `backend-go/tests/integration/shell_tool_test.go` (FR-057)
@@ -138,11 +181,13 @@ terminal reason (per quickstart.md Scenario 1).
 - [ ] T041c [US1] Implement per-effect idempotency-key derivation + durable tenant-scoped dedup in the tool execution pipeline (state-changing tools/connectors execute exactly once under retry/redelivery/resume) in `backend-go/internal/tools/idempotency.go` (FR-071; extends T041)
 - [ ] T042 [P] [US1] Implement built-in workspace-restricted filesystem tools (`file_list`/`file_read`/`file_search`/`file_write`/`file_edit`, poka-yoke absolute paths, capped/paginated output, contents treated as untrusted) in `backend-go/internal/tools/builtin/fs.go` (FR-056)
 - [ ] T043 [P] [US1] Implement the built-in shell / code-execution tool (sandbox-scoped with hard resource limits + network default-deny per FR-059, per-invocation parsed-input safety, allow/blocklist, per-command timeout, fail-closed) in `backend-go/internal/tools/builtin/shell.go` (FR-057, FR-059)
-- [ ] T044 [P] [US1] Implement per-turn token/cost metering attributed to task+tenant and the per-task ceiling check → `cost_exhausted` in `backend-go/internal/cost/meter.go` (FR-016, FR-017)
+- [ ] T044 [P] [US1] Implement per-turn token/cost metering attributed to task+tenant — recording **uncached / cache-read / cache-write input and output tokens separately**, pricing them through the versioned price book (T010a), and stamping `price_book_version` on every cost record — wired to the pre-spend reservation gate (T026a) rather than a post-hoc ceiling check, in `backend-go/internal/cost/meter.go` (FR-016, FR-017, FR-083, FR-084)
 - [ ] T045 [US1] Implement acceptance-criteria verification (no self-declared success; end-state checks) in `backend-go/kernel/verify.go` (FR-044)
+- [ ] T045a [US1] Enforce run-determinant pinning: resolve and **pin `agent_version` at run start**, holding it for the run's life so a concurrent deploy cannot shift behavior or bust the cache-stable prefix mid-run, and persist `data_label`, `route_model_id`/`route_reason`, `execution_class`/`priority`, and `region` on the session so routing is auditable and replayable and load-shedding has a field to read, in `backend-go/kernel/pinning.go` (FR-088, FR-013, FR-049)
+- [ ] T045b [P] [US1] Integration test: a run started before an agent-version deploy completes on the pinned version (behavior and prompt prefix unchanged mid-run) while a run started after uses the new one in `backend-go/tests/integration/agent_pinning_test.go` (FR-088, FR-026)
 - [ ] T046 [US1] Wire the runtime-worker entrypoint (pull session → run kernel loop → append events) in `backend-go/cmd/runtime-worker/main.go`
-- [ ] T047 [US1] Implement the run-submission REST surface (`POST /v1/runs`, `GET /v1/runs/{id}`, `GET /v1/runs/{id}/events` SSE) in `backend-go/cmd/surface-gateway/runs.go` (run-api.openapi.yaml)
-- [ ] T048 [US1] Implement mid-run steering input (`POST /v1/runs/{id}/input`) in `backend-go/cmd/surface-gateway/input.go` (FR-005)
+- [ ] T047 [US1] Implement the run-submission REST surface (`POST /v1/runs`, `GET /v1/runs/{id}`, `GET /v1/runs/{id}/events` SSE with `Last-Event-ID`/`from_seq` resume so a dropped subscriber catches up without loss or duplication) in `backend-go/cmd/surface-gateway/runs.go` (run-api.openapi.yaml, FR-031)
+- [ ] T048 [US1] Implement the run-lifecycle operations — mid-run steering (`POST /v1/runs/{id}/input`, delivered to the running session's steering queue under its serial lock and appended as a `user_message` event), **cancel** (`POST /v1/runs/{id}/cancel`, the only producer of `aborted`, honoring the paired-result invariant and returning the partial artifact), and **resume** (`POST /v1/runs/{id}/resume` from the last checkpoint) — in `backend-go/cmd/surface-gateway/input.go` and `backend-go/kernel/control.go` (FR-005, FR-004, FR-024)
 
 **Checkpoint**: User Story 1 is a standalone MVP — a reliable, cost-bounded, typed-terminal agent loop reachable via the REST surface.
 
@@ -195,7 +240,7 @@ approval and expires as denial (quickstart.md Scenario 3).
 - [ ] T059 [P] [US3] Integration test: two-tenant concurrent run, cross-tenant read returns zero rows in `backend-go/tests/integration/tenant_isolation_test.go` (FR-039)
 - [ ] T060 [P] [US3] Integration test: every mutating action emits a tamper-evident audit receipt binding user+tenant+tool+args+result+timestamp in `backend-go/tests/integration/audit_receipt_test.go` (FR-040)
 - [ ] T061 [P] [US3] Integration test: unanswered approval expires as denial → run ends `approval_expired`, gated action does not proceed in `backend-go/tests/integration/approval_timeout_test.go` (FR-036)
-- [ ] T062 [P] [US3] Integration test: Rule of Two blocks the third leg of the lethal trifecta unattended in `backend-go/tests/integration/rule_of_two_test.go` (FR-033)
+- [ ] T062 [P] [US3] Integration test: Rule of Two blocks the third leg of the lethal trifecta unattended, decides from declared per-tool taint metadata, fails closed when a tool's declaration is missing, and clears taint only across an audited sanitization boundary in `backend-go/tests/integration/rule_of_two_test.go` (FR-033, FR-087)
 - [ ] T063 [P] [US3] Integration test: built-in web fetch/search is egress domain-allowlisted (blocked domain denied) and returned content is treated as untrusted under the Rule of Two in `backend-go/tests/integration/web_tool_test.go` (FR-058)
 - [ ] T064 [P] [US3] Unit test: secret handle never appears in prompt/transcript in `backend-go/internal/security/secrets_test.go` (FR-034)
 - [ ] T064a [P] [US3] Integration test: the egress sanitizer strips leaked `<tool_call>`/`<think>` fragments and stutter, and the credential scrubber redacts secret-shaped tokens from model/tool output before delivery in `backend-go/tests/integration/output_sanitizer_test.go` (FR-068)
@@ -209,13 +254,15 @@ approval and expires as denial (quickstart.md Scenario 3).
 - [ ] T067 [P] [US3] Implement delegated-identity (act-as calling user) enforcement at the tool boundary in `backend-go/internal/security/identity.go` (FR-035)
 - [ ] T068 [P] [US3] Implement layered fail-closed defense (channel allowlist, autonomy mode, workspace restriction, shell allow/blocklist) in `backend-go/internal/security/defense.go` (FR-032)
 - [ ] T068a [P] [US3] Implement the egress output sanitizer (strip leaked `<tool_call>`/`<think>` markup, echoed system framing, duplicated stutter) + credential scrubber (redact secret-shaped tokens) applied to all model/tool output before delivery or persistence in `backend-go/internal/security/sanitize.go` (FR-068)
-- [ ] T069 [P] [US3] Implement the Rule of Two evaluator over {untrusted input, private data, external state change} per session in `backend-go/internal/security/rule_of_two.go` (FR-033)
+- [ ] T069 [P] [US3] Implement the Rule of Two evaluator driven by **declared per-tool taint metadata** (`returns_untrusted` / `reads_private_data` / `mutates_external`) combined with the session's accumulated `taint_state`, failing closed when a declaration is absent or unclassifiable, and appending a `taint_transition` event on every change, in `backend-go/internal/security/rule_of_two.go` (FR-033, FR-087)
+- [ ] T069b [P] [US3] Implement the **sanitization boundary** — a bounded, audited operation that reduces session taint by isolating untrusted content behind a summarizing sub-agent firewall or an operator-scoped re-baseline, recorded as a `sanitization_boundary` event — so a long session does not become permanently tainted and degrade the control into approval fatigue, in `backend-go/internal/security/sanitize_boundary.go` (FR-087, FR-079)
 - [ ] T069a [P] [US3] Implement the inbound-message input guard (injection/jailbreak pattern screening with off/log/warn/block modes, fail-closed on high-severity match) in `backend-go/internal/security/input_guard.go` (FR-069)
 - [ ] T070 [P] [US3] Implement egress allowlist + by-class PII/PHI/secret redaction before leaving the trust boundary in `backend-go/internal/security/egress.go` (FR-037)
 - [ ] T071 [P] [US3] Implement built-in web search + web fetch tools (egress-allowlisted via T070, crawl4ai as the fetch/crawl backend returning clean chunked markdown, untrusted-content handling under the Rule of Two, high-signal capped/paginated results, oversized bodies offloaded) in `backend-go/internal/tools/builtin/web.go` (FR-058, FR-037, FR-033)
-- [ ] T072 [P] [US3] Implement the immutable audit log + HMAC tamper-evident tool receipts in `backend-go/internal/audit/receipt.go` (FR-040)
-- [ ] T073 [US3] Implement scoped human approval for high-impact actions with a TTL that expires as denial (`approval_expired`) in `backend-go/internal/security/approval.go` (FR-036)
-- [ ] T074 [US3] Implement the `POST /v1/approvals/{id}` resolve endpoint (grant/deny + scope) in `backend-go/cmd/surface-gateway/approvals.go` (FR-036)
+- [ ] T072 [P] [US3] Wire mutating tool execution to the chained audit writer from T026b (receipt per mutating action binding user+tenant+tool+arg/result digests+timestamp into the per-session hash chain) in `backend-go/internal/audit/receipt.go` (FR-040, FR-081)
+- [ ] T073 [US3] Implement scoped human approval for high-impact actions: the run **suspends durably at zero token cost** while pending; a TTL expiry denies **the action** and returns a typed synthetic `tool_result` so the agent may replan, terminating the run `approval_expired` (with its best partial artifact) only when it cannot proceed; every outcome appended as a typed approval event; scopes bounded by tool + effect class + expiry with no unbounded `permanent`, in `backend-go/internal/security/approval.go` (FR-036, FR-067, FR-085)
+- [ ] T074 [US3] Implement the `POST /v1/approvals/{id}` resolve endpoint (grant/deny + bounded scope: `once` | `session` | `standing` with `scope_tool_id`, `scope_effect_class`, `scope_expires_at`) in `backend-go/cmd/surface-gateway/approvals.go` (FR-036)
+- [ ] T074a [P] [US3] Integration test: an expired approval denies only the action and lets the run replan to completion, while a run that cannot proceed without it terminates `approval_expired` returning its partial artifact; and a `standing` scope without an expiry is rejected in `backend-go/tests/integration/approval_semantics_test.go` (FR-036, FR-067)
 - [ ] T075 [US3] Implement the control-plane authN + RBAC authorization gate that composes the OIDC/provisioning primitives below (rejects unauthenticated/out-of-scope requests before a run is queued) in `backend-go/cmd/control-plane/auth.go` (FR-029, FR-035)
 - [ ] T076 [US3] Implement OIDC token validation middleware (OIDC discovery + per-tenant JWKS fetch/cache from `Tenant.identity_config`, signature + `iss`/`aud`/`exp` claim verification; standards-only, no provider-specific SDK) in `backend-go/cmd/control-plane/oidc.go` (FR-029)
 - [ ] T077 [US3] Implement JIT user provisioning with a per-tenant claims mapping (resolve `external_subject` and roles/groups from the configured claim names — default `sub`/`roles`, overridable per provider; upsert `User` by `(tenant_id, external_subject)` on first valid sign-in; resolve roles → permission scopes via `Tenant.rbac_map`) in `backend-go/internal/tenancy/provision.go` (FR-035)
@@ -258,9 +305,11 @@ the eval set (quickstart.md Scenario 4).
 - [ ] T087 [P] [US4] Implement quality-per-dollar (η$) and completions-per-million-token reporting in `backend-go/internal/cost/report.go` (FR-018)
 - [ ] T088 [P] [US4] Implement structure-only trace spans (decision structure + per-turn cost/latency/token) with content gated behind an authorized debug scope in `backend-go/internal/observability/trace.go` (FR-040)
 - [ ] T089 [US4] Implement the control-plane rate limits + budget checks + routing front door in `backend-go/cmd/control-plane/gateway.go` (FR-029)
-- [ ] T090 [P] [US4] Implement the eval runner (~20 real cases, end-state checks) in `ml-python/src/evals/runner.py` (FR-043)
-- [ ] T091 [P] [US4] Implement the LLM-as-judge rubric scorer + held-out grader protection in `ml-python/src/judge/rubric.py` (FR-043)
-- [ ] T092 [US4] Wire the eval gate into CI (≥90% pass AND zero regressions vs baseline) in `.github/workflows/ci.yml` and `ml-python/src/evals/gate.py` (FR-042, FR-043)
+- [ ] T090 [P] [US4] Grow the eval set from production traces (new cases from real failures) and add funnel metrics — task success, cost/task, latency, tool-error rate, human-escalation rate — to `ml-python/src/evals/runner.py` (FR-043) *(the runner itself is Foundational: T026e)*
+- [ ] T091 [P] [US4] Extend the judge with calibration against human labels and spec-gaming detection (trace review for test edits, credential access, skip markers) in `ml-python/src/judge/rubric.py` (FR-043) *(base scorer is Foundational: T026f)*
+- [ ] T092 [US4] Extend the CI gate with the release-report artifact (pass rate, regressions, η$, CPM) in `ml-python/src/evals/gate.py` (FR-042, FR-043, FR-018) *(the blocking gate itself is Foundational: T026g)*
+- [ ] T092b [P] [US4] Implement showback/chargeback export — cost aggregated per tenant and, within a tenant, per user, agent, and surface over a billable period, reconciling to the sum of the underlying cost records and naming the price-book version — in `backend-go/internal/cost/chargeback.go` (FR-093)
+- [ ] T092c [P] [US4] Integration test: a chargeback export reconciles exactly to the sum of per-turn cost records across all dimensions, and a price-book version change leaves historical figures unchanged in `backend-go/tests/integration/chargeback_test.go` (FR-093, FR-084)
 - [ ] T092a [P] [US4] Implement model + connector/MCP version pinning with eval-gated adoption, supply-chain scope vetting, and revert-on-regression (a snapshot/version bump is an eval-gated deploy) in `backend-go/internal/provider/pinning.go` and `ml-python/src/evals/version_gate.py` (FR-078, FR-042, FR-043)
 
 **Checkpoint**: Cost governance, structure-only observability, and the CI eval gate are live; US1–US3 still work.
@@ -321,6 +370,8 @@ topologies (SaaS + self-hosted) by configuration (quickstart.md Scenario 6).
 - [ ] T105 [P] [US6] Author the signed OCI image set + Helm chart in `deploy/helm/` (control-plane, runtime-worker, surface-gateway) (FR-030)
 - [ ] T106 [P] [US6] Author the Terraform module + BYOC KEDA/HPA autoscale-on-queue-depth policy in `deploy/terraform/` (FR-030, FR-046)
 - [ ] T107 [US6] Implement deployment-topology configuration (SaaS/single-tenant/BYOC/hybrid) selecting sandbox isolation + data-plane placement in `backend-go/internal/tenancy/topology.go` (FR-050)
+- [ ] T107a [P] [US6] Implement **region pinning enforced at admission** — a run whose placement (worker, sandbox, event log, memory, model route) would fall outside the tenant's pinned region is refused with `region_conflict`, never relocated — in `backend-go/cmd/control-plane/placement.go` (FR-091)
+- [ ] T107b [P] [US6] Integration test: a region-pinned tenant's run is refused rather than executed out of region, and in a customer-boundary deployment only the enumerated structure-only fields cross the boundary (with `audit_sink_mode=local` emitting nothing) in `backend-go/tests/integration/residency_test.go` (FR-091, SC-004)
 
 **Checkpoint**: Config-not-forks onboarding + multi-topology deploy work; US1–US5 still work.
 
@@ -385,6 +436,7 @@ Scenario 8).
 
 ### Tests for User Story 8 ⚠️ (write first, ensure they FAIL)
 
+- [ ] T123a [P] [US8] Integration test: a forged (bad signature), a replayed (stale timestamp/nonce), and a flooding webhook delivery are each rejected **before** any adapter translation — zero kernel invocations, zero token spend — while a correctly signed delivery proceeds; likewise an OAuth callback with a reused or unbound `state`, or an unregistered redirect URI, is refused, in `backend-go/tests/integration/webhook_auth_test.go` (FR-082, SC-019)
 - [ ] T124 [P] [US8] Integration test: a Telegram webhook message routes to the kernel with identical control flow + terminal reason to the API surface in `backend-go/tests/integration/telegram_surface_test.go` (FR-051)
 - [ ] T125 [P] [US8] Integration test: a Zalo webhook message routes to the kernel with identical control flow + terminal reason in `backend-go/tests/integration/zalo_surface_test.go` (FR-051)
 - [ ] T126 [P] [US8] Integration test: per-user OAuth auth-code+PKCE consent vaults tokens per `(tenant, user, connector)`, auto-refreshes on expiry, and revoke removes access in `backend-go/tests/integration/connector_oauth_test.go` (FR-052)
@@ -394,6 +446,7 @@ Scenario 8).
 
 ### Implementation for User Story 8
 
+- [ ] T129a [US8] Implement the **inbound webhook authenticator** applied to every unsolicited ingress path (Telegram secret-token / Zalo HMAC / inbound email / connector callbacks) *before* adapter translation: provider signature or shared-secret verification, replay rejection outside a bounded timestamp/nonce window, per-external-identity flood limiting, and fail-closed on any check — plus single-use `state` bound to the initiating user session and a pre-registered redirect-URI allowlist for OAuth callbacks — in `backend-go/internal/surfaces/webhook_auth.go` (FR-082)
 - [ ] T130 [US8] Author the migration for `ConnectorAuthorization` (per `(tenant, user, connector)` OAuth tokens/scopes/expiry) and `SurfaceIdentity` (external chat id → `User`) tables with `tenant_id` row-level-security policies in `backend-go/migrations/0004_connectors.sql` (FR-052, FR-055)
 - [ ] T131 [P] [US8] Implement the per-user OAuth connector authorization service (auth-code + PKCE, `state`/nonce, token exchange) in `backend-go/internal/connectors/oauth.go` (FR-052)
 - [ ] T132 [P] [US8] Implement connector token vault storage + auto-refresh + revoke, keyed per `(tenant, user, connector)`, injected at execution time (model sees a handle) in `backend-go/internal/connectors/vault.go` (FR-052, FR-054)
@@ -417,12 +470,15 @@ config-only additions; US1–US7 still work.
 
 **Purpose**: Hardening, docs, and the go-live gate spanning all stories
 
-- [ ] T143 [P] Implement the go-live checklist assertion (`make go-live-check`) covering audit, vaulted secrets, sandboxing+approval, trifecta, cost ceilings, reliability, evals-green, cache-read, residency/retention, runbook in `backend-go/cmd/control-plane/golive.go` (FR-045); the check MUST assert that the incident runbook (`docs/runbook.md`) and residency/retention policy doc (`docs/data-policy.md`) exist and are non-empty
+- [ ] T143 [P] Implement the go-live checklist assertion (`make go-live-check`) covering audit, vaulted secrets, sandboxing+approval, trifecta, cost ceilings, reliability, evals-green, cache-read, residency/retention, runbook in `backend-go/cmd/control-plane/golive.go` (FR-045); the check MUST assert that the incident runbook (`docs/runbook.md`), the residency/retention policy doc (`docs/data-policy.md`), and the operating-model doc (`docs/operating-model.md`) exist and are non-empty, and MUST additionally assert: audit-chain verification green with a current anchor (FR-081), isolation verified **through the pooler** (FR-039, SC-013), pre-spend budget reservation active (FR-083), content encrypted at rest with an exercised erasure path (FR-080, FR-089), a restore drill within the last quarter meeting RPO/RTO (FR-090), SBOM + signed artifacts published (FR-092), and error-budget alerting wired to the runbook (FR-095)
 - [ ] T144 [P] Add the cache-read steady-state measurement + >90% assertion to observability in `backend-go/internal/observability/cache_metrics.go` (FR-014)
 - [ ] T144a [P] Integration test: an oversized tool output is offloaded to object storage and returned as an in-context preview carrying the "do not infer success from the preview" caveat (referenced by path from the event log) in `backend-go/tests/integration/output_offload_test.go` (FR-010)
 - [ ] T145 [P] Implement oversized tool-output offload to object storage with in-context preview + "do not infer success" caveat in `backend-go/internal/tools/offload.go` (FR-010)
-- [ ] T146 [P] Add SLA measurement + alerting (≥99.9% control plane / ≥99.5% run completion; p95 queue-wait, first-token) in `backend-go/internal/observability/sla.go` (SC-008, SC-011)
-- [ ] T147 [P] Author quickstart validation `Makefile` targets referenced by quickstart.md (`verify-isolation`, `verify-approval-timeout`, `verify-skill-promotion`, `chaos-crash`, `load-test`, `capacity-check`, `trace`, `seed-memory`, `onboard-org`, `deploy`, `connect-connector`)
+- [ ] T146 [P] Add SLO measurement + **error-budget policy** + burn-rate alerting (≥99.9% control plane / ≥99.5% run completion; p95 queue-wait, first-token), each alert naming the runbook section it pages to, covering the agent golden signals — queue wait and oldest-message age, completion rate by terminal reason, cost-ceiling breach rate, approval-expiry rate, stuck-detection rate, cache-read rate, sandbox reclamation rate, provider throttle/failover rate — in `backend-go/internal/observability/sla.go` (FR-095, SC-008, SC-011)
+- [ ] T146a [P] Implement backup coverage + point-in-time restore for the event log, audit chain, config, and vault, and automate the **restore drill** measuring RPO/RTO and asserting that the chain verifies and the log replays post-restore, in `deploy/dr/` and `backend-go/tests/integration/restore_drill_test.go` (FR-090, SC-018)
+- [ ] T146b [P] Add supply-chain assurance for the platform's own build: SBOM generation per release, artifact signing with published provenance, and dependency + container vulnerability scanning that fails CI above a defined severity, in `.github/workflows/release.yml` and `deploy/` (FR-092)
+- [ ] T146c [P] Author the operating-model and governance record: named ownership for the platform team, AgentOps (SLOs, on-call, evals-in-CI, cost dashboards, behavioral incident response), and the governance/risk function, plus the AI risk register and the sign-off gate a new tool/connector/autonomy increase must clear before a tenant enables it, in `docs/operating-model.md` and `backend-go/internal/tenancy/governance.go` (FR-096)
+- [ ] T147 [P] Author quickstart validation `Makefile` targets referenced by quickstart.md (`migrate`, `seed-tenant`, `run`, `evals`, `verify-isolation`, `verify-approval-timeout`, `verify-skill-promotion`, `chaos-crash`, `deploy-during-run`, `load-test`, `capacity-check`, `trace`, `seed-memory`, `onboard-org`, `deploy`, `link-surface`, `connect-connector`, `verify-audit-chain`, `verify-erasure`, `restore-drill`, `go-live-check`) — every target referenced anywhere in quickstart.md must exist
 - [ ] T148 [P] Author developer + operator documentation in `docs/` including: architecture overview, deployment topologies, and a rehearsed behavioral-incident runbook at `docs/runbook.md` (covering detection, triage, mitigation, and rollback steps for the five most critical failure modes: kernel loop stall, cost ceiling breach, cross-tenant data leak, approval TTL expiry under load, and provider outage) referenced by the T143 go-live gate (FR-045)
 - [ ] T148a [P] Author the data-residency, retention, and no-train policy document at `docs/data-policy.md` (covering per-deployment-tier data residency / region-pinning options, the 90-day default memory retention and tenant-override process, the no-training guarantee, and the DSAR support procedure for GDPR/CCPA-tier tenants) referenced by the T143 go-live gate (FR-045)
 - [ ] T149 [P] Add unit-test coverage pass across `backend-go/tests/unit/` for kernel, cost, security, and reliability helpers
@@ -453,7 +509,7 @@ collapse.
 ### Bottleneck hardening
 
 - [ ] T153 Implement the event-log write-scaling strategy — partition the Postgres event log (by `tenant_id`/time), batch/pipeline appends, and split the hot append path from analytical reads — in `backend-go/migrations/0005_eventlog_partitioning.sql` and `backend-go/internal/queue/eventlog.go` (FR-006, SC-008)
-- [ ] T154 [P] Define and enforce the database connection budget — per-worker `pgx` pool sizing tied to worker concurrency, plus a PgBouncer (transaction-pooling) tier in front of Postgres — in `backend-go/internal/tenancy/config.go` and `deploy/helm/` (SC-008, FR-048)
+- [ ] T154 [P] Define and enforce the database connection budget — per-worker `pgx` pool sizing tied to worker concurrency, plus a PgBouncer (transaction-pooling) tier in front of Postgres — in `backend-go/internal/tenancy/config.go` and `deploy/helm/` (SC-008, FR-048). **Must compose with T020**: transaction pooling requires transaction-local tenant scope (`SET LOCAL`) and a `pgx` protocol/statement-cache mode compatible with it; the T029 isolation test runs through this tier and is the gate on this task (FR-039, SC-013)
 - [ ] T155 [P] Harden the Redis session-key lock for the hot path (extends T022) — bounded TTL with fencing-token renewal, defined mid-run Redis-failover behavior (fail-closed, re-queue), and thundering-herd/contention backoff — in `backend-go/internal/queue/sessionlock.go` (FR-041, FR-046)
 - [ ] T156 [P] Implement the sandbox-pool sizing model + demand-driven pool autoscaler (warm-headroom target vs. concurrent-run demand, per-tenant caps, reclamation under pressure) so pool capacity — not queue throughput — is a known, tunable ceiling in `backend-go/internal/sandbox/pool.go` and `deploy/helm/` (FR-047, SC-008)
 - [ ] T157 [P] Implement per-provider rate-limit accounting (TPM/RPM quota pooling per account/region) with 429/`Retry-After` backpressure that feeds the gateway admission controller (T121) instead of failing runs, in `backend-go/internal/provider/quota.go` (FR-027, FR-049)
@@ -473,7 +529,10 @@ provider quotas) are hardened, and high-concurrency go-live is gated on real num
 ### Phase Dependencies
 
 - **Setup (Phase 1)**: No dependencies — start immediately
-- **Foundational (Phase 2)**: Depends on Setup — BLOCKS all user stories
+- **Foundational (Phase 2)**: Depends on Setup — BLOCKS all user stories. Note that
+  the eval runner/judge/CI gate (T026e–T026g) now live here rather than in US4, so
+  no behavior-bearing slice ships unmeasured; the remaining US4 eval tasks only
+  extend them.
 - **User Stories (Phases 3–10)**: All depend on Foundational
   - US1 (P1) is the MVP and should land first
   - US2–US4 (P2) build on US1; US5–US7 (P3) build on the P2 slices; US8 (P2) builds on US2 + US3
@@ -553,11 +612,22 @@ Task: "Implement Notion connector in backend-go/internal/connectors/notion.go"
 
 ### MVP First (User Story 1)
 
+Aligned with the **MVP cut line** in [plan.md](plan.md) — seams and schema early,
+infrastructure late.
+
 1. Complete Phase 1: Setup
-2. Complete Phase 2: Foundational (CRITICAL — blocks all stories)
+2. Complete Phase 2: Foundational (CRITICAL — blocks all stories). This includes
+   the eval gate, the deterministic provider, transaction-local RLS proven through
+   the pooler, the audit chain, encryption/erasure, and the pre-spend budget gate
 3. Complete Phase 3: User Story 1
 4. **STOP and VALIDATE**: run quickstart.md Scenario 1 independently
 5. Deploy/demo the reliable cost-bounded loop
+
+Increment 1 deliberately runs the loop in-process behind the queue *port*, on a
+single-tenant container sandbox, with one surface (REST) — the durable queue,
+warm sandbox pool, physical plane split, consumer surfaces, and multi-topology
+packaging are deferred per the cut line, and each is additive against the
+Foundational schema and contracts.
 
 ### Incremental Delivery (aligned to the plan's six phases)
 

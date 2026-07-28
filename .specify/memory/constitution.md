@@ -1,27 +1,37 @@
 <!--
 SYNC IMPACT REPORT
 ==================
-Version change: (unversioned template) → 1.0.0
-Bump rationale: MAJOR — initial ratification of the project constitution from the
-  template placeholders, establishing the full governing principle set.
+Version change: 1.0.0 → 1.1.0
+Bump rationale: MINOR — materially expanded existing principles and constraint
+  sections to close design-review gaps. No principle removed or redefined; all
+  1.0.0 rules remain binding.
 
-Modified principles: N/A (initial adoption; all principles newly defined)
+Modified principles:
+  - VI (Tenant Is the First Dimension) — isolation must survive connection
+    pooling (transaction-local tenant scoping); the isolation test must run
+    through the production pooling tier.
+  - IX (Verify / Govern) — evals are a Foundational deliverable, not a later
+    phase; a deterministic test harness is required for a non-deterministic
+    dependency.
 
-Added sections:
-  - Core Principles (I–IX)
-  - Security & Trust Surface (Additional Constraints)
-  - Delivery, Scale & Technology Constraints
-  - Development Workflow & Quality Gates
-  - Governance
+Added / expanded sections:
+  - Security & Trust Surface: audit receipts must be hash-chained and externally
+    anchored with sign-only key custody; customer content encrypted at rest with
+    per-tenant keys; erasure via crypto-shredding reconciled with the append-only
+    log; metadata egress from a customer boundary must be explicit and bounded.
+  - Delivery, Scale & Technology Constraints: cost ceilings enforced by
+    reserve-then-reconcile; event schema is versioned with an upcasting path;
+    expand/contract schema migration; documented RPO/RTO and rehearsed restore.
+  - Development Workflow & Quality Gates: SLO/error-budget policy; operating
+    model ownership (platform team / AgentOps / governance sign-off).
 
-Removed sections: none (template placeholders replaced in full)
+Removed sections: none
 
 Templates requiring updates:
-  - .specify/templates/plan-template.md ✅ compatible (Constitution Check gate is
-    generic; no principle-name coupling requiring edits)
-  - .specify/templates/spec-template.md ✅ compatible (no changes required)
-  - .specify/templates/tasks-template.md ✅ compatible (no changes required)
-  - .github/agents/speckit.*.agent.md ✅ no outdated agent-specific references found
+  - .specify/templates/plan-template.md ✅ compatible (generic Constitution Check)
+  - .specify/templates/spec-template.md ✅ compatible
+  - .specify/templates/tasks-template.md ✅ compatible
+  - .github/agents/speckit.*.agent.md ✅ no outdated references found
 
 Follow-up TODOs: none
 -->
@@ -109,9 +119,17 @@ be attributable to a user and tenant in an immutable audit log, and per-turn
 token/cost/latency observability MUST exist from the first pilot. Secrets, budgets,
 and rate limits MUST be isolated per tenant.
 
+Isolation MUST survive connection pooling. Tenant scoping MUST be
+**transaction-local** (`SET LOCAL` / `SET ROLE LOCAL` inside the transaction);
+session-level scoping is prohibited because a transaction-pooling tier reassigns
+a connection between tenants. The cross-tenant isolation test MUST execute
+through the same pooling tier production uses — a test that passes only against a
+direct connection proves nothing.
+
 **Rationale**: The enterprise tax — multi-tenancy, audit, observability — is a
 day-one requirement; retrofitting it is a rewrite. DB-level isolation is the only
-defense that survives an application bug.
+defense that survives an application bug — and only if the mechanism that carries
+tenant identity survives the connection pooler in front of it.
 
 ### VII. Model- and Provider-Agnostic by Abstraction
 
@@ -150,9 +168,18 @@ reviewed, and eval-gated; a prompt or model change is a deploy. Agent-written
 skills MUST follow propose → human/eval gate → version → promote, and MUST NEVER be
 auto-promoted.
 
+The eval set and its CI gate are a **Foundational** deliverable that MUST exist
+before the first behavior-bearing slice ships, not a later phase — the window in
+which changes have the largest effect sizes is the window in which they are
+otherwise unmeasured. Because the model is a non-deterministic dependency, the
+test suite MUST run against a deterministic provider harness (recorded
+transcripts / fake provider) so correctness tests neither flake nor bill.
+
 **Rationale**: Non-determinism and spec-gaming make self-reported success
 unreliable. Treating prompts/tools/skills as governed, eval-gated config is what
-separates a demo from a system that can be safely changed and audited.
+separates a demo from a system that can be safely changed and audited — and an
+eval gate that arrives after three phases of unmeasured change has already lost
+the baseline it was meant to protect.
 
 ## Security & Trust Surface
 
@@ -165,15 +192,45 @@ are binding in addition to Principle V:
   delegated identity), never a god-mode service account. RBAC is enforced at the
   tool boundary, not just the UI.
 - **Audit receipts**: Mutating actions MUST produce tamper-evident tool receipts
-  (HMAC over session + tool name + args + result + timestamp).
+  (HMAC over session + tool name + args + result + timestamp). A per-record MAC
+  alone is NOT tamper-evidence: receipts MUST be **hash-chained** per session
+  (each carrying its predecessor's digest), the chain head MUST be periodically
+  anchored outside the writing system, and the signing key MUST be held
+  sign-only (KMS/HSM) so a component that writes receipts cannot rewrite them. A
+  scheduled verifier MUST prove chain continuity and MUST alert on a break or a
+  gap in sequence.
 - **Egress & redaction**: Outbound domains MUST be allowlisted; PII/secrets/PHI/
   card data MUST be masked by class before leaving the trust boundary. Sensitive
   tasks SHOULD route to a self-hosted model so payloads never leave.
+- **Content at rest**: Conversation content (prompts, tool arguments, tool
+  results) is customer data. It MUST be encrypted at rest under a per-tenant key,
+  with customer-managed / bring-your-own-key supported at the deployment tiers
+  that require it.
+- **Erasure reconciled with append-only**: An append-only log and a right to
+  erasure are reconciled by **crypto-shredding**, not by deletion — event
+  payloads are envelope-encrypted per tenant (and per erasure subject where the
+  tier requires it) and erasure destroys the key, rendering content
+  unrecoverable while the event sequence, its digests, and the audit chain stay
+  intact and verifiable. Redaction MUST NOT break chain verification.
+- **Bounded metadata egress**: When a data plane runs inside a customer
+  boundary, everything that leaves it MUST be enumerated in the contract and
+  bounded to structure (identifiers, counts, digests) — never content. A
+  fully in-boundary audit/telemetry sink MUST be selectable by configuration.
 - **Human-in-the-loop**: Payments, deletes, external sends, and production changes
-  MUST be gated by scoped human approval; the sandbox is the trust boundary.
+  MUST be gated by scoped human approval; the sandbox is the trust boundary. An
+  approval that expires denies **the action**, not necessarily the run: the run
+  MUST be offered the typed denial and MAY replan; terminating the run is the
+  fallback when it cannot proceed. Approval scopes MUST be bounded in time and
+  in blast radius — no scope may permanently ungate a class of high-impact action.
+- **Inbound channel authenticity**: Any surface that accepts unsolicited inbound
+  traffic (webhooks, callbacks) MUST verify provider authenticity
+  (signature/secret), reject replays outside a bounded window, and rate-limit per
+  external identity **before** the kernel sees the payload. Identity binding is a
+  separate control and does not substitute for it.
 - **Compliance**: Data residency/region pinning, retention limits, DSAR support, a
   no-train guarantee, model/prompt versioning, and an AI risk register MUST be
-  maintained where the deployment tier requires them.
+  maintained where the deployment tier requires them. The platform's own build
+  MUST ship an SBOM with signed artifacts and scanned dependencies.
 
 ## Delivery, Scale & Technology Constraints
 
@@ -198,15 +255,48 @@ are binding in addition to Principle V:
   scan for injection/exfiltration before injecting. A vector DB / knowledge graph
   is introduced only when the data shape and scale (past ~1M tokens of durable
   knowledge, or genuinely graph-shaped relational data) justify it.
+- **Cost ceilings are enforced before the spend, not after**: A ceiling that is
+  checked by aggregating usage after a turn completes is a lagging indicator, not
+  a ceiling. Every turn MUST reserve its worst-case cost against an atomic
+  per-tenant counter before the model call, the worker MUST enforce a local hard
+  per-run budget synchronously, and actuals MUST be reconciled against the
+  reservation afterwards.
+- **The event log is a versioned contract**: Every appended event MUST carry a
+  schema version, and a documented upcasting path MUST keep historical events
+  replayable across schema change. Derived tables (session status, approval
+  status, sandbox state) are projections of the log, never a second source of
+  truth.
+- **Schema change is expand/contract**: Because a rolling deploy runs old and new
+  code against one database, migrations MUST be additive-then-cleanup, and no
+  release may require old and new schema simultaneously.
+- **Durability is designed, not assumed**: Backup, restore, RPO, and RTO MUST be
+  defined for the event log and audit chain, and restore MUST be rehearsed — an
+  availability SLA without a rehearsed restore is a claim, not a commitment.
 - **Build for the current stage**: Do not build a later stage's infrastructure
-  early. Each phase MUST produce a shippable, testable increment.
+  early. Each phase MUST produce a shippable, testable increment. A plan whose
+  scope exceeds the stage it is shipping into MUST record the deferral
+  explicitly (an MVP cut line plus what is deliberately postponed), not silently
+  claim compliance.
 
 ## Development Workflow & Quality Gates
 
 - **Evals as the release gate**: A real eval set (starting ~20 cases) with an
   LLM-as-judge rubric and end-state checks MUST run in CI and gate any prompt,
   tool, model, or skill change. Track pass rates over N runs; hold out grader tests
-  the agent cannot edit to prevent spec-gaming.
+  the agent cannot edit to prevent spec-gaming. The gate MUST be in place before
+  the first behavior-bearing slice ships (Principle IX).
+- **Deterministic tests for a non-deterministic dependency**: Correctness tests
+  MUST run against a recorded/fake provider rather than a live model, and the
+  transcript-hygiene invariant (paired `tool_use`/`tool_result`) MUST be covered
+  by property-based tests, not examples alone.
+- **SLOs have error budgets**: Every stated availability/latency SLA MUST have a
+  corresponding SLO, an error-budget policy, and burn-rate alerting that names the
+  runbook it pages to.
+- **Ownership is named**: A platform team owns the shared harness; an AgentOps
+  function owns SLOs, on-call, evals-in-CI, cost dashboards, and behavioral
+  incident response; a governance/risk function signs off new tools, connectors,
+  and autonomy levels and maintains the AI risk register. An unowned control is
+  not a control.
 - **Prompts/tools/skills are reviewed config**: Changes go through version control
   and code review like any release; a governance/risk function signs off new tools
   and autonomy levels.
@@ -240,4 +330,4 @@ MUST be resolved before merge.
 - **Runtime guidance**: Agent-specific and contributor guidance files are
   subordinate to this constitution and MUST be kept consistent with it.
 
-**Version**: 1.0.0 | **Ratified**: 2026-07-17 | **Last Amended**: 2026-07-17
+**Version**: 1.1.0 | **Ratified**: 2026-07-17 | **Last Amended**: 2026-07-27

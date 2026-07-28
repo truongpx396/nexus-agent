@@ -131,10 +131,10 @@ principles). Every design decision maps back to one of them:
 | III | ⚡ **Cache-Stable Context Is Architecture** | A byte-stable prefix + volatile tail; per-turn content is banned from the prefix; >90% cache-read target. |
 | IV | 💰 **Stop on Cost, Not Vibes** | Per-turn token metering attributed to task + tenant; hard per-task/per-tenant ceilings → `cost_exhausted`. |
 | V | 🛡️ **Safety Is Per-Invocation and Fails Closed** | Per-invocation safety checks on parsed input; fail-closed tool defaults; the Rule of Two. |
-| VI | 🏢 **Tenant First; Audit & Observability Day-One** | Tenant is the first dimension of every key/row/workspace/cost/secret; DB row-level security; immutable audit log. |
+| VI | 🏢 **Tenant First; Audit & Observability Day-One** | Tenant is the first dimension of every key/row/workspace/cost/secret; DB row-level security with transaction-local scope that survives connection pooling; hash-chained, externally anchored audit log. |
 | VII | 🔌 **Model- and Provider-Agnostic by Abstraction** | One provider abstraction + normalized stream contract; native tool-calling only; deterministic auditable routing. |
 | VIII | 🔄 **Reliability: Classify, Resume, Never Silently Retry** | Typed failure classification before retry; logged backoff + jitter; circuit-break; durable checkpoint/resume. |
-| IX | ✅ **Verify Against Acceptance Criteria; Govern Every Change** | No self-declared success; prompts/tools/skills are versioned, reviewed, and eval-gated (≥90% pass + zero regressions). |
+| IX | ✅ **Verify Against Acceptance Criteria; Govern Every Change** | No self-declared success; prompts/tools/skills are versioned, reviewed, and eval-gated (≥90% pass + zero regressions), with the gate in place before the first behavior-bearing slice and a deterministic provider harness behind the tests. |
 
 ---
 
@@ -348,9 +348,15 @@ boundary.
 - 🔑 **Idempotency** — retries, at-least-once redelivery, and resume-from-checkpoint
   deduplicate state-changing effects on a durable per-effect idempotency key.
 
+- 💾 **Rehearsed recovery** — RPO ≤5 min / RTO ≤4 h with a quarterly restore drill;
+  after restore the audit chain must verify and the event log must replay.
+- 🧱 **Expand/contract migrations** — additive first, cleanup a release later, so a
+  rolling deploy never needs two schemas at once.
+
 **Targets:** ≥99.9% control-plane/API and ≥99.5% agent-run completion
-availability; p95 queue-wait < 5s interactive / < 60s batch; first token < 2s
-interactive; >90% cache-read on steady-state turns; thousands of concurrent
+availability, each with an error budget and burn-rate alerting that pages to a
+named runbook section; p95 queue-wait < 5s interactive / < 60s batch; first token
+< 2s interactive; >90% cache-read on steady-state turns; thousands of concurrent
 long-running sessions (~5,000+ per single-org deployment).
 
 ---
@@ -359,12 +365,24 @@ long-running sessions (~5,000+ per single-org deployment).
 
 - 🏢 **Tenant-first isolation** — enforced at the **data layer** via Postgres
   row-level security, not application ACLs. One tenant can never reach another's
-  rows, secrets, budgets, or workspaces.
+  rows, secrets, budgets, or workspaces. Tenant scope is set **transaction-locally**
+  so isolation survives the transaction-pooling tier, and the isolation test runs
+  *through* that pooler.
 - 🔐 **Vaulted secrets** — credentials are injected at tool-execution time from a
   vault; the model only ever sees a handle. Output is sanitized so leaked control
   markup or secret-shaped tokens never reach a user or log.
-- 📋 **Immutable audit** — every mutating action produces a tamper-evident receipt
-  tying it to a user, tenant, tool, inputs, result, and timestamp.
+- 🔏 **Content encrypted at rest, erasable** — prompts, tool arguments, and results
+  are envelope-encrypted per tenant (BYOK where required), so a right-to-erasure
+  request is satisfied by **crypto-shredding** the key while the event log still
+  replays and the audit chain still verifies. No event is ever deleted or rewritten.
+- 📋 **Tamper-evident audit** — every mutating action produces a receipt tying it to
+  a user, tenant, tool, inputs, result, and timestamp, **hash-chained** to its
+  predecessor, signed by a sign-only KMS key the data plane cannot read, and
+  periodically anchored outside the writing system. A scheduled verifier proves
+  continuity — a per-record MAC alone would not detect an insider rewriting history.
+- 📮 **Authenticated ingress** — webhook and OAuth-callback deliveries are verified
+  by provider signature with replay rejection and per-identity flood limits *before*
+  the kernel sees them; identity binding is a separate, later control.
 - 🛡️ **Per-invocation safety, fail-closed** — each command is judged by a per-invocation
   safety check on parsed input; tool defaults are fail-closed.
 - ✌️ **The Rule of Two** — no session runs *untrusted input* + *private data* +
@@ -383,10 +401,16 @@ long-running sessions (~5,000+ per single-org deployment).
 
 ## 💰 Cost governance & observability
 
-- 📊 **Meter where you spend** — input/output tokens metered per turn in the same
-  layer that spends them, attributed to the task chain + tenant.
-- 🚧 **Hard ceilings** — per-task and per-tenant ceilings terminate with an explicit
-  `cost_exhausted` reason and an alert — never a surprise bill.
+- 📊 **Meter where you spend** — tokens metered per turn in the same layer that
+  spends them, **split by class** (uncached / cache-read / cache-write / output) so
+  the cache-read gate is measured rather than estimated, priced through a
+  **versioned price book** so historical cost stays reproducible when a provider
+  changes prices, and attributed to the task chain + tenant + user + agent +
+  surface for showback/chargeback.
+- 🚧 **Hard ceilings, enforced before the spend** — every turn reserves its
+  worst-case cost against an atomic per-tenant counter *before* the model call, so
+  a burst of concurrent sessions cannot overshoot; a refusal terminates with an
+  explicit `cost_exhausted` reason and an alert — never a surprise bill.
 - ⚡ **Cache-stable context** — a byte-stable prefix (tool catalog + stable system
   prompt + append-only transcript) and a volatile tail rebuilt each turn; structured
   compaction at ~80% budget on a cheaper helper model, off the paying loop.
@@ -400,13 +424,22 @@ long-running sessions (~5,000+ per single-org deployment).
 
 ## 🧪 Testing & the release gate
 
-- 🔵 **Go** — `go test` unit + integration (testcontainers for Postgres/Redis).
+- 🔵 **Go** — `go test` unit + integration (testcontainers for Postgres/Redis), run
+  against a **deterministic recorded/fake provider** so correctness tests neither
+  flake nor bill a live model. Live-model calls are confined to the eval suite.
+- 🎲 **Property-based tests** — the `tool_use`/`tool_result` pairing rule is a total
+  invariant over all histories, so it is proven over generated event sequences
+  rather than sampled by examples.
 - 🐍 **Python** — `pytest` for the eval harness.
 - 📄 **Contract tests** — against the kernel ABI, the control-plane ↔ data-plane API,
   and the run-API surface.
+- 🏢 **Isolation tests through the pooler** — cross-tenant assertions execute through
+  the production PgBouncer tier, because a result obtained on a direct connection
+  says nothing about the deployed topology.
 - 📈 **Load tests** — concurrency + endurance-soak harness asserting the SLA targets.
 - 🚦 **The eval gate** — a versioned eval set (~20 real cases) with an LLM-as-judge
-  rubric + end-state checks runs in CI as the **release gate**. Any change to a
+  rubric + end-state checks runs in CI as the **release gate**, and it ships in the
+  *foundational* phase, before the first behavior-bearing slice. Any change to a
   prompt, tool, model, or skill must clear **≥90% pass AND zero regressions** versus
   the current baseline before it can ship. No previously-passing case may regress.
 
@@ -438,6 +471,16 @@ Full specification and design artifacts live under
 model, and contracts are complete; the platform is delivered in six shippable,
 independently testable phases: **kernel → harness → reliability/context →
 surfaces/skills → trust surface → scale/compliance**.
+
+The spec is the *target architecture*, not the first release. [plan.md](specs/001-agent-platform/plan.md)
+carries an explicit **MVP cut line** on the principle that **seams and schema
+decisions are made early because they are expensive to retrofit, while
+infrastructure is added late because it is cheap to add and expensive to carry.**
+Increment 1 ships the kernel, transaction-local RLS, the audit chain,
+encryption/erasure, pre-spend cost ceilings, and a live eval gate on one surface;
+the durable queue, sandbox pool, physical plane split, consumer surfaces, and
+multi-topology packaging are deliberately deferred — each additive against the
+foundational schema and contracts.
 
 ---
 

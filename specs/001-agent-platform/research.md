@@ -206,6 +206,227 @@ Technical Context — so no `NEEDS CLARIFICATION` remains before Phase 1.
 
 ---
 
+# Phase 0b: Design-review decisions (2026-07-27)
+
+The following unknowns were surfaced by a production-readiness review of the
+Phase 0/1 artifacts. Each was a place where two documents were individually
+correct but contradicted when combined, or where a stated success criterion was
+not measurable from the designed data.
+
+## 13. Tenant isolation under connection pooling
+
+- **Decision**: Tenant scope for row-level security is established
+  **transaction-locally** — `SET LOCAL app.tenant_id` (or `SET ROLE LOCAL` onto a
+  per-tenant role) inside the transaction that runs the query. Session-level
+  `SET` is prohibited. The cross-tenant isolation test runs **through the
+  production PgBouncer tier**, not against a direct connection.
+- **Rationale**: The scale plan puts PgBouncer in transaction-pooling mode in
+  front of Postgres so thousands of workers do not each hold a connection. In
+  that mode a physical connection is handed to a different tenant's transaction
+  between statements, so session-level scope leaks — silently defeating the only
+  control that survives an application bug (Constitution VI; FR-039). An
+  isolation test that passes against a direct connection proves nothing about the
+  deployed topology.
+- **Alternatives considered**: Session pooling instead of transaction pooling
+  (rejected — reintroduces the connection-exhaustion problem the pooler exists to
+  solve); application-level `WHERE tenant_id = ?` only (rejected — Principle VI
+  forbids); a connection per tenant (rejected — does not scale to thousands of
+  concurrent sessions).
+
+## 14. Erasure against an append-only log
+
+- **Decision**: **Crypto-shredding.** Event payloads and other customer content
+  are envelope-encrypted under a per-tenant data key (per-erasure-subject at
+  tiers requiring subject-level DSAR), and erasure destroys the key. No event row
+  is ever deleted or rewritten; the sequence, digests, audit chain, and
+  structure-only telemetry survive intact. Erasure is itself a typed event with
+  an audit receipt.
+- **Rationale**: An append-only, replayable, hash-chained log and a right to
+  erasure are otherwise flatly incompatible — and the incompatibility is a schema
+  decision, so it must be made before the first migration, not after (FR-080,
+  FR-089). Retaining the *structural* record that an action occurred while
+  destroying its content is the standard reconciliation between erasure rights
+  and audit/record-keeping duties.
+- **Alternatives considered**: Physically deleting or rewriting events (rejected —
+  breaks replay and chain verification, and destroys the audit obligation);
+  tombstone-without-encryption (rejected — content remains recoverable from
+  backups and WAL); refusing DSAR (rejected — the platform claims GDPR/CCPA
+  tiers).
+
+## 15. Audit-log integrity
+
+- **Decision**: Receipts are **hash-chained** per session (`prev_digest` +
+  monotonic `chain_seq`), computed over **digests rather than plaintext**, signed
+  by a **sign-only** KMS/HSM key the data plane cannot read, with the chain head
+  periodically **anchored** to an append-only external store. A scheduled
+  verifier proves continuity, sequence completeness, and agreement with the
+  latest anchor, and alerts on any break.
+- **Rationale**: A per-record HMAC written by the same component that holds the
+  key is tamper-*resistant* at best — that component can rewrite or drop records
+  undetectably, which is exactly the insider/compromise case an audit log exists
+  to answer (FR-081). Chaining over digests additionally keeps verification valid
+  after a lawful redaction (§14).
+- **Alternatives considered**: Per-record HMAC alone (rejected — the reviewed
+  design; not evidence); write-only database grants (rejected — an admin or a
+  compromised writer bypasses them); full blockchain (rejected — cost and
+  operational burden far exceed the requirement; periodic anchoring gets the same
+  external commitment).
+
+## 16. Cost-ceiling enforcement
+
+- **Decision**: **Reserve-then-reconcile.** Before every model call the platform
+  reserves worst-case cost (measured input + reserved output at price-book rates)
+  against an **atomic** per-tenant and per-task counter; a refusal terminates the
+  run `cost_exhausted` before tokens are spent; actuals reconcile the hold
+  afterwards and release the remainder. Reservations are TTL-bounded so a crashed
+  worker cannot strand budget. The worker also enforces a local hard per-run
+  budget synchronously.
+- **Rationale**: Aggregating usage after a turn completes and then signalling a
+  stop is a lagging indicator, not a ceiling: one expensive turn, or a burst of
+  concurrent sessions inside one tenant, exceeds the limit before the signal is
+  observed — falsifying SC-002's "zero surprise overruns" (FR-083).
+- **Alternatives considered**: Post-hoc aggregation with a stop signal (rejected —
+  the reviewed design; races); per-turn hard token caps only (rejected — token
+  caps are not dollars across a routing fleet); optimistic accounting with
+  after-the-fact billing correction (rejected — a hard ceiling is a safety
+  control, not an invoice).
+
+## 17. Cost measurement granularity and price stability
+
+- **Decision**: Meter tokens **split by class** — uncached input, cache-read
+  input, cache-write input, output — and compute cost from a **versioned,
+  effective-dated price book** held as configuration, with every cost record
+  naming the price-book version used.
+- **Rationale**: The >90% cache-read gate (FR-014, SC-003) is a release
+  criterion; an undifferentiated input-token total makes it unmeasurable, so the
+  platform could not evaluate its own headline metric. A price table embedded in
+  code silently invalidates every ceiling, η$ figure, and chargeback report the
+  day a provider changes prices (FR-016, FR-084).
+- **Alternatives considered**: Single `input_tokens` field with an estimated
+  cache ratio (rejected — estimates cannot gate a release); hardcoded prices
+  (rejected — silent drift, non-reproducible history).
+
+## 18. Event taxonomy, versioning, and projections
+
+- **Decision**: Extend the event taxonomy to cover human steering input, the full
+  approval lifecycle, taint transitions, errors, erasure, and a terminal event;
+  carry a **`schema_version` envelope** on every event with a documented
+  upcasting path; and document every mutable status column as a **projection**
+  rebuildable by replay.
+- **Rationale**: The reviewed taxonomy could not represent a steering message, an
+  approval decision, or a run's own termination — so a run that used any of them
+  was not replayable from the "single source of truth" (FR-006, FR-085). An
+  event-sourced system whose payload shape evolves without versioning loses its
+  multi-year replay guarantee, which is the entire reason for the design
+  (FR-086).
+- **Alternatives considered**: Keeping status only in mutable columns (rejected —
+  two sources of truth); versioning by table migration (rejected — historical
+  events must remain readable as written).
+
+## 19. Rule-of-Two evaluation inputs
+
+- **Decision**: Every tool, connector, and retrieval source **declares** its three
+  taint legs (returns untrusted content / reads private data / mutates external
+  state) as required capability metadata defaulting to `true`; the session
+  carries typed accumulated taint state; and taint is reduced only through an
+  explicit, audited **sanitization boundary**.
+- **Rationale**: The evaluator had no inputs — capability metadata carried only
+  read-only-vs-mutating, so the platform's headline safety control could not be
+  computed (FR-087). Without a sanitization boundary, any long session becomes
+  permanently tainted and gates on everything, and approval fatigue degrades the
+  control into a rubber stamp — a failure mode worse than not having it.
+- **Alternatives considered**: Runtime inference from tool behavior (rejected —
+  unreliable, and fails open on the first unclassified tool); per-run rather than
+  per-session taint (rejected — under-approximates a continuing conversation).
+
+## 20. Run-lifecycle completeness
+
+- **Decision**: Promote steer, **cancel**, and resume to first-class operations on
+  both the external API and the control/data-plane contract, and persist the
+  run's determining inputs — pinned `agent_version`, `data_label`, routing
+  decision and reason, execution class and priority, region.
+- **Rationale**: `aborted` was a mandated terminal reason with no operation that
+  could produce it, and `POST /runs/{id}/input` crossed a plane boundary the
+  versioned contract did not describe. Priority load-shedding (FR-049) had no
+  persisted field to read, and an unpinned agent version lets a mid-run deploy
+  change behavior and bust the prompt prefix (FR-088).
+- **Alternatives considered**: Cancel via queue-message deletion (rejected — skips
+  the paired-result invariant and the partial-artifact guarantee); re-deriving
+  routing at read time (rejected — not auditable, not replayable).
+
+## 21. Inbound channel authenticity
+
+- **Decision**: Every unsolicited inbound path (Telegram/Zalo webhooks, OAuth
+  callbacks, inbound email, third-party hooks) verifies the provider's
+  signature/shared secret, rejects replays outside a bounded window, and applies a
+  per-external-identity flood limit **before** adapter translation. Identity
+  binding remains a separate, later control.
+- **Rationale**: The reviewed design authenticated *who the user is* (FR-055) but
+  never proved *the request came from the provider* — leaving an open endpoint
+  that feeds attacker-controlled text straight into the kernel and burns tokens
+  without a payer (FR-082). This is the one place where an injection defense can
+  be complete, because the check is cryptographic rather than heuristic.
+- **Alternatives considered**: Relying on URL secrecy (rejected — not a control);
+  filtering at the input guard (rejected — heuristic, and the run has already
+  been admitted and metered by then).
+
+## 22. Encryption at rest, residency, and recovery
+
+- **Decision**: Per-tenant envelope encryption of conversation content with
+  customer-managed keys available at regulated tiers; region pinning enforced at
+  admission (fail closed rather than relocate); an enumerated, structure-only
+  egress list for customer-boundary deployments with a selectable **fully local**
+  audit/telemetry sink; and a documented RPO ≤5 min / RTO ≤4 h with a quarterly
+  rehearsed restore that re-verifies the chain and replays the log.
+- **Rationale**: Prompts and tool arguments are customer data sitting in Postgres
+  for 90+ days; encryption at rest with per-tenant keys is both the standard
+  procurement bar and the mechanism that makes crypto-shredding possible
+  (FR-089/FR-080). "Sensitive payloads never leave" was true of content but the
+  contract still shipped cost and audit metadata upstream from a customer
+  boundary, which needed to be enumerated and made optional (FR-091). An
+  availability SLA without a rehearsed restore is a claim, not a commitment
+  (FR-090).
+- **Alternatives considered**: Full-disk encryption only (rejected — no per-tenant
+  boundary, no shredding path); policy-only residency (rejected — unenforceable);
+  backups without a drill (rejected — untested restores routinely fail).
+
+## 23. Test determinism for a non-deterministic dependency
+
+- **Decision**: A **recorded/fake provider** implementing the same normalized
+  stream contract (including truncation, stall, malformed-stream, and failover
+  paths) backs the correctness suite; fixtures are versioned with the contract;
+  and the transcript-hygiene invariants are covered by **property-based tests**
+  over generated event sequences. Live-model calls are confined to the eval
+  suite.
+- **Rationale**: Roughly 120 planned test tasks depend on model behavior. Without
+  a deterministic double they are either flaky or they bill a live provider on
+  every CI run — and the paired `tool_use`/`tool_result` rule is a total
+  invariant over all histories, which example-based tests sample rather than
+  prove (FR-097).
+- **Alternatives considered**: Live model in CI (rejected — cost and flake);
+  mocking at the HTTP layer per provider (rejected — re-couples tests to vendor
+  wire formats the abstraction exists to hide).
+
+## 24. Delivery sequencing: evals and the MVP cut line
+
+- **Decision**: Move the ~20-case eval set, judge, and CI gate into the
+  **Foundational** phase, before the first behavior-bearing slice; and record an
+  explicit MVP cut line in the plan with everything else marked deliberately
+  deferred.
+- **Rationale**: The reviewed task order placed the eval gate after three phases
+  of kernel, surface, and trust work, leaving the highest-effect-size window
+  unmeasured and contradicting both the constitution and the "no evals early"
+  anti-pattern (FR-043). Separately, a 97-FR / 8-surface / 4-topology plan
+  starting from zero code is precisely the "speculative future-proof rig"
+  anti-pattern unless the deferral is explicit — the spec stays the north star,
+  the plan states what ships first.
+- **Alternatives considered**: Keeping evals in the cost/observability phase
+  (rejected — measurement must precede the changes it grades); cutting the spec
+  scope (rejected — the spec is the target architecture; sequencing, not scope,
+  is the lever).
+
+---
+
 ## Resolved unknowns summary
 
 | Technical Context item | Resolution |
@@ -222,5 +443,17 @@ Technical Context — so no `NEEDS CLARIFICATION` remains before Phase 1.
 | Security | Layered fail-closed, Rule of Two, vault, receipts (§10) |
 | Observability/evals | OTel structure-only + eval gate in CI (§11) |
 | Deployment | Control/data-plane split, config-not-forks (§12) |
+| Isolation under pooling | Transaction-local scope; test through PgBouncer (§13) |
+| Erasure vs append-only | Crypto-shredding; never delete or rewrite events (§14) |
+| Audit integrity | Hash chain + external anchor + sign-only key + verifier (§15) |
+| Ceiling enforcement | Reserve-then-reconcile on an atomic counter (§16) |
+| Cost measurement | Token classes split; versioned price book (§17) |
+| Event model | Full taxonomy + `schema_version` + projections (§18) |
+| Rule of Two inputs | Declared per-tool taint + sanitization boundary (§19) |
+| Run lifecycle | Steer / cancel / resume first-class; determinants persisted (§20) |
+| Webhook ingress | Provider signature + replay window + flood limit (§21) |
+| At-rest / residency / DR | Per-tenant keys + BYOK; pinned placement; RPO 5m / RTO 4h (§22) |
+| Test determinism | Recorded/fake provider + property tests (§23) |
+| Sequencing | Evals foundational; explicit MVP cut line (§24) |
 
 **No `NEEDS CLARIFICATION` remain.** Proceed to Phase 1.
