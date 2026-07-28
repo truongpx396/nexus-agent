@@ -155,6 +155,19 @@ principles). Every design decision maps back to one of them:
   hard ceilings with `cost_exhausted` stops and alerts (never a surprise bill).
 - 🔭 **Structure-only observability** — operators inspect decision patterns and
   per-turn cost/latency/token spans without reading private conversation content.
+- 🕸️ **Bounded delegation** — single-threaded by default; sub-agents are read-only
+  context firewalls whose capability can only *shrink* on descent while taint only
+  *grows* on return, bounded on depth, concurrency, and per-run totals, drawing from
+  a pre-reserved fan-out envelope so one delegation can't starve its tenant, and
+  attributed by full delegation chain rather than immediate parent.
+- 📋 **Processes, not just conversations** — a recurring workflow is a **declarative
+  orchestration plan** (steps, conditions, bounded loops, approval gates, optional
+  read-only fan-out) that is versioned, reviewed, and eval-gated like code. The
+  platform evaluates the control flow, so **routing between steps costs zero model
+  tokens**; the model works only *inside* a step. The same plan runs the same way
+  twice, replays from the log naming the branch it took, and resumes from a
+  checkpoint — this is where parallelism lives, in reviewed configuration rather
+  than a model's runtime discretion.
 - 🧠 **Memory & skills** — file-first per-tenant memory injected at session start
   (retention-bounded, injection-screened), and reusable skills loaded on demand;
   agent-proposed skills are promoted only through a human/eval gate.
@@ -461,6 +474,7 @@ Full specification and design artifacts live under
 | [contracts/control-data-plane.md](specs/001-agent-platform/contracts/control-data-plane.md) | Versioned control-plane ↔ data-plane contract |
 | [contracts/run-api.openapi.yaml](specs/001-agent-platform/contracts/run-api.openapi.yaml) | External run-submission REST surface contract |
 | [contracts/tool-contract.md](specs/001-agent-platform/contracts/tool-contract.md) | Self-describing tool + execution-pipeline contract |
+| [contracts/orchestration-plane.md](specs/001-agent-platform/contracts/orchestration-plane.md) | Declarative orchestration plans — zero-token deterministic control flow |
 | [tasks.md](specs/001-agent-platform/tasks.md) | Dependency-ordered implementation tasks |
 
 ---

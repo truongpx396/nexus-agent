@@ -32,7 +32,12 @@ consumer surfaces/personal connectors).
 ## Format: `[ID] [P?] [Story] Description`
 
 - **[P]**: Can run in parallel (different files, no dependencies on incomplete tasks)
-- **[Story]**: US1–US8 (maps to spec user stories); Setup/Foundational/Polish carry no story label
+- **[Story]**: US1–US9 (maps to spec user stories); Setup/Foundational/Polish carry no story label
+- **[ID]**: A **stable identifier, not an ordering.** Tasks inserted into an existing
+  phase take a suffixed id (`T094a`) and a phase inserted later takes the next free
+  block, so ids are not monotonic in file order — Phase 11 (US9) holds T159–T170 while
+  Polish and Scale keep T143–T158. Execution order comes from the phase sequence and
+  the Dependencies section; ids are referenced by other tasks and must not be renumbered.
 
 - All paths are repository-relative and follow the monorepo layout in plan.md
 
@@ -81,6 +86,7 @@ safe (see "MVP cut line" — infrastructure is deferred, seams are not).
 - [ ] T010 Author the Postgres migration framework and base schema for immutable config tables (`Tenant`, `User`, `Agent`, `Tool`, `Model`, `PriceBook`, `Skill`, `Connector`) in `backend-go/migrations/0001_config.sql` — `Tool` carries a nullable `tenant_id` (NULL only for global built-ins) plus taint declarations (`returns_untrusted` / `reads_private_data` / `mutates_external`, all defaulting TRUE), `concurrency` class, `effect_class`, and `idempotency_key_spec` (FR-011, FR-087); `Model` carries `pinned_snapshot` and `regions_allowed` (FR-078, FR-091)
 - [ ] T010a [P] Author the versioned, effective-dated `PriceBook` schema + loader (per-model, per-token-class rates; cost never computed from constants in code) in `backend-go/migrations/0001_config.sql` and `backend-go/internal/cost/pricebook.go` (FR-084)
 - [ ] T011 Author the append-only runtime-state migration (`Session`, `Event`, `Checkpoint`, `Cost Record`, `Budget`, `BudgetReservation`, `Memory`, `Approval`, `Audit Receipt`, `Audit Anchor`, `Encryption Key`, `Sandbox`) in `backend-go/migrations/0002_runtime.sql` — `Event` carries `schema_version`, `payload_digest`, `key_id`, and `actor`; `Session` carries pinned `agent_version`, `data_label`, `route_model_id`/`route_reason`, `execution_class`/`priority`, `region`, and `taint_state`; `Cost Record` splits input tokens by class and references `price_book_version` (FR-016, FR-085, FR-086, FR-088)
+- [ ] T011a **Add the delegation-chain seam to the runtime schema** — `Session` and `Cost Record` carry `parent_session_id` / `root_session_id` / `depth` (plus `Session.delegation_role`, `plan_id`/`plan_version`), and `Audit Receipt` carries `root_session_id` + `delegation_path` bound into its `digest` — in `backend-go/migrations/0002_runtime.sql`. **Foundational even though delegation itself is deferred**: retrofitting a chain onto historical cost records and receipts is precisely the event-log migration the append-only design exists to avoid (FR-101, FR-081)
 - [ ] T012 Add Postgres row-level-security policies keyed on `tenant_id` for every tenant-scoped table — including `Tool` where `tenant_id IS NOT NULL` (zero rows without tenant context) in `backend-go/migrations/0003_rls.sql` (FR-011, FR-038, FR-039)
 - [ ] T012a **Establish the expand/contract migration discipline** (additive-first, destructive cleanup deferred a release; every migration verified in CI against the immediately preceding application version so a rolling deploy never needs two schemas at once) in `backend-go/migrations/README.md` and `.github/workflows/ci.yml` (FR-094, FR-026)
 - [ ] T013 [P] Define immutable config domain types (`Tenant`, `User`, `Agent`, `Tool` incl. `TaintDeclaration`, `Model`, `PriceBook`, `Skill`, `Connector`) in `backend-go/internal/tenancy/model.go` and `backend-go/internal/tools/model.go` (FR-087)
@@ -93,6 +99,7 @@ safe (see "MVP cut line" — infrastructure is deferred, seams are not).
 - [ ] T015a [P] Implement the **deterministic recorded/fake `Provider`** satisfying the same contract (scripted turns plus truncation, stall, malformed-stream, and failover paths; fixtures versioned with the contract) so the correctness suite is reproducible and never bills a live model, in `backend-go/internal/provider/fake/fake.go` and `backend-go/internal/provider/fake/fixtures/` (FR-097)
 - [ ] T016 [P] Declare the `Tool` interface (self-describing, per-invocation checks, **required `TaintDeclaration` defaulting to all three legs true**, `effectClass`) in `backend-go/internal/tools/tool.go` (FR-007, FR-008, FR-009, FR-011, FR-087)
 - [ ] T016a [P] Declare the `RunControl` interface (`steer` / `cancel` / `resume`) and the `BudgetGate` interface (`reserve` / `reconcile`) in `backend-go/kernel/control.go` and `backend-go/internal/cost/gate.go` (FR-005, FR-083)
+- [ ] T016b [P] Declare the `Delegation` interface (`delegate` / `reap`, `DelegationSpec` with subset-only `scope` and no scope-widening model-facing parameter, `DelegationResult` with `taint_engaged` + typed `outcome`, `ReapReason`) per contracts/kernel-abi.md in `backend-go/kernel/delegation.go` (FR-098, FR-099, FR-100)
 - [ ] T017 [P] Declare the `Memory` interface in `backend-go/internal/memory/memory.go` (FR-019)
 - [ ] T018 [P] Declare the `Workspace`/`Sandbox` interface in `backend-go/internal/sandbox/workspace.go` (FR-047)
 - [ ] T019 [P] Declare the `Surface` adapter interface in `backend-go/internal/surfaces/surface.go` (FR-001, FR-028, FR-031)
@@ -123,7 +130,7 @@ safe (see "MVP cut line" — infrastructure is deferred, seams are not).
 
 ### Foundational contract tests
 
-- [ ] T027 [P] Contract test asserting the kernel ABI interfaces compile with ≥1 stub impl each — including the fake `Provider`, a `TaintDeclaration`-bearing `Tool`, `RunControl`, and `BudgetGate` in `backend-go/tests/contract/kernel_abi_test.go`
+- [ ] T027 [P] Contract test asserting the kernel ABI interfaces compile with ≥1 stub impl each — including the fake `Provider`, a `TaintDeclaration`-bearing `Tool`, `RunControl`, `BudgetGate`, and `Delegation` in `backend-go/tests/contract/kernel_abi_test.go`
 - [ ] T028 [P] Contract test for the control/data-plane versioned handshake, including that only enumerated structure-only fields cross the boundary and that `audit_sink_mode=local` emits nothing upstream, in `backend-go/tests/contract/control_data_plane_test.go` (FR-030, FR-091)
 - [ ] T029 [P] Integration test asserting RLS returns zero cross-tenant rows **executed through the production PgBouncer transaction-pooling tier** (testcontainers Postgres + PgBouncer), including an interleaved two-tenant workload on a shared pooled connection; a variant asserting session-level `SET` leaks documents *why* the transaction-local form is mandatory in `backend-go/tests/integration/rls_isolation_test.go` (FR-039, SC-013)
 - [ ] T029a [P] Integration test: an event written under an older `schema_version` still replays correctly after a schema change (upcasting registry) in `backend-go/tests/integration/event_versioning_test.go` (FR-086)
@@ -320,16 +327,26 @@ the eval set (quickstart.md Scenario 4).
 
 **Goal**: File-first per-tenant memory injected immutably at session start (screened
 first, retention-bounded), progressive-disclosure skills, and agent-proposed skills that
-are never auto-promoted (propose → human/eval gate → version → promote).
+are never auto-promoted (propose → human/eval gate → version → promote) — plus the
+bounded delegation sub-contract: descent invariant, bounds + fan-out envelope, return
+validation, lifecycle, and chain attribution.
 
 **Independent Test**: Seed memory + a skill; confirm session-start injection, on-demand
 skill loading, and that an agent-proposed skill is not auto-promoted (quickstart.md Scenario 5).
+Separately (quickstart.md Scenario 5b): delegate to a child and confirm it cannot widen
+scope, that its bounds and cost envelope hold, that its summary stays untrusted, and that
+cancelling the parent reaps it.
 
 ### Tests for User Story 5 ⚠️
 
 - [ ] T093 [P] [US5] Integration test: memory injected at session start (not mid-session), tenant-scoped, screened first in `backend-go/tests/integration/memory_injection_test.go` (FR-019)
 - [ ] T094 [P] [US5] Integration test: agent-proposed skill requires human+eval gate, never auto-promoted in `backend-go/tests/integration/skill_promotion_test.go` (FR-021)
 - [ ] T094a [P] [US5] Integration test: a sub-agent runs read-only in an isolated context and returns only a capped distilled summary, its token spend is metered to the parent, and single-thread remains the default in `backend-go/tests/integration/subagent_firewall_test.go` (FR-079)
+- [ ] T094c [P] [US5] Integration test — **descent invariant**: a child cannot obtain any tool, connector, egress entry, data label, region, or approval scope its parent lacks; every escalation attempt (including a crafted delegation payload) fails closed; and the child's `scope_snapshot` is provably a subset of the parent's at spawn time in `backend-go/tests/integration/delegation_descent_test.go` (FR-098, SC-021)
+- [ ] T094d [P] [US5] Integration test — **bounds and envelope**: depth, per-parent concurrency, and per-run child totals are never exceeded; a bound breach returns a **non-retryable** synthetic result and the loop routes around it rather than retrying; a fan-out never overspends its pre-reserved envelope and never starves a concurrent sibling session in the same tenant in `backend-go/tests/integration/delegation_bounds_test.go` (FR-099, FR-083, SC-021)
+- [ ] T094e [P] [US5] Integration test — **return contract**: a returned summary over its cap is truncated by the platform (not trusted to comply), fails closed on schema violation, is rejected when it misses its declared acceptance criterion, and **never clears the untrusted-content taint leg** even when the child was read-only; a child that engaged a private-data leg folds that leg into the parent in `backend-go/tests/integration/delegation_return_test.go` (FR-100, FR-087, FR-044, SC-022)
+- [ ] T094f [P] [US5] Integration test — **lifecycle**: cancelling, terminating, or budget-exhausting a parent reaps every child (zero children still spending afterward), each outstanding delegation receives a synthetic paired result, and a worker crash mid-fan-out resumes from checkpoint rather than restarting the tree in `backend-go/tests/integration/delegation_lifecycle_test.go` (FR-100, FR-003, FR-024, SC-021)
+- [ ] T094g [P] [US5] Integration test — **chain attribution**: every cost record, receipt, and span in a nested tree resolves to root + parent + depth; total run cost reconciles to `SUM(...) WHERE root_session_id = :root`; and a receipt's full authorization chain is reconstructable without cross-record correlation in `backend-go/tests/integration/delegation_chain_test.go` (FR-101, FR-093, SC-022)
 - [ ] T094b [P] [US5] Integration test: the retrieval tier injects only the top-K reranked chunks and ingestion rejects an unauthenticated/anomalous document while retrieved content stays tagged untrusted in `backend-go/tests/integration/retrieval_precision_test.go` (FR-074, FR-075)
 
 ### Implementation for User Story 5
@@ -342,10 +359,16 @@ skill loading, and that an agent-proposed skill is not auto-promoted (quickstart
 - [ ] T098 [US5] Implement the skill promotion pipeline (propose → human/eval gate → version → promote; never auto) in `backend-go/internal/skills/promote.go` (FR-021)
 - [ ] T099 [P] [US5] Implement the off-loop structured context condenser/summarizer helper (cheaper model, keep recent + verbatim requirements) in `ml-python/src/condenser/compact.py` (FR-015)
 - [ ] T099a [P] [US5] Implement sub-agent delegation as isolated read-only context firewalls (own clean context, bounded ~1–2k-token distilled summary return, parent keeps sole decision authority, per-sub-agent token metering attributed to the parent, capability-floor gated; single-thread by default) in `backend-go/internal/context/subagent.go` (FR-079, FR-076, FR-016)
+- [ ] T099b [US5] Implement the **descent resolver**: compute a child's scope as a proven subset of the parent's live scope (tools, connectors, egress allowlist, data label, region), reject any delegation whose requested scope is not a subset, refuse approval-scope inheritance, and snapshot the resolved scope onto the `Delegation` row — fail closed on any unprovable case — in `backend-go/internal/security/delegation_scope.go` (FR-098, FR-035)
+- [ ] T099c [US5] Implement **delegation bounds + fan-out cost envelope**: config-driven per-tier/per-tenant depth (default 1), concurrent children per parent (default 3), and children per run (default 16); parent reserves the aggregate worst case against the atomic counter before the first child starts and children draw from that envelope (never reserving independently against the tenant ceiling); admission also fails closed on sandbox cap and region pin; a bound breach emits a typed **non-retryable** result in `backend-go/internal/context/delegation_bounds.go` and `backend-go/internal/cost/fanout_envelope.go` (FR-099, FR-083, FR-047, FR-091)
+- [ ] T099d [US5] Implement the **return validator**: platform-side truncation to the summary cap, return-schema validation, acceptance-criterion check with a bounded revision round, typed rejection outcomes, and the taint fold that keeps `returns_untrusted` set on every returned summary in `backend-go/internal/context/delegation_return.go` (FR-100, FR-087, FR-044)
+- [ ] T099e [US5] Implement **child lifecycle**: reap on parent terminal/cancel/ceiling breach, synthetic paired `tool_result` for every outstanding delegation, and child progress checkpointed under the parent run so a crash mid-fan-out resumes rather than restarts in `backend-go/internal/context/delegation_lifecycle.go`, wired into `RunControl.cancel` (FR-100, FR-003, FR-024, FR-005)
+- [ ] T099f [P] [US5] Propagate the **delegation chain** (`root_session_id`, `parent_session_id`, `depth`, `delegation_path`) through session creation, cost records, audit receipts, and OTel spans; add the tree roll-up query backing ceilings and chargeback in `backend-go/internal/observability/delegation_spans.go` and `backend-go/internal/cost/rollup.go` (FR-101, FR-093, FR-040)
+- [ ] T099g [US5] Amend the **sanitization boundary** to the constrained rule — a summarizing/sub-agent firewall may reduce volume and may clear the private-data leg only when the child provably held no private-data capability and no private content entered its context; it MUST NOT clear the untrusted leg, which only an attributable operator re-baseline clears — in `backend-go/internal/security/sanitize_boundary.go` (FR-087, FR-098; **amends T069b**)
 - [ ] T100 [US5] Wire context compaction at ~80% budget into the kernel (two-zone prompt, byte-stable prefix) in `backend-go/internal/context/compaction.go` (FR-013, FR-014, FR-015)
 - [ ] T100a [P] [US5] Implement output-token slot reservation (bounded default `max_tokens`, escalate on truncation/`max_output_tokens` signal via a bounded retry, no silent truncation) in `backend-go/internal/context/token_budget.go` (FR-063)
 
-**Checkpoint**: Memory + skills compound capability; US1–US4 still work.
+**Checkpoint**: Memory + skills compound capability; delegation is bounded, attributable, and cannot escalate scope or launder taint; US1–US4 still work.
 
 ---
 
@@ -466,7 +489,48 @@ config-only additions; US1–US7 still work.
 
 ---
 
-## Phase 11: Polish & Cross-Cutting Concerns
+## Phase 11: User Story 9 - Run a repeatable multi-step process deterministically (Priority: P2)
+
+**Goal**: Encode a recurring business process as a versioned, eval-gated **orchestration
+plan** — steps, conditions, bounded loops, approval gates, optional read-only fan-out —
+whose control flow the platform evaluates at **zero model-token cost**. The model works
+inside a step; it never decides the route between steps. See
+[contracts/orchestration-plane.md](contracts/orchestration-plane.md).
+
+**Independent Test**: Author a plan with a conditional branch, a bounded loop, and an
+approval gate; run it twice against the deterministic provider and confirm identical
+control flow, zero model tokens on transitions, full replay naming the branch taken, and
+resume-from-checkpoint after an interrupted step (quickstart.md Scenario 9).
+
+**Independence note**: plans using only `agent` / `condition` / `loop` / `approval_gate`
+steps depend on **no** delegation machinery — only a `delegate_fanout` step requires US5
+(T099b–T099f). Build and ship this phase without US5 if sequencing demands it; T164 is
+the only task that carries that dependency.
+
+### Tests for User Story 9 ⚠️ (write first, ensure they FAIL)
+
+- [ ] T159 [P] [US9] Integration test — **zero-token routing**: a plan with a conditional branch and a bounded loop executes twice on the same inputs, takes the identical path, and makes **zero `Provider.stream` calls to evaluate any transition** (asserted against the deterministic provider, not sampled) in `backend-go/tests/integration/plan_zero_token_routing_test.go` (FR-102, FR-097, SC-023)
+- [ ] T160 [P] [US9] Integration test — **validation fails closed**: a plan with an unreachable step, an unbounded loop, a predicate that is not a closed expression, or a step requesting a capability the plan principal lacks is rejected at validation and can never run in `backend-go/tests/integration/plan_validation_test.go` (FR-102, FR-098)
+- [ ] T161 [P] [US9] Integration test — **lifecycle gates**: a `draft` plan cannot be enabled without an eval-gate run and a recorded governance sign-off; an `enabled` version is immutable and an edit publishes a new version; an in-flight run finishes on the version and pinned agent/model route it started with in `backend-go/tests/integration/plan_lifecycle_test.go` (FR-102, FR-042, FR-043, FR-096, FR-088, FR-026)
+- [ ] T162 [P] [US9] Integration test — **replay + resume**: a completed plan run reconstructs every step entry, the predicate that matched at each transition, each step outcome, and the terminal reason from the event log alone; an interrupted run resumes at the last completed step and its cost envelope reconciles rather than double-reserving in `backend-go/tests/integration/plan_replay_resume_test.go` (FR-102, FR-085, FR-024, FR-083)
+- [ ] T163 [P] [US9] Integration test — **approval gate**: reaching an `approval_gate` step suspends the run durably at **zero ongoing token cost**, resumes on the approval event, and an unanswered approval expires as a denial of that step in `backend-go/tests/integration/plan_approval_gate_test.go` (FR-102, FR-036)
+
+### Implementation for User Story 9
+
+- [ ] T164 [P] [US9] Author the plan schema + `ORCHESTRATION_PLAN` migration (`plan_id`/`version` immutable per version, `status`, `steps`, `pinned_routes`, `cost_envelope_usd`, `eval_run_id`, `governance_signoff`), tenant-scoped under the same RLS policy as every other tenant-owned row, in `backend-go/migrations/0004_plans.sql` (FR-102, FR-011, FR-039)
+- [ ] T165 [US9] Implement the **plan validator**: schema, reachability (every step reachable and `end` reachable from every step), bounded loops, closed/total predicate expressions (no model call, no I/O, no free-text evaluation), and a per-step scope-subset proof — all failing closed before a plan can run — in `backend-go/internal/orchestration/validate.go` (FR-102, FR-098)
+- [ ] T166 [US9] Implement the **zero-token transition evaluator**: the closed predicate expression language over typed step outputs, terminal reasons, and run metadata, plus step dispatch — with an assertion/guard that no `Provider.stream` call can occur inside a transition, so zero-token routing is a property rather than a claim — in `backend-go/internal/orchestration/evaluator.go` (FR-102, SC-023)
+- [ ] T167 [US9] Implement the plan **runner**: step checkpointing at every boundary (FR-024), the envelope reservation drawn before step 1 (FR-083, FR-099), `approval_gate` suspension at zero token cost (FR-036), bounded classified retry on `on_error` (FR-023), and the typed `plan_started` / `plan_step_entered` / `plan_transition` / `plan_step_exited` / `plan_completed` event set (FR-085) in `backend-go/internal/orchestration/runner.go` (FR-102)
+- [ ] T168 [US9] Implement the plan **lifecycle gates**: `draft → gated → enabled → retired`, agent-version and model-route pinning at enable (FR-088), immutability of an enabled version, and refusal to enable without both `eval_run_id` and `governance_signoff` in `backend-go/internal/orchestration/lifecycle.go`, wired to the eval gate (T026g) and the governance record (T146c) (FR-102, FR-042, FR-043, FR-096)
+- [ ] T169 [P] [US9] Wire `delegate_fanout` steps to the `Delegation` seam so a plan step's children obey the descent invariant, bounds, envelope draw, and return contract unchanged, with decision authority remaining in the plan in `backend-go/internal/orchestration/fanout.go` (FR-102, FR-098–FR-101) — **the only task in this phase depending on US5 (T099b–T099f)**
+- [ ] T170 [P] [US9] Expose plan submission/status on the run API and the control-plane ↔ data-plane contract (submit a plan run, stream `plan_*` events as structure-only, query step state) in `backend-go/internal/surfaces/api.go` and `specs/001-agent-platform/contracts/run-api.openapi.yaml` (FR-031, FR-030, FR-102)
+
+**Checkpoint**: A recurring process is a versioned, reviewed, eval-gated artifact whose
+routing costs zero tokens, replays exactly, and resumes from checkpoint; US1–US8 still work.
+
+---
+
+## Phase 12: Polish & Cross-Cutting Concerns
 
 **Purpose**: Hardening, docs, and the go-live gate spanning all stories
 
@@ -478,15 +542,15 @@ config-only additions; US1–US7 still work.
 - [ ] T146a [P] Implement backup coverage + point-in-time restore for the event log, audit chain, config, and vault, and automate the **restore drill** measuring RPO/RTO and asserting that the chain verifies and the log replays post-restore, in `deploy/dr/` and `backend-go/tests/integration/restore_drill_test.go` (FR-090, SC-018)
 - [ ] T146b [P] Add supply-chain assurance for the platform's own build: SBOM generation per release, artifact signing with published provenance, and dependency + container vulnerability scanning that fails CI above a defined severity, in `.github/workflows/release.yml` and `deploy/` (FR-092)
 - [ ] T146c [P] Author the operating-model and governance record: named ownership for the platform team, AgentOps (SLOs, on-call, evals-in-CI, cost dashboards, behavioral incident response), and the governance/risk function, plus the AI risk register and the sign-off gate a new tool/connector/autonomy increase must clear before a tenant enables it, in `docs/operating-model.md` and `backend-go/internal/tenancy/governance.go` (FR-096)
-- [ ] T147 [P] Author quickstart validation `Makefile` targets referenced by quickstart.md (`migrate`, `seed-tenant`, `run`, `evals`, `verify-isolation`, `verify-approval-timeout`, `verify-skill-promotion`, `chaos-crash`, `deploy-during-run`, `load-test`, `capacity-check`, `trace`, `seed-memory`, `onboard-org`, `deploy`, `link-surface`, `connect-connector`, `verify-audit-chain`, `verify-erasure`, `restore-drill`, `go-live-check`) — every target referenced anywhere in quickstart.md must exist
+- [ ] T147 [P] Author quickstart validation `Makefile` targets referenced by quickstart.md (`migrate`, `seed-tenant`, `run`, `evals`, `verify-isolation`, `verify-approval-timeout`, `verify-skill-promotion`, `chaos-crash`, `deploy-during-run`, `load-test`, `capacity-check`, `trace`, `seed-memory`, `onboard-org`, `deploy`, `link-surface`, `connect-connector`, `verify-audit-chain`, `verify-erasure`, `restore-drill`, `delegate-escalation-probe`, `delegate-fanout`, `delegate-cancel-parent`, `plan-validate`, `plan-enable`, `run-plan`, `plan-replay`, `go-live-check`) — every target referenced anywhere in quickstart.md must exist
 - [ ] T148 [P] Author developer + operator documentation in `docs/` including: architecture overview, deployment topologies, and a rehearsed behavioral-incident runbook at `docs/runbook.md` (covering detection, triage, mitigation, and rollback steps for the five most critical failure modes: kernel loop stall, cost ceiling breach, cross-tenant data leak, approval TTL expiry under load, and provider outage) referenced by the T143 go-live gate (FR-045)
 - [ ] T148a [P] Author the data-residency, retention, and no-train policy document at `docs/data-policy.md` (covering per-deployment-tier data residency / region-pinning options, the 90-day default memory retention and tenant-override process, the no-training guarantee, and the DSAR support procedure for GDPR/CCPA-tier tenants) referenced by the T143 go-live gate (FR-045)
 - [ ] T149 [P] Add unit-test coverage pass across `backend-go/tests/unit/` for kernel, cost, security, and reliability helpers
-- [ ] T150 Run the full quickstart.md scenarios 1–8 end-to-end and confirm all acceptance criteria pass
+- [ ] T150 Run the full quickstart.md scenarios 1–9 (including 5b) end-to-end and confirm all acceptance criteria pass
 
 ---
 
-## Phase 12: Scale Validation & Capacity Hardening
+## Phase 13: Scale Validation & Capacity Hardening
 
 **Purpose**: Turn "designed to scale" into "measured to scale". Prove SC-008
 (thousands of concurrent long-running sessions, p95 queue-wait < 5s interactive /
@@ -533,12 +597,12 @@ provider quotas) are hardened, and high-concurrency go-live is gated on real num
   the eval runner/judge/CI gate (T026e–T026g) now live here rather than in US4, so
   no behavior-bearing slice ships unmeasured; the remaining US4 eval tasks only
   extend them.
-- **User Stories (Phases 3–10)**: All depend on Foundational
+- **User Stories (Phases 3–11)**: All depend on Foundational
   - US1 (P1) is the MVP and should land first
-  - US2–US4 (P2) build on US1; US5–US7 (P3) build on the P2 slices; US8 (P2) builds on US2 + US3
+  - US2–US4 (P2) build on US1; US5–US7 (P3) build on the P2 slices; US8 (P2) builds on US2 + US3; US9 (P2) builds on US1 + US3 + US4
   - Stories are independently testable and can be parallelized across teams after Foundational
-- **Polish (Phase 11)**: Depends on all targeted user stories
-- **Scale Validation & Capacity Hardening (Phase 12)**: Depends on US7 (reliability/scale primitives) being in place; runs against a production-like build. Gates high-concurrency go-live.
+- **Polish (Phase 12)**: Depends on all targeted user stories
+- **Scale Validation & Capacity Hardening (Phase 13)**: Depends on US7 (reliability/scale primitives) being in place; runs against a production-like build. Gates high-concurrency go-live.
 
 ### User Story Dependencies
 
@@ -550,6 +614,7 @@ provider quotas) are hardened, and high-concurrency go-live is gated on real num
 - **US6 (P3)**: Foundational + US3 (onboarding relies on tenancy/connectors)
 - **US7 (P3)**: Foundational + US1 (reliability wraps the run lifecycle)
 - **US8 (P2)**: Foundational + US2 (new thin surface adapters) + US3 (connector catalog, vaulted secrets, delegated identity, Rule of Two, approval) — adds surfaces/connectors as config, no kernel fork
+- **US9 (P2)**: Foundational + US1 (steps run the loop) + US3 (approval gates) + US4 (cost envelope, eval gate, governance sign-off). **Not dependent on US5**: plans using only `agent` / `condition` / `loop` / `approval_gate` steps need no delegation machinery; only the `delegate_fanout` step (T169) requires US5's delegation seam, so the story ships and tests standalone with fan-out as an additive capability
 
 ### Within Each User Story
 
@@ -586,6 +651,22 @@ Task: "Implement classifier in backend-go/kernel/classify.go"
 Task: "Implement terminal resolver in backend-go/kernel/terminal.go"
 Task: "Implement Provider adapter in backend-go/internal/provider/anthropic.go"
 Task: "Implement cost meter in backend-go/internal/cost/meter.go"
+```
+
+### User Story 9 (Phase 11)
+
+```bash
+# Tests first, in parallel:
+Task: "Zero-token routing test in backend-go/tests/integration/plan_zero_token_routing_test.go"
+Task: "Plan validation fail-closed test in backend-go/tests/integration/plan_validation_test.go"
+Task: "Plan lifecycle gate test in backend-go/tests/integration/plan_lifecycle_test.go"
+Task: "Plan replay + resume test in backend-go/tests/integration/plan_replay_resume_test.go"
+Task: "Plan approval-gate test in backend-go/tests/integration/plan_approval_gate_test.go"
+
+# Then: schema (T164) → validator (T165) → evaluator (T166) → runner (T167) → lifecycle (T168),
+# which are sequential; these two are parallel with the tail of that chain:
+Task: "Wire delegate_fanout to the Delegation seam in backend-go/internal/orchestration/fanout.go"
+Task: "Expose plan submission/status on the run API in backend-go/internal/surfaces/api.go"
 ```
 
 ### User Story 8 (Phase 10)
@@ -634,16 +715,18 @@ Foundational schema and contracts.
 1. Setup + Foundational → foundation ready
 2. US1 (kernel) → MVP
 3. US2 (surfaces) + US3 (trust) + US4 (cost/observability) → the P2 platform
-4. US5 (memory/skills) + US6 (config/deploy) + US7 (reliability/scale) → full platform
-5. US8 (consumer surfaces + personal connectors) → the day-to-day-assistant experience
-6. Polish + go-live gate → production launch
-7. Scale validation + capacity hardening (Phase 12) → measured SC-008 SLAs before high-concurrency go-live
+4. US9 (deterministic orchestration plans) → processes, not just conversations
+5. US5 (memory/skills) + US6 (config/deploy) + US7 (reliability/scale) → full platform
+6. US8 (consumer surfaces + personal connectors) → the day-to-day-assistant experience
+7. Polish + go-live gate → production launch
+8. Scale validation + capacity hardening (Phase 13) → measured SC-008 SLAs before high-concurrency go-live
 
 ### Parallel Team Strategy
 
 After Foundational completes, staff US1 first, then fan out US2/US3/US4 in parallel;
-US5/US6/US7 follow once their P2 prerequisites land, and US8 follows once US2 + US3
-land. Each story integrates without breaking earlier stories.
+US9 follows once US3 + US4 land (it needs approval gates and the cost/eval governance,
+not delegation); US5/US6/US7 follow once their P2 prerequisites land, and US8 follows
+once US2 + US3 land. Each story integrates without breaking earlier stories.
 
 ---
 
