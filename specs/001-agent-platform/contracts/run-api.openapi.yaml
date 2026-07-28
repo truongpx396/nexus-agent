@@ -10,6 +10,11 @@ info:
     (Gmail/Drive/Calendar) via per-user OAuth (FR-052). All requests are
     authenticated (SSO/OIDC) and RBAC-scoped by the control plane (FR-029, FR-035).
     Long-running interactions stream or poll — never a blocked connection (FR-031).
+    Webhook-ingress surfaces (Telegram/Zalo, inbound email, connector callbacks)
+    are NOT part of this OIDC-authenticated API: they authenticate the *provider*
+    by signature/shared secret with replay rejection and per-identity flood limits
+    before any adapter translation (FR-082), and only then bind to a verified
+    platform user (FR-055).
 servers:
   - url: https://api.nexus-agent.example/v1
 security:
@@ -58,19 +63,75 @@ paths:
               schema:
                 $ref: '#/components/schemas/RunStatus'
         '404': { description: Not found or not visible to this tenant (FR-039) }
+  /runs/{sessionId}/cancel:
+    post:
+      summary: Cancel an in-flight run (FR-004, FR-005)
+      description: >
+        The operation that makes the `aborted` terminal reason reachable. Any
+        outstanding tool_use still receives a synthetic tool_result before
+        termination (FR-003), and the run returns its best partial artifact
+        (FR-067). With drain=true the in-flight tool call finishes first.
+      operationId: cancelRun
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+                drain: { type: boolean, default: true }
+      responses:
+        '202': { description: Cancellation accepted; run terminates with `aborted` }
+        '409': { description: Run already terminal }
+  /runs/{sessionId}/resume:
+    post:
+      summary: Resume a suspended or interrupted run from its last checkpoint (FR-024)
+      operationId: resumeRun
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                from_checkpoint_id: { type: string, format: uuid }
+      responses:
+        '202': { description: Re-queued; resumes from checkpoint, not from scratch }
   /runs/{sessionId}/events:
     get:
       summary: Stream structure-only run progress (SSE)
       description: >
         Emits typed event structure and per-turn spans WITHOUT requiring reads of
         conversation content (FR-040). Conversation content is available only via
-        an authorized debugging scope.
+        an authorized debugging scope. A dropped subscriber resumes from its last
+        observed seq via Last-Event-ID (or ?from_seq=) with no loss or duplication.
       operationId: streamRunEvents
       parameters:
         - name: sessionId
           in: path
           required: true
           schema: { type: string, format: uuid }
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: Last observed event seq; the stream resumes after it (FR-031)
+          schema: { type: integer, format: int64 }
+        - name: from_seq
+          in: query
+          required: false
+          description: Alternative to Last-Event-ID for non-SSE clients
+          schema: { type: integer, format: int64 }
       responses:
         '200':
           description: text/event-stream of RunEvent objects
@@ -112,15 +173,30 @@ paths:
           application/json:
             schema:
               type: object
+              required: [decision]
               properties:
                 decision: { type: string, enum: [grant, deny] }
-                scope: { type: string, enum: [once, session, permanent] }
+                scope:
+                  type: string
+                  enum: [once, session, standing]
+                  default: once
+                  description: >
+                    Scopes wider than `once` MUST name the tool and effect class they
+                    cover and MUST carry an expiry — no scope permanently ungates a
+                    class of high-impact action (FR-036).
+                scope_tool_id: { type: string }
+                scope_effect_class:
+                  type: string
+                  enum: [payment, delete, external_send, prod_change, other]
+                scope_expires_at: { type: string, format: date-time }
       responses:
         '200': { description: Approval resolved }
         '410':
           description: >
-            Approval already expired (TTL elapsed, fail-closed); the run has
-            terminated with approval_expired and the action did not proceed (FR-036)
+            Approval already expired (TTL elapsed, fail-closed). The action did not
+            proceed; the denial was returned to the loop as a typed synthetic
+            tool_result so the agent could replan, and the run terminated with
+            approval_expired only if it could not proceed without it (FR-036)
   /connectors:
     get:
       summary: List the calling user's linked personal connectors (FR-052)
@@ -210,6 +286,12 @@ components:
           type: string
           enum: [interactive, batch]
           default: interactive
+          description: >
+            Execution class; persisted on the run and read by priority
+            load-shedding under overload (FR-049, FR-088)
+        priority:
+          type: integer
+          description: Scheduling weight within the execution class
         budget_per_task_usd:
           type: number
           description: Optional override under the tenant ceiling (FR-017)
@@ -223,6 +305,9 @@ components:
       properties:
         session_id: { type: string, format: uuid }
         status: { type: string, enum: [queued, running, suspended, terminal] }
+        agent_version:
+          type: integer
+          description: Pinned at run start and held for the run's life (FR-088)
         terminal_reason:
           type: string
           nullable: true
@@ -236,16 +321,47 @@ components:
             - hook_stopped
             - approval_expired
         cost_usd: { type: number }
+        price_book_version:
+          type: string
+          description: Price table used to compute cost_usd; makes it reproducible (FR-084)
     RunEvent:
       type: object
-      description: Structure-only progress span (no conversation content)
+      description: >
+        Structure-only progress span (no conversation content). The `type` values
+        are exactly the internal event taxonomy (FR-085) — the external contract
+        and the event log MUST NOT diverge.
       properties:
         seq: { type: integer, format: int64 }
+        schema_version:
+          type: integer
+          description: Event envelope version; upcast for replay across changes (FR-086)
         type:
           type: string
-          enum: [thought, action, observation, tool_use, tool_result, condensation, terminal]
+          enum:
+            - thought
+            - content
+            - tool_use
+            - tool_result
+            - tool_receipt_ref
+            - condensation
+            - checkpoint
+            - user_message
+            - approval_requested
+            - approval_granted
+            - approval_denied
+            - approval_expired
+            - taint_transition
+            - sanitization_boundary
+            - error
+            - terminal
+            - erasure
+        actor:
+          type: string
+          enum: [model, tool, user, system]
         tool_id: { type: string, nullable: true }
-        input_tokens: { type: integer, nullable: true }
+        input_tokens_uncached: { type: integer, nullable: true }
+        input_tokens_cache_read: { type: integer, nullable: true }
+        input_tokens_cache_write: { type: integer, nullable: true }
         output_tokens: { type: integer, nullable: true }
         latency_ms: { type: integer, nullable: true }
         model_id: { type: string, nullable: true }
