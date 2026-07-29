@@ -177,17 +177,94 @@ interface RunControl {
   steer(session_id, message, idempotency_key): void   // drained at a turn boundary
   cancel(session_id, reason, drain: bool): void       // the ONLY producer of `aborted`
   resume(session_id, from_checkpoint_id?): void       // resume, never restart (FR-024)
+  tightenAutonomy(session_id, level): void            // ratchet only — never widens (FR-111)
 }
 ```
 
 - `steer` delivers to the **running** session's queue under its serial lock and
-  appends a `user_message` event — it is not a new run submission.
+  appends a `user_message` event — it is not a new run submission. Steering into a
+  **suspended** run additionally invalidates the approval or input request it is
+  suspended on (FR-106): a suspended run has no upcoming turn boundary to drain at,
+  and the human has just changed the plan that approval authorized.
 - `cancel` still honors the paired-result invariant: any outstanding `tool_use`
   receives a synthetic `tool_result` before termination, and the run returns its
   best partial artifact (FR-003, FR-067).
 - `cancel` and every terminal path **reap the run's children** via
-  `Delegation.reap` before the parent terminates (FR-100). A child outliving its
-  parent is a defect, not a leak to reconcile later.
+  `Delegation.reap` **and invalidate every outstanding approval and input request**
+  via `Oversight.invalidate` before the parent terminates (FR-100, FR-106). A child
+  outliving its parent is a defect; so is an authorization outliving the run it
+  authorized — the second is worse, because it can still mutate the world.
+- `tightenAutonomy` is one-way. There is no widening operation on this interface,
+  and no other seam exposes one: a mid-run autonomy widening would be a direct
+  prompt-injection lever (FR-111).
+
+## `Oversight` — the human seam (FR-036, FR-103–FR-112)
+
+Approval and elicitation share one durable-suspend mechanism and nothing else. An
+unanswered *question* is not a denied *action*, so they are distinct lifecycles
+with distinct expiry semantics — and only one of them authorizes anything.
+
+```
+interface Oversight {
+  // Blocks the invocation; the run suspends durably at ZERO token cost.
+  requestApproval(req: ApprovalRequest, ctx: RunContext) -> ApprovalOutcome
+  // Agent -> human question. Carries NO authorization value (FR-110).
+  requestInput(req: InputRequest, ctx: RunContext) -> InputOutcome
+  // Called on cancel / terminal / reap / ceiling breach / steer-into-suspension.
+  invalidate(session_id, reason: InvalidationReason): void
+}
+
+type ApprovalRequest = {
+  action_ref: EventId                // WHICH call was gated — identity only
+  approved_input_digest: bytes       // WHAT a grant authorizes (FR-103)
+  kind: "single" | "batch" | "plan_preauth"
+  member_digests: bytes[]            // enumerated set for batch / pre-auth (FR-109)
+  effect_class: EffectClass
+  context: ApprovalContext           // decision-ready, redaction-bound (FR-104)
+  context_mode: "local" | "upstream" // where it may be rendered (FR-091)
+  assignee: AssigneeRef              // never an implicit broadcast (FR-108)
+  escalation: EscalationChain        // notify -> remind -> escalate -> expire
+  required_approvals: int            // >1 for multi-party classes (FR-105)
+  separation_of_duties: bool         // resolver != run initiator
+  step_up_required: bool             // fresh re-auth at resolution time
+  scope: ApprovalScope               // once | session | standing — ALWAYS expiring
+  ttl_seconds: int
+}
+
+type ApprovalOutcome = {
+  decision: "granted" | "granted_modified" | "denied" | "expired" | "invalidated"
+  approved_input_digest: bytes       // RECOMPUTED on granted_modified (FR-107)
+  authoritative_input: json?         // the approver's input, when modified
+  rationale: string?                 // returned to the loop on denial (FR-107)
+  resolver: { user_id, authn_method, channel }?   // humans only (FR-105)
+  receipt_id: ReceiptId?             // chained authorization receipt (FR-112)
+}
+
+type InputOutcome = {
+  status: "answered" | "expired_assumed_default" | "expired" | "invalidated"
+  answer: json?                      // schema-validated; UNTRUSTED (FR-069)
+  assumed_default: json?             // recorded, so the assumption is auditable
+}
+
+type InvalidationReason = "run_cancelled" | "run_terminal" | "reaped"
+                        | "steered" | "ceiling_exhausted"
+```
+
+- **A grant authorizes a digest, not an intent** (FR-103). The pipeline recomputes
+  the canonical digest immediately before execution and refuses divergence with
+  `approval_mismatch`. `action_ref` survives a change of arguments; the digest does
+  not, which is the whole point.
+- **`granted_modified` makes the approver authoritative** (FR-107): the returned
+  `authoritative_input` is what executes and what the recomputed digest binds, and
+  the agent is not told it executed unmodified.
+- **`Oversight` never runs on the model's word.** No `DelegationSpec`, tool input,
+  hook, or steering message can construct a grant, widen a scope, or mark an
+  approval satisfied. Approval scopes do not descend into children (FR-098).
+- **Suspension is durable and free**: the run is checkpointed and evicted, not
+  parked on a held connection or a polling turn (FR-036, FR-046).
+- **Every outcome is paired** (FR-003): grant, denial, expiry, mismatch, and
+  invalidation each produce exactly one `tool_result` before the next
+  `Provider.stream`.
 
 ## The loop terminal contract (FR-002, FR-004)
 
@@ -196,7 +273,7 @@ type Classification = TOOL_CALLS | CONTENT | EMPTY   // dispatch on this, not te
 
 type TerminalReason =
   | completed | max_turns | cost_exhausted | error
-  | aborted | prompt_too_long | hook_stopped | approval_expired
+  | aborted | prompt_too_long | hook_stopped | approval_expired | input_expired
 ```
 
 - Callers MUST handle `TerminalReason` exhaustively.
@@ -206,8 +283,13 @@ type TerminalReason =
   not by examples alone (FR-097).
 - Every terminal reason maps to a producer: `aborted` ← `RunControl.cancel`;
   `cost_exhausted` ← a refused budget reservation (FR-083); `approval_expired` ←
-  an approval TTL the run could not proceed without (FR-036); the rest from the
-  loop's own guards.
+  an approval TTL the run could not proceed without (FR-036); `input_expired` ←
+  an `Oversight.requestInput` with `on_expiry = terminate` that went unanswered
+  (FR-110); the rest from the loop's own guards.
+- `approval_expired` and `input_expired` stay distinct because they mean different
+  things to a caller: nobody *authorized* an action, versus nobody *answered* a
+  question. Collapsing them would either fail runs that could have proceeded on a
+  declared default or hide an assumption nobody recorded.
 
 ## Budget reservation — the pre-spend gate (FR-083)
 

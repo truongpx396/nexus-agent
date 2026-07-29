@@ -16,7 +16,7 @@ Technical Context — so no `NEEDS CLARIFICATION` remains before Phase 1.
   function that classifies each model response into a typed union
   (`TOOL_CALLS` / `CONTENT` / `EMPTY`) and returns a discriminated terminal reason
   (`completed`, `max_turns`, `cost_exhausted`, `error`, `aborted`,
-  `prompt_too_long`, `hook_stopped`, `approval_expired`).
+  `prompt_too_long`, `hook_stopped`, `approval_expired`, `input_expired`).
 - **Rationale**: Branching on a tagged union (not string matching) eliminates the
   most common agent-loop bug ("the model responded but the code didn't know what
   to do"); exhaustive terminal reasons let every surface handle stops uniformly

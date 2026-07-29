@@ -95,6 +95,11 @@ and human approval on high-impact actions (FR-032–FR-040).
 make verify-isolation TENANT_A=acme TENANT_B=globex
 # Trigger a high-impact action (e.g. external send) and leave the approval unanswered:
 make verify-approval-timeout
+# Prove the approval is a transaction: argument substitution after the grant,
+# resolution by an unauthorized principal, and a decision arriving after cancel:
+make verify-approval-binding
+make verify-approval-authz
+make verify-approval-invalidation
 # Prove the audit log is tamper-evident, and that erasure preserves it:
 make verify-audit-chain
 make verify-erasure SUBJECT=<user_id>
@@ -110,10 +115,24 @@ make verify-erasure SUBJECT=<user_id>
   current external anchor; injected tampering (modify / delete / reorder) is
   detected by `make verify-audit-chain` (FR-040, FR-081, SC-015).
 - The vault-injected credential never appears in the prompt/transcript (FR-034).
-- The unanswered approval expires as a denial of **the action** after its TTL: the
-  agent receives a typed denial and may replan; only a run that cannot proceed
-  ends `approval_expired`, still returning its partial artifact. The gated action
-  did **not** proceed either way (FR-036, FR-067).
+- The unanswered approval expires as a denial of **the action** after its TTL and
+  its notify → remind → escalate stages: the agent receives a typed denial (with
+  the approver's rationale where one exists) and may replan; only a run that cannot
+  proceed ends `approval_expired`, still returning its partial artifact. The gated
+  action did **not** proceed either way (FR-036, FR-067, FR-107, FR-108).
+- `make verify-approval-binding` grants an approval, substitutes an argument, and
+  confirms execution is refused with `approval_mismatch` and **zero** external
+  effects — the grant bound the digest of the resolved call, and that same digest
+  is the exactly-once dedup key (FR-103, FR-071, SC-024).
+- `make verify-approval-authz` confirms a resolution is refused — and audited —
+  when attempted by an agent principal, by the run's own initiator on an
+  irreversible class, with a replayed channel token, or without the effect-class
+  approve scope; and that step-up re-authentication is demanded where the tenant's
+  policy requires it (FR-105, SC-025).
+- `make verify-approval-invalidation` cancels a run holding a pending approval and
+  confirms the approval is invalidated *before* the terminal event, the gated
+  `tool_use` gets its paired synthetic result, and a decision arriving afterwards
+  performs nothing and is recorded as a refused resolution (FR-106, SC-026).
 - `make verify-erasure` destroys the subject's content key: payloads become
   unrecoverable while the event log still replays and the audit chain still
   verifies — no event row deleted or rewritten (FR-080, SC-014).

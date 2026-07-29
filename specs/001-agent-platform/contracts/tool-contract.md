@@ -43,6 +43,38 @@ Gate 3 — Per-invocation check: safety classifier on PARSED input (fail closed)
   tool whose declaration is missing or unclassifiable is treated as engaging all
   three legs and therefore requires approval.
 
+## The permission resolution order (FR-111) — one published total order
+
+An undefined interaction between two gates is a fail-open waiting to be found, so
+the chain is total and ordered. Every invocation walks it top to bottom:
+
+| # | Layer | May resolve to | Notes |
+|---|-------|----------------|-------|
+| 1 | **Deny rules** (tenant/tool/pattern) | `DENY` (final) | Evaluated first; nothing below may overturn a deny |
+| 2 | `PreToolUse` hooks | `DENY` (final) · `ASK` · `DEFER` | A hook may *tighten* or force a prompt; a hook `ALLOW` is a defer, never a bypass |
+| 3 | **Autonomy level** (pinned, ratcheting) | `DENY` · `ASK` · `DEFER` | `read_only` denies every mutating capability; `supervised` forces `ASK` on every mutating invocation; `full` defers |
+| 4 | Gate 1 — global profile | `DENY` · `DEFER` | |
+| 5 | Gate 2 — capability metadata | `DENY` · `ASK` · `DEFER` | Effect class routes to the approval policy |
+| 6 | Gate 3 — **per-invocation safety** on parsed input | `DENY` · `ASK` · `DEFER` | **Always evaluated. No exception, ever** |
+| 7 | **Rule of Two** (session taint + declared legs) | `ASK` · `DEFER` | **Always evaluated. No exception, ever** |
+| 8 | Approval policy (FR-109) | `AUTO` · `ASK(once/session/multi_party)` | Deterministic; recorded on the approval |
+| 9 | Standing scope / batch / plan pre-authorization | `SATISFIES an ASK` | May only *answer* an ask raised above; may never suppress one |
+| 10 | Otherwise | `ALLOW` | |
+
+Two invariants make this order load-bearing rather than decorative:
+
+- **A deny at any layer is final.** No later layer, autonomy setting, standing
+  scope, batch, plan pre-authorization, or operator mode may overturn it. There is
+  no `bypass` mode in this platform.
+- **Steps 6 and 7 are unconditional.** A standing scope, batch, plan
+  pre-authorization, or `full` autonomy may satisfy an *ask* — it may never cause
+  the per-invocation safety check (FR-009) or the Rule-of-Two evaluation
+  (FR-033/FR-087) to be skipped. A remembered "yes" is an answer to a question,
+  not permission to stop asking it.
+- **Autonomy ratchets** (FR-111): pinned at run start, tightenable mid-run by an
+  operator, and widenable by nothing — not model output, not a tool result, not a
+  steering message, not a hook, not a delegation parameter.
+
 ## The single execution pipeline (`checkPermissionsAndCallTool`)
 
 Ordered steps applied to every call (FR-007, FR-010):
@@ -56,11 +88,20 @@ Ordered steps applied to every call (FR-007, FR-010):
    FR-033, FR-087)
 6. **Input backfill** (defaults, absolute-path coercion — poka-yoke, FR-007)
 7. **PreToolUse hooks**
-8. **Permission resolution chain** (profile → capability → per-invocation)
-8a. **Idempotency key derivation + durable dedup** for state-changing effects, so
-   a retry, redelivery, or resume executes the external effect exactly once
-   (FR-071)
+8. **Permission resolution chain** — the total order above (FR-111)
+8a. **Canonical digest + idempotency key derivation** over `tool_id` + the fully
+   resolved input. **One artifact** serves three jobs: it is what an approval
+   binds (FR-103), what durable dedup keys off so a retry, redelivery, or resume
+   executes the external effect exactly once (FR-071), and what step 10 re-verifies
+8b. **Approval gate** when step 8 resolved to `ASK` — request approval carrying the
+   digest, the context package, the assignee, and the TTL (FR-036, FR-104, FR-108);
+   the run **suspends durably at zero token cost** here. A standing scope, batch, or
+   plan pre-authorization may satisfy the ask only by matching an enumerated,
+   unexpired, digest-bound entry; it never skips steps 6–7
 9. **Secret injection** at execution time from vault (model saw only a handle, FR-034)
+9a. **Digest re-verification** — recompute the canonical digest and compare it to
+   the approved one. Divergence → refuse with a typed `approval_mismatch` synthetic
+   result; never silently re-request approval within the same turn (FR-103)
 10. **Execute** in the per-tenant sandbox — default E2B backend, hard resource
     limits (CPU/memory/PID/wall-clock; breach → terminate + reclaim) and network
     default-deny (egress only via the domain allowlist, FR-037, FR-059)
@@ -68,6 +109,9 @@ Ordered steps applied to every call (FR-007, FR-010):
     object storage, return a preview + "do not infer success from the preview"
     banner (FR-010)
 12. **PostToolUse hooks**
+12a. **Emit authorization receipt** when this invocation was approval-gated —
+    binding approver identity, authn method, channel, approved digest, scope, and
+    decision into the same chain (FR-112)
 13. **Emit audit receipt** for mutating actions — hash-chained to its predecessor
     and signed by a sign-only KMS/HSM key, over **digests** rather than plaintext
     so a lawful redaction cannot break verification (FR-040, FR-081)
@@ -85,17 +129,46 @@ Ordered steps applied to every call (FR-007, FR-010):
 - **Submission-order results**: concurrent batches yield results in submission
   order, not completion order.
 - **High-impact gate**: payments, deletions, external sends, and production changes
-  require scoped human approval before execute (step 10 blocks pending approval,
+  require scoped human approval before execute (step 8b blocks pending approval,
   FR-036). While pending, the run **suspends durably at zero token cost**. An
-  unanswered approval expires as a denial of *the action*, returned to the loop as
-  a typed synthetic `tool_result` so the agent may replan; the run ends
-  `approval_expired` only if it cannot proceed without it. Approval scopes name a
-  tool and effect class and carry an expiry — none permanently ungates a class.
+  unanswered approval expires as a denial of *the action* — after notification,
+  reminder, and escalation (FR-108) — returned to the loop as a typed synthetic
+  `tool_result` carrying the approver's rationale where present (FR-107), so the
+  agent may replan; the run ends `approval_expired` only if it cannot proceed
+  without it. Approval scopes name a tool and effect class and carry an expiry —
+  none permanently ungates a class.
+- **An approval authorizes a digest, not an intent** (FR-103): step 9a re-verifies
+  the canonical digest of the resolved input against the approved one and refuses
+  on divergence with a typed `approval_mismatch`. The `tool_use` identifier alone
+  is never sufficient — it survives a change of arguments, which is precisely the
+  substitution the gate exists to catch.
+- **One artifact, three jobs**: the digest derived at step 8a is what the approval
+  binds, what dedup keys off, and what step 9a re-verifies — so the approved
+  invocation, the executed invocation, and the de-duplicated invocation are
+  provably one invocation.
+- **Only an authorized human resolves** (FR-105): agent and service principals
+  never grant; irreversible classes require a resolver distinct from the run's
+  initiator and, where the tenant's policy says so, fresh step-up authentication;
+  the resolution channel carries a single-use token bound to the approval and the
+  resolver. Refused resolutions are audited.
+- **No approval outlives its run** (FR-106): cancel, terminal, reap, ceiling breach,
+  and steering-into-suspension invalidate outstanding approvals before the run
+  terminates, each releasing a paired synthetic `tool_result`.
+- **The gate is pipeline-enforced, never prompt-enforced**: no model-facing
+  parameter grants, widens, skips, or pre-satisfies an approval, and no standing
+  scope, batch, or plan pre-authorization suppresses the per-invocation safety
+  check or the Rule of Two (FR-111). Injected content asserting that consent was
+  already given changes nothing, and that suppression attempt is a held-out eval
+  case (FR-112).
+- **Input requests are not approvals** (FR-110): an agent-initiated,
+  schema-declared question suspends the run on the same machinery but carries
+  **zero** authorization and can never satisfy this gate.
 - **Untrusted output**: tool output and retrieved content are never fed straight
   into execution (FR-033).
 - **Exactly-once effects**: a state-changing call re-issued by a retry,
   at-least-once redelivery, or resume-from-checkpoint executes its external effect
-  once, deduplicated on a durable tenant-scoped idempotency key (FR-071).
+  once, deduplicated on a durable tenant-scoped idempotency key (FR-071) derived
+  from the same canonical digest the approval bound.
 
 ## Example tool descriptor
 
@@ -130,6 +203,21 @@ is what an approval scope binds to and what dedup keys off:
     "mutates_external": true
   },
   "effect_class": "external_send",
-  "idempotency_key_spec": { "fields": ["to", "subject", "body_digest"], "scope": "tenant" }
+  "idempotency_key_spec": { "fields": ["to", "subject", "body_digest"], "scope": "tenant" },
+  "approval_binding": {
+    "digest_fields": ["to", "cc", "bcc", "subject", "body_digest", "attachment_digests"],
+    "blast_radius_fields": ["to", "cc", "bcc", "attachment_digests"]
+  }
 }
 ```
+
+`approval_binding` is what makes the gate a transaction rather than a flag:
+
+- **`digest_fields`** are canonicalized into the digest an approval binds and step 9a
+  re-verifies (FR-103). They MUST be a superset of `idempotency_key_spec.fields`, so
+  no field can change the external effect without invalidating the consent that
+  authorized it — a mutating tool whose `digest_fields` omit a
+  blast-radius-determining argument fails registration.
+- **`blast_radius_fields`** are the arguments an approver is always shown in the
+  context package (FR-104) — the recipient, the amount, the target resource, the
+  record count. A human approving `gmail_send` is approving *who receives it*.

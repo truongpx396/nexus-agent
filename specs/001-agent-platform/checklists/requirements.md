@@ -52,6 +52,19 @@ are now resolved in the spec (FR-080–FR-097), data model, contracts, and resea
 - [x] Every terminal reason has a producer — cancel added to both contracts (FR-005, SC-020)
 - [x] Eval gate moved to Foundational; MVP cut line recorded in plan.md
 
+### Human oversight (design review 2026-07-29)
+
+- [x] An approval authorizes the **digest of the exact resolved call**, re-verified before execute, unified with the exactly-once key (FR-103, SC-024)
+- [x] Approver sees a decision-ready context package; rendering location is configuration, not an assumption that breaks the egress boundary (FR-104, FR-091)
+- [x] Approval resolution is authorized as well as authenticated — human-only, separated from the requester, step-up, single-use channel token (FR-105, SC-025)
+- [x] No approval outlives the run it gates: invalidated on cancel / terminal / reap / ceiling / steer (FR-106, SC-026)
+- [x] Decisions are grant / grant-with-modification / deny-with-rationale, and the rationale reaches the loop (FR-107)
+- [x] Every request has a declared recipient with reminder + escalation before the fail-closed expiry (FR-108)
+- [x] Fatigue bounded on the effect-class axis by a versioned policy, batching, and plan pre-authorization — not by a permanent "yes" (FR-109, SC-027)
+- [x] The agent can **ask**: an input-request lifecycle distinct from approval, with caller-declared expiry (FR-110, SC-028)
+- [x] `autonomy_level` has normative semantics, ratchets one way, and sits in one published total resolution order where a deny is final and safety/Rule-of-Two are unconditional (FR-111)
+- [x] The authorization decision is chained and the gate is red-teamed, not asserted (FR-112, SC-005, SC-029)
+
 ## Notes
 
 - Items marked incomplete require spec updates before `/speckit.clarify` or `/speckit.plan`

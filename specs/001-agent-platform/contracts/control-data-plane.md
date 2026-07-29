@@ -21,6 +21,8 @@ older data plane during a rainbow rollout — FR-026).
 | Model routing decision (FR-037, FR-076) | Provider/model calls (FR-027) |
 | Price book distribution (FR-084) | Memory read/write (FR-019) |
 | Eval / skill / MCP catalog (FR-042) | Event-log append, checkpoints (FR-024) |
+| Approval policy + approver identity/authz (FR-105, FR-109) | Approval **enforcement** at the tool boundary; digest re-verify (FR-103) |
+| Approval routing, reminder, escalation (FR-108) | Approval context rendering under `local` mode (FR-104) |
 | Audit sink + chain anchoring (FR-040, FR-081) | Emits audit receipts + cost records upstream |
 | Erasure/key-destruction orchestration (FR-080) | Holds content keys per tenant (FR-089) |
 
@@ -33,8 +35,9 @@ leaves it, and nothing else:
 |---------------------|--------------|
 | Identifiers (`tenant_id`, `session_id`, `user_id`, `tool_id`, `model_id`) | Prompts, model output, tool arguments, tool results |
 | Counts and measures (token classes, latency, cost) | Memory content, retrieved documents, artifacts |
-| Digests and signatures (audit chain) | Any plaintext an event payload contains |
+| Digests and signatures (audit chain, approved-input digests) | Any plaintext an event payload contains |
 | Typed reasons (terminal reason, failure class, reclaim reason) | Secrets, connector tokens (never leave the vault at all) |
+| **Approval context package — only when `approval_context_mode = upstream`** | The approval context package under `local` mode (default for BYOC) |
 
 - `audit_sink_mode` and `telemetry_sink_mode` are per-deployment configuration:
   `upstream` (default for SaaS) or **`local`** — with `local`, the data plane
@@ -42,6 +45,25 @@ leaves it, and nothing else:
   (required for BYOC tenants who accept no metadata egress).
 - Region pinning is enforced at admission: a run whose placement would fall
   outside the tenant's pinned region is refused, not relocated.
+
+### `approval_context_mode` — the one content-bearing exception (FR-104, FR-091)
+
+An approver cannot decide on an opaque UUID, and tool arguments are exactly what
+this boundary exists to hold back. That tension is resolved by configuration, not
+by silently leaking or by shipping an unusable gate:
+
+| Mode | Rendering | What crosses |
+|------|-----------|--------------|
+| **`local`** (default for BYOC/hybrid) | The data plane renders the package and serves the approval UI in-boundary | Only `approval_id`, effect class, digests, the decision, approver identity, and typed reasons |
+| `upstream` (opt-in, SaaS) | The control plane renders it | The redacted `context_package` as an **enumerated egress class**, bound to a `redaction_policy_version` |
+
+- `upstream` MUST be refused when the tenant's residency configuration forbids it,
+  and is never implied by `audit_sink_mode` or any other setting.
+- Under either mode the package is produced by the tenant's declared redaction
+  policy (FR-037) and the version that produced it is recorded on the approval, so
+  what an approver was shown is replayable.
+- **Presenting identifiers alone is a defect, not a safe default** — it manufactures
+  the rubber-stamping the gate exists to prevent.
 
 ## Downstream calls (control plane → data plane)
 
@@ -78,6 +100,11 @@ Response 202: { queued_at_seq }
 
 - Delivered to the session's steering queue, drained at a turn boundary under the
   session's serial lock, and appended as a `user_message` event (FR-085).
+- **Steering into a suspended run invalidates the approval it is suspended on**
+  (`reason: "steered"`, FR-106): the human has just changed the plan that approval
+  authorized. A suspended run has no upcoming turn boundary to drain at, so the
+  invalidation is what releases it — the agent re-requests if the action is still
+  needed.
 
 ### `CancelRun(v1)` (FR-004, FR-005)
 The operation that makes the `aborted` terminal reason reachable.
@@ -90,6 +117,9 @@ Response 202: { status: "aborting" }
 
 - Cancellation MUST still honor the paired-result invariant: any outstanding
   `tool_use` receives a synthetic `tool_result` before termination (FR-003).
+- Cancellation MUST call `InvalidateApprovals(v1)` and reap the run's children
+  **before** appending the terminal event (FR-106, FR-100). An approval resolved
+  after cancellation performs nothing.
 - Terminates with `aborted`, returning the best partial artifact (FR-067).
 
 ### `ResumeRun(v1)` (FR-024)
@@ -178,14 +208,95 @@ Response 200: { status: "destroyed", destroyed_at }
   event row is deleted or rewritten** — the sequence, digests, and audit chain
   stay verifiable, and the erasure itself is recorded as an event and a receipt.
 
-### `RequestApproval(v1)` (FR-036)
+### `RequestApproval(v1)` (FR-036, FR-103–FR-109)
 ```
 POST /v1/approvals
-  { session_id, tenant_id, action_ref, scope, ttl_seconds }
-Response: { approval_id, status: "pending" }
+  { session_id, tenant_id, action_ref,
+    approved_input_digest,               // WHAT the grant authorizes (FR-103)
+    kind: "single"|"batch"|"plan_preauth",
+    member_digests[]?,                   // enumerated set for batch/pre-auth (FR-109)
+    effect_class, risk_tier,             // risk_tier resolved from ApprovalPolicy
+    context_package?, redaction_policy_version, context_mode: "local"|"upstream",
+    assignee_ref, escalation_chain,      // never an implicit broadcast (FR-108)
+    required_approvals, separation_of_duties, step_up_required,   // FR-105
+    scope, scope_tool_id, scope_effect_class, scope_expires_at,
+    ttl_seconds }
+Response 201: { approval_id, status: "pending", resolution_token }   // single-use
+Errors: 400 missing_input_digest        // an approval that binds no arguments is refused
+      | 400 unenumerated_batch          // kind != single without member_digests
+      | 403 context_mode_forbidden      // upstream refused by residency config (FR-091)
+      | 422 policy_violation            // scope wider than the ApprovalPolicy allows
 ```
-- If unanswered within `ttl_seconds`, resolves `expired` (fail-closed); the data
-  plane terminates the run with `approval_expired` and does not perform the action.
+- `context_package` is present only when `context_mode = upstream`; under `local`
+  the data plane holds it and serves the approval UI in-boundary (FR-104).
+- `resolution_token` is single-use, bound to `approval_id` **and** the resolver's
+  identity, invalid after first use and after the TTL. Only its hash is stored.
+- Unanswered within `ttl_seconds` → `expired` (fail-closed) after the reminder and
+  escalation stages of FR-108. The expiry denies **the action**, returned to the
+  loop as a typed synthetic `tool_result`; the run terminates `approval_expired`
+  only if it cannot proceed without it (FR-036, FR-067).
+
+### `ResolveApproval(v1)` (FR-105, FR-107, FR-112)
+The decision path. Authenticated and **authorized** in its own right — a provider
+signature on an inbound channel authenticates the transport, never the decision.
+
+```
+POST /v1/approvals/{approval_id}/resolve
+  { decision: "grant"|"grant_modified"|"deny",
+    resolution_token,                    // single-use, bound to approval + resolver
+    modified_input?,                     // grant_modified: becomes AUTHORITATIVE (FR-107)
+    resolution_note?,                    // deny rationale, returned to the loop
+    step_up_assertion? }                 // fresh re-auth evidence when required
+Response 200: { status, approved_input_digest, receipt_id }   // recomputed on modify
+Errors: 401 step_up_required        | 403 not_authorized      // lacks approve:<class>
+      | 403 principal_not_human     // agent/service principals never resolve (FR-105)
+      | 409 separation_of_duties    // resolver == run initiator on an irreversible class
+      | 409 already_resolved        // no transition out of a resolved state
+      | 410 invalidated             // run cancelled/steered/reaped (FR-106)
+      | 410 token_replayed          | 410 expired
+```
+- Every refused attempt appends `approval_resolution_refused` and is audited — a
+  failed authorization on the approval channel is a security signal (FR-095).
+- `grant_modified` recomputes `approved_input_digest` over the approver's input and
+  records the modification; the agent is not told it executed unmodified.
+- A `deny` without a rationale is accepted but flagged: a denial with no gradient
+  turns the gate into a retry loop against a human (FR-107).
+- Every grant/modify/deny emits a chained **authorization receipt** (FR-112).
+
+### `InvalidateApprovals(v1)` (FR-106)
+Called by the data plane on cancel, terminal, reap, ceiling breach, and on steering
+that arrives while a run is suspended on an approval.
+
+```
+POST /v1/approvals/invalidate
+  { session_id, reason: "run_cancelled"|"run_terminal"|"reaped"|"steered"
+                      |"ceiling_exhausted" }
+Response 200: { invalidated: [approval_id], input_requests_invalidated: [id] }
+```
+- MUST complete **before** the run's terminal event is appended. A pending approval
+  MUST NOT outlive the run state it was requested against.
+- Each invalidation releases a paired synthetic `tool_result` for its gated
+  `tool_use` (FR-003), so the transcript stays valid.
+
+### `RequestInput(v1)` / `ResolveInput(v1)` (FR-110)
+The agent→human **pull** channel. Same durable-suspend machinery as an approval;
+**no authorization value whatsoever** — it can never satisfy FR-036.
+
+```
+POST /v1/input-requests
+  { session_id, tenant_id, pair_ref, question, answer_schema, assignee_ref,
+    on_expiry: "assume_default"|"terminate", default_answer?, ttl_seconds }
+Response 201: { input_request_id, status: "pending" }
+Errors: 400 default_required        // assume_default without a default_answer
+
+POST /v1/input-requests/{id}/resolve
+  { answer }                           // validated against answer_schema
+Response 200: { status: "answered" }
+Errors: 422 schema_violation
+```
+- `on_expiry = assume_default` resolves with the **recorded** assumption and the run
+  continues; `terminate` ends the run `input_expired` with its partial artifact.
+- The answer is untrusted content and passes the input guard (FR-069).
 
 ## Versioning rules
 
