@@ -107,7 +107,8 @@ flowchart TB
 - **Kernel** — the single agent loop: an async-generator step that classifies every
   model response into a typed union (`TOOL_CALLS` / `CONTENT` / `EMPTY`) and always
   ends in a typed terminal reason (`completed`, `max_turns`, `cost_exhausted`,
-  `error`, `aborted`, `prompt_too_long`, `hook_stopped`, `approval_expired`).
+  `error`, `aborted`, `prompt_too_long`, `hook_stopped`, `approval_expired`,
+  `input_expired`).
 - **Harness** — tools, cache-stable context, per-turn cost metering, file-first
   memory, on-demand skills, and reliability engineering.
 - **Surfaces** — thin adapters (CLI, chat, web, REST/gRPC, email, cron,
@@ -147,7 +148,9 @@ principles). Every design decision maps back to one of them:
   guarantees.
 - 🔒 **Enterprise trust surface** — per-tenant data/secret/budget isolation at the
   data layer (RLS), immutable tamper-evident audit receipts, vaulted secrets the
-  model never sees, and human-in-the-loop approval for high-impact actions.
+  model never sees, and human-in-the-loop approval for high-impact actions — bound
+  to the exact call it authorizes, resolvable only by an authorized human, and
+  invalidated with the run it gates.
 - ✌️ **The Rule of Two** — when a session would combine *untrusted input*, *private
   data*, and *external state change/communication*, at most two proceed
   unattended; the third requires human approval.
@@ -400,9 +403,30 @@ long-running sessions (~5,000+ per single-org deployment).
   safety check on parsed input; tool defaults are fail-closed.
 - ✌️ **The Rule of Two** — no session runs *untrusted input* + *private data* +
   *external state change* all unattended; the third leg requires human approval.
-- 👤 **Human-in-the-loop** — payments, deletions, external sends, and production
-  changes are gated by scoped approval. An approval unanswered within its TTL
-  **expires as a denial** (`approval_expired`), audited.
+- 👤 **Human-in-the-loop, as a transaction not a flag** — payments, deletions,
+  external sends, and production changes are gated by scoped approval, enforced in
+  the execution pipeline where no prompt can talk past it. A grant authorizes the
+  **digest of the exact resolved call** — the same artifact the exactly-once key
+  derives from — so a retry, resume, or substituted argument can't ride an earlier
+  "yes." The approver sees a decision-ready package (never a bare UUID), can grant,
+  **modify**, or deny with a rationale that goes back to the agent, and must be an
+  authorized human — separated from the requester on irreversible classes, step-up
+  re-authenticated on the highest ones, over a single-use channel token. Every
+  decision emits its own hash-chained receipt. Approvals are **invalidated with the
+  run** they gate — none outlives a cancel, a reap, or a steer. An approval
+  unanswered after notify → remind → escalate **expires as a denial**
+  (`approval_expired`), audited.
+- 🙋 **The agent can ask, not just be told** — steering is the human→agent push
+  channel; an **input request** is the agent→human pull channel: a schema-declared
+  question that suspends the run at zero token cost and, on expiry, resolves either
+  to a *recorded* default assumption or an `input_expired` stop. It carries no
+  authorization and can never satisfy an approval gate.
+- 🎚️ **Bounded oversight load** — a versioned per-tenant approval policy tiers
+  effect classes by risk and value, and a human can authorize an enumerated,
+  digest-bound **batch or plan pre-authorization** once instead of forty times.
+  Nothing ever ungates a class permanently, and no standing scope, batch, or
+  autonomy level can short-circuit the per-invocation safety check or the Rule of
+  Two. Rubber-stamping is a measured, paged signal, not an accepted cost.
 - 📦 **Sandbox trust boundary** — all code/shell runs in a resource-limited sandbox
   with network default-deny (egress only via a domain allowlist); code never runs
   on the host or sees files outside its session workspace.

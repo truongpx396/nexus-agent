@@ -41,7 +41,8 @@ type Plan = {
 
 type Step = {
   id: string
-  kind: "agent" | "delegate_fanout" | "approval_gate" | "condition" | "loop"
+  kind: "agent" | "delegate_fanout" | "approval_gate" | "preauth"
+      | "input_request" | "condition" | "loop"
   agent_id: UUID?                    // pinned at enable time (FR-088)
   agent_version: int?                // pinned; a deploy cannot shift it mid-plan
   route_model_id: string?            // pinned route; deterministic (FR-027, FR-037)
@@ -74,7 +75,12 @@ draft ──validate──► gated ──eval gate (FR-043) + governance sign-o
 ```
 
 1. **Validate** — schema, reachability (every step reachable, `end` reachable from
-   every step), bounded loops, closed predicates, and scope-subset proof per step.
+   every step), bounded loops, closed predicates, scope-subset proof per step, and
+   **oversight completeness**: every step whose effect class requires approval
+   under the tenant's approval policy (FR-109) either reaches an `approval_gate`
+   or is covered by an enumerated `preauth`, and no `preauth` can admit an
+   invocation outside its enumeration. A plan that routes around its own tenant's
+   approval policy fails validation rather than executing.
 2. **Eval gate** (FR-042, FR-043) — the plan version is the gated unit: ≥90% pass
    and zero regressions versus the current baseline.
 3. **Governance sign-off** (FR-096) — recorded before a tenant may enable it,
@@ -97,7 +103,19 @@ through the same gates; in-flight runs finish on the version they started with
   apply unchanged. The plan holds decision authority; children stay read-only.
 - **Approval**: an `approval_gate` step suspends the run **durably at zero token
   cost** and resumes on the approval event; an unanswered approval expires as a
-  denial of that step (FR-036).
+  denial of that step (FR-036) after its declared notify → remind → escalate stages
+  (FR-108). The gate obeys the full approval transaction unchanged: it binds the
+  digest of what it authorizes (FR-103), carries a decision-ready context package
+  under the tenant's rendering mode (FR-104), is resolvable only by an authorized
+  human (FR-105), and is invalidated if the plan run is cancelled or reaped
+  (FR-106). A plan is *reviewed* configuration, which is a reason its steps are
+  predictable — never a reason its approvals are weaker.
+- **Pre-authorization**: a plan MAY carry a `preauth` step declaring an enumerated,
+  digest-bound set of mutating invocations for one human decision, so a
+  twelve-send process interrupts a person once rather than twelve times (FR-109).
+  The enumeration is part of the plan version and therefore eval-gated and
+  signed off like the rest of it; a pre-authorization that could admit an
+  invocation outside its enumerated set fails validation.
 - **Checkpoint/resume**: each step boundary is a checkpoint (FR-024). An
   interrupted plan resumes at the last completed step, never from step 1.
 - **Replay**: step entry, transition taken, and step outcome are typed events
@@ -114,7 +132,9 @@ through the same gates; in-flight runs finish on the version they started with
 | `plan_step_exited` | `step_id`, outcome, acceptance result, usage |
 | `plan_completed` | terminal reason (FR-004), envelope reconciliation |
 
-All five are in the FR-085 taxonomy and identical across the internal log and any
+Oversight steps additionally emit the approval and input-request lifecycle events
+of FR-085 unchanged — a plan's authorization history replays from the same
+taxonomy as an ad-hoc run's. All five plan events are in the FR-085 taxonomy and identical across the internal log and any
 externally published event contract.
 
 ## Invariants
@@ -128,6 +148,10 @@ externally published event contract.
 - **Scope descent**: every step's scope is a subset of the plan principal's scope,
   proven at validation *and* enforced at execution (FR-098) — a plan cannot be a
   privilege-escalation path around the tool boundary.
+- **No oversight bypass**: a plan is reviewed configuration, not an exemption. It
+  cannot weaken an approval, pre-satisfy one without enumerating it, or cause the
+  per-invocation safety check or the Rule of Two to be skipped (FR-111) — the
+  determinism thesis buys predictable *routing*, never unattended *authority*.
 - **Tenant-scoped**: plans are tenant-owned rows under the same RLS policy as
   every other tenant-owned row (FR-011, FR-039); one tenant can neither enumerate
   nor execute another's plans.

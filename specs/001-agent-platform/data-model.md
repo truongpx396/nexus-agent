@@ -51,6 +51,11 @@ erDiagram
     SESSION ||--o{ COST_RECORD : meters
     SESSION ||--o{ CHECKPOINT : snapshots
     SESSION ||--o{ APPROVAL : gates
+    SESSION ||--o{ INPUT_REQUEST : asks
+    TENANT ||--o{ APPROVAL_POLICY : governs
+    APPROVAL_POLICY ||--o{ APPROVAL : tiers
+    USER ||--o{ APPROVAL : resolves
+    APPROVAL ||--|| AUDIT_RECEIPT : authorizes
     SESSION ||--o{ BUDGET_RESERVATION : holds
     EVENT ||--o| AUDIT_RECEIPT : may_bind
     AUDIT_RECEIPT ||--o| AUDIT_RECEIPT : chains_to
@@ -109,10 +114,11 @@ that produces the next action from history — not code, never forked per custom
 | `version` | int | Immutable; new version = new row (FR-042) |
 | `bootstrap` | text | Markdown persona (`SOUL.md`/`IDENTITY.md`/`TOOLS.md`) |
 | `toolset_profile` | enum | `read_only` / `coding` / `messaging` / `full` |
-| `autonomy_level` | enum | `read_only` / `supervised` / `full` |
+| `autonomy_level` | enum | `read_only` (refuses every mutating capability) / `supervised` (approval on every mutating invocation) / `full` (approval per effect class + Rule of Two + `ApprovalPolicy`) — normative pipeline semantics, not a label (FR-111) |
 | `created_at` | timestamptz | |
 
 - **Immutability**: a change is a new versioned row; a prompt/model change is a deploy.
+- **Autonomy is enforced, not advisory**: the three levels have defined effects in the execution pipeline and sit at a fixed position in the one published permission resolution order (FR-111, [contracts/tool-contract.md](contracts/tool-contract.md)). Raising a tenant's autonomy level carries a recorded governance sign-off (FR-096).
 
 ### Tool
 A self-describing capability with input schema and per-invocation checks; a built-in
@@ -264,14 +270,17 @@ tenant, replayable and auditable (FR-006, FR-041).
 | `plan_id` / `plan_version` | UUID / int (nullable) | The orchestration plan version driving this run, pinned at start (FR-102) |
 | `taint_state` | jsonb | Rule-of-Two legs engaged so far, plus the last sanitization boundary (FR-087) — *projection* |
 | `status` | enum | `queued` / `running` / `suspended` / `terminal` — *projection* |
-| `terminal_reason` | enum (nullable) | `completed` / `max_turns` / `cost_exhausted` / `error` / `aborted` / `prompt_too_long` / `hook_stopped` / `approval_expired` (FR-004) — *projection* |
+| `autonomy_level` | enum | `read_only` / `supervised` / `full`, **pinned at run start** and ratcheting — tightenable mid-run, never widenable by any path (FR-111) |
+| `terminal_reason` | enum (nullable) | `completed` / `max_turns` / `cost_exhausted` / `error` / `aborted` / `prompt_too_long` / `hook_stopped` / `approval_expired` / `input_expired` (FR-004) — *projection* |
 | `created_at` | timestamptz | |
 
 - **Concurrency**: per-session serial (lock on `session_key`), cross-session concurrent.
 - **Projections**: `status`, `terminal_reason`, and `taint_state` are derived from the event log and rebuildable by replay; they are read paths, not truth (FR-086).
 - **Delegation chain**: `root_session_id` + `parent_session_id` + `depth` are written at session creation and never updated. They are a **foundational seam, not a later feature** — retrofitting a chain onto historical cost records and receipts is exactly the migration the append-only log exists to avoid, so the columns ship in Increment 1 even though delegation itself is deferred (see plan.md "MVP cut line").
 - **Scope descent**: a child session's resolved scope (tool catalog, connector authorizations, egress allowlist, `data_label`, `region`) is a **subset** of its parent's at creation time and is never widened afterward (FR-098).
-- **Suspension**: a session awaiting human approval or a long external job sits in `suspended` at **zero ongoing token cost**, resumed by an event rather than polled (FR-036).
+- **Suspension**: a session awaiting human approval, an input request, or a long external job sits in `suspended` at **zero ongoing token cost**, resumed by an event rather than polled (FR-036, FR-110).
+- **Autonomy ratchet**: `autonomy_level` is pinned at run start like `agent_version` and may only move toward *more* restrictive within the run. No model output, tool result, steering message, hook, or delegation parameter may widen it — a mid-run widening is a direct prompt-injection lever (FR-111).
+- **No approval outlives its run**: reaching any terminal state, being cancelled, being reaped, or breaching a ceiling invalidates every outstanding `Approval` and `Input Request` for the session *before* the terminal event is appended (FR-106).
 
 ### Event
 A typed, timestamped, attributable record appended to the log — the single source
@@ -302,8 +311,9 @@ log alone, and identical to the externally published event contract (FR-085):
 | Model output | `thought` · `content` · `tool_use` |
 | Tool | `tool_result` (incl. synthetic) · `tool_receipt_ref` |
 | Context | `condensation` · `checkpoint` |
-| Human | `user_message` (the mid-run steering input of FR-005) |
-| Approval | `approval_requested` · `approval_granted` · `approval_denied` · `approval_expired` |
+| Human (push) | `user_message` (the mid-run steering input of FR-005) |
+| Human (pull) | `input_requested` · `input_answered` · `input_expired` · `input_invalidated` (FR-110) |
+| Approval | `approval_requested` · `approval_notified` · `approval_reminded` · `approval_escalated` · `approval_granted` · `approval_granted_modified` · `approval_denied` · `approval_expired` · `approval_invalidated` · `approval_resolution_refused` · `approval_mismatch` (FR-036, FR-103–FR-108) |
 | Safety | `taint_transition` · `sanitization_boundary` (FR-087) |
 | Delegation | `delegation_requested` · `delegation_refused` (bound/scope/admission) · `delegation_returned` · `delegation_reaped` (FR-098–FR-101) |
 | Orchestration | `plan_started` · `plan_step_entered` · `plan_transition` · `plan_step_exited` · `plan_completed` (FR-102) |
@@ -449,25 +459,94 @@ after injection screening (FR-019).
 - **Injection rule**: immutable snapshot at session start; updates take effect next session.
 
 ### Approval
-Scoped human approval for high-impact actions; fail-closed on timeout (FR-036).
+The authorization **transaction** for a high-impact invocation — bound to the exact
+input it authorizes, rendered to a named approver, resolvable only by an authorized
+human, and invalidated with the run it gates (FR-036, FR-103–FR-108).
 
 | Field | Type | Notes |
 |-------|------|-------|
 | `approval_id` | UUID (PK) | |
 | `session_id` | UUID (FK) | |
 | `tenant_id` | UUID (FK) | RLS key |
-| `action_ref` | UUID | The gated `tool_use` event |
+| `action_ref` | UUID | The gated `tool_use` event — **identity, not authorization** |
+| `approved_input_digest` | bytea | **What the grant actually authorizes** (FR-103): canonical digest over `tool_id` + fully resolved input. Re-verified immediately before execute; divergence → typed `approval_mismatch` |
+| `idempotency_key` | string | Derived from the same digest, so approved / executed / de-duplicated are provably one invocation (FR-071) |
+| `kind` | enum | `single` / `batch` / `plan_preauth` — a batch or pre-authorization **enumerates** its members (FR-109) |
+| `member_digests` | bytea[] (nullable) | For `batch` / `plan_preauth`: the enumerated set an invocation must match to be admitted. Non-empty when `kind ≠ single` |
+| `effect_class` | enum | `payment` / `delete` / `external_send` / `prod_change` / `other` |
+| `risk_tier` | enum | Resolved from the `ApprovalPolicy` at request time — recorded, so the policy version that gated this is replayable |
+| `context_package` | jsonb *(encrypted)* | The decision-ready package of FR-104: action summary, blast-radius parameters, taint legs, cost + delegation chain, requester |
+| `redaction_policy_version` | string | Which masking rules produced `context_package` (FR-037, FR-104) |
+| `context_mode` | enum | `local` / `upstream` — where the package may be rendered (FR-091, FR-104) |
+| `assignee_ref` | jsonb | Declared recipient: user, approver group, or rotation — never an implicit broadcast (FR-108) |
+| `escalation_chain` | jsonb | Ordered fallback approvers + reminder/escalation offsets (FR-108) |
+| `required_approvals` | int | ≥2 for tenant-configured multi-party classes (FR-105); default 1 |
+| `separation_of_duties` | bool | True for irreversible classes: resolver ≠ run initiator (FR-105) |
+| `step_up_required` | bool | Resolution demands fresh re-authentication (FR-105) |
+| `resolution_token_hash` | bytea | Hash of the single-use channel token bound to `approval_id` + resolver; invalid after first use and after TTL (FR-105) |
 | `scope` | enum | `once` / `session` / `standing` — **no unbounded `permanent`** (FR-036) |
 | `scope_tool_id` | string (nullable) | A scope names the tool it covers |
-| `scope_effect_class` | enum (nullable) | …and the effect class (`payment` / `delete` / `external_send` / `prod_change`) |
+| `scope_effect_class` | enum (nullable) | …and the effect class it covers |
 | `scope_expires_at` | timestamptz (nullable) | Every scope wider than `once` carries an expiry — no scope permanently ungates a class |
-| `status` | enum | `pending` / `granted` / `denied` / `expired` — *projection* of the approval events |
+| `status` | enum | `pending` / `granted` / `granted_modified` / `denied` / `expired` / `invalidated` — *projection* of the approval events |
 | `ttl_expires_at` | timestamptz | Decision deadline; on expiry → `expired` (fail-closed) |
-| `resolved_by` | UUID (nullable) | The approving user — attribution (FR-040) |
+| `resolved_by` | UUID (nullable) | The approving **human** — attribution (FR-040). Agent/service principals can never be written here |
+| `resolved_authn_method` | string (nullable) | How that human was authenticated at resolution (step-up evidence) |
+| `resolved_channel` | string (nullable) | Where the decision came from (web / Slack / Telegram / API) |
+| `resolution_note` | text (nullable) *(encrypted)* | Deny rationale or modification reason, returned to the loop (FR-107) |
+| `invalidation_reason` | enum (nullable) | `run_cancelled` / `run_terminal` / `reaped` / `steered` / `ceiling_exhausted` (FR-106) |
 
-- **State transitions**: `pending → granted` / `pending → denied` / `pending → expired` (TTL, fail-closed). `expired` and `denied` both block the action.
-- **Expiry semantics**: the action is denied, and the denial is returned to the loop as a **typed synthetic `tool_result`** so the agent may replan or finish without it; the run ends `approval_expired` (still returning its best partial artifact, FR-067) only when it cannot proceed. While `pending`, the session is `suspended` at zero token cost.
-- **Every outcome is an event** (`approval_requested` / `granted` / `denied` / `expired`) — this table is the projection.
+- **State transitions**: `pending → granted` / `granted_modified` / `denied` / `expired` (TTL, fail-closed) / `invalidated` (FR-106). Everything except `granted` and `granted_modified` blocks the action. There is no transition out of a resolved state — a second decision on a resolved approval is a **refused resolution**, recorded, never an overwrite.
+- **A grant authorizes a digest, not an intent** (FR-103): execution re-verifies `approved_input_digest` and refuses on divergence. `action_ref` identifies *which* call was gated; it does not survive a change of arguments and is never sufficient on its own.
+- **Grant-with-modification** (FR-107): the approver's input becomes authoritative, `approved_input_digest` is recomputed over it, and the agent is not told the request executed unmodified.
+- **Expiry semantics**: the action is denied, and the denial — carrying `resolution_note` where present — is returned to the loop as a **typed synthetic `tool_result`** so the agent may replan or finish without it; the run ends `approval_expired` (still returning its best partial artifact, FR-067) only when it cannot proceed. While `pending`, the session is `suspended` at zero token cost.
+- **Invalidation is mandatory, not best-effort** (FR-106): cancel, terminal, reap, ceiling breach, and steering-while-suspended all invalidate outstanding approvals **before** the run terminates, each releasing a paired synthetic `tool_result` (FR-003). A pending approval MUST NOT outlive the run state it was requested against.
+- **Every outcome is an event** — `approval_requested` / `notified` / `reminded` / `escalated` / `granted` / `granted_modified` / `denied` / `expired` / `invalidated` / `resolution_refused` — and this table is the projection (FR-085).
+- **Every resolution emits a chained receipt** binding approver, authn method, channel, digest, scope, and decision (FR-112) — the authorization record is not merely a mutable projection.
+
+### Approval Policy
+The versioned, tenant-scoped rule set that bounds **how often** a human is asked, so
+the effect-class gate does not degrade into rubber-stamping (FR-109).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `policy_id` | UUID (PK) | |
+| `tenant_id` | UUID (FK) | RLS key |
+| `version` | int (PK part) | Immutable; a change publishes a new version (FR-042) |
+| `rules` | jsonb | Ordered (effect class × risk tier × value threshold × autonomy level) → `auto` / `once` / `session` / `multi_party` |
+| `routing` | jsonb | Per-class assignee/group/rotation, reminder offsets, escalation chain (FR-108) |
+| `step_up_classes` | enum[] | Effect classes demanding fresh re-authentication (FR-105) |
+| `redaction_policy` | jsonb | Masking rules producing the `context_package` (FR-037, FR-104) |
+| `eval_run_id` | UUID (nullable) | The gate run that cleared it (FR-043) |
+| `governance_signoff` | jsonb (nullable) | Recorded approver + timestamp; required to enable (FR-096) |
+
+- **Behavior-bearing config**: a policy version cannot be enabled without both `eval_run_id` and `governance_signoff` — the same bar a tool, connector, or plan clears.
+- **Evaluated deterministically** and recorded on the `Approval` (`risk_tier`, plus the policy version), so *why this needed a human* replays.
+- **Never model-widenable**: no model-facing parameter selects, edits, or relaxes a policy; an `auto` rule still passes the per-invocation safety check and the Rule of Two (FR-111).
+
+### Input Request
+The agent→human **pull** channel — a schema-declared question, distinct from an
+approval and carrying no authorization (FR-110).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `input_request_id` | UUID (PK) | |
+| `session_id` | UUID (FK) | |
+| `tenant_id` | UUID (FK) | RLS key |
+| `pair_ref` | UUID | The `tool_use` this answers — the paired-result invariant applies (FR-003) |
+| `question` | jsonb *(encrypted)* | Prompt plus presentation hints |
+| `answer_schema` | jsonb | JSON Schema the response is validated against |
+| `assignee_ref` | jsonb | Declared recipient (FR-108) |
+| `on_expiry` | enum | **Caller-declared**: `assume_default` / `terminate` (FR-110) |
+| `default_answer` | jsonb (nullable) *(encrypted)* | Required when `on_expiry = assume_default`; recorded so the assumption is auditable |
+| `status` | enum | `pending` / `answered` / `expired` / `invalidated` — *projection* |
+| `ttl_expires_at` | timestamptz | Decision deadline |
+| `answered_by` | UUID (nullable) | Attribution |
+| `answer` | jsonb (nullable) *(encrypted)* | Schema-validated; **untrusted content** subject to the input guard (FR-069) |
+
+- **Not an approval**: an `Input Request` can never satisfy FR-036. The two share the durable-suspend machinery and nothing else — an unanswered question is not a denied action.
+- **Expiry is declared, not assumed**: `assume_default` resolves with a recorded assumption and continues; `terminate` ends the run `input_expired` (FR-004) returning its partial artifact (FR-067).
+- **Invalidated with the run** on cancel/terminal/reap/steer, exactly like an approval (FR-106).
 
 ### Audit Receipt
 Tamper-evident record binding a mutating action to session, tool, args, result, and
@@ -476,7 +555,9 @@ timestamp (FR-040; Security section).
 | Field | Type | Notes |
 |-------|------|-------|
 | `receipt_id` | UUID (PK) | |
-| `event_id` | UUID (FK) | The mutating action |
+| `kind` | enum | `action` (a mutating invocation) / `authorization` (an approval decision, FR-112) — both chain into the same per-session chain |
+| `event_id` | UUID (FK) | The mutating action, or the approval-decision event |
+| `approval_id` | UUID (FK, nullable) | For `kind = authorization`: binds approver identity, `resolved_authn_method`, `resolved_channel`, `approved_input_digest`, scope + expiry, and the decision |
 | `tenant_id` | UUID (FK) | RLS key |
 | `user_id` | UUID (FK) | Attribution — the human whose delegated scope authorized this |
 | `session_id` | UUID (FK) | The run that acted |
@@ -555,8 +636,15 @@ hard resource limits; the trust boundary for all code/shell execution
   reassigns connections between tenants (FR-039). Isolation tests run through
   that pooler (SC-013).
 - **Immutability**: `Agent`, `Tool`, `Model`, `Price Book`, `Skill` (per version),
-  `Orchestration Plan` (per version), `Event`, `Audit Receipt`, `Audit Anchor` are
-  write-once. Config changes create new versioned rows.
+  `Orchestration Plan` (per version), `Approval Policy` (per version), `Event`,
+  `Audit Receipt`, `Audit Anchor` are write-once. Config changes create new
+  versioned rows.
+- **Approval is a transaction, not a flag**: a grant authorizes
+  `Approval.approved_input_digest` — the exact resolved invocation — and execution
+  re-verifies it, so a retry, resume, redelivery, or substituted argument cannot
+  ride an earlier consent (FR-103). The same digest derives the exactly-once
+  idempotency key (FR-071). Approvals are resolvable only by authorized human
+  principals (FR-105) and are invalidated with the run they gate (FR-106).
 - **Delegation is one-way down, one-way up**: capability is monotonically
   non-increasing down a chain (`Delegation.scope_snapshot` ⊆ parent scope) and
   taint is monotonically non-decreasing up it (`taint_engaged` folds into the
@@ -570,8 +658,10 @@ hard resource limits; the trust boundary for all code/shell execution
   session and the ordering is the source of truth for replay. Every event carries
   a `schema_version` and an upcasting path keeps old events replayable (FR-086).
 - **Projections, not truth**: `Session.status` / `terminal_reason` / `taint_state`,
-  `Approval.status`, `Sandbox.state`, and `ConnectorAuthorization.status` are
-  derived from the event log and rebuildable by replay (FR-086).
+  `Approval.status`, `InputRequest.status`, `Sandbox.state`, and
+  `ConnectorAuthorization.status` are derived from the event log and rebuildable
+  by replay (FR-086). The *authorization* itself is not left to a projection — a
+  grant, modification, or denial also emits a chained `Audit Receipt` (FR-112).
 - **Erasure**: content columns are envelope-encrypted per tenant/subject; erasure
   destroys the key (`Encryption Key.status = destroyed`) rather than deleting
   rows, preserving replay structure and audit-chain verification (FR-080).

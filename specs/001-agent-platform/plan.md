@@ -93,10 +93,14 @@ throughout; secrets never in the prompt; all code/shell execution runs in a
 resource-limited (CPU/mem/PID/wall-clock) sandbox with network default-deny
 (egress only via the domain allowlist); sensitive/regulated payloads routable to
 a self-hosted in-VPC model so they never leave the trust boundary; default 90-day
-memory retention (tenant-overridable); a required approval unanswered within its
-TTL expires as a denial (`approval_expired`)
+memory retention (tenant-overridable); high-impact actions gated by an approval
+**transaction** — bound to the digest of the exact resolved call, rendered to a
+named approver as a decision-ready package, resolvable only by an authorized human
+(separated from the requester and step-up re-authenticated on irreversible
+classes), invalidated with the run it gates, and unanswered-after-escalation
+expiring as a denial (`approval_expired`)
 
-**Scale/Scope**: 97 functional requirements across 8 user stories (see the MVP cut
+**Scale/Scope**: 112 functional requirements across 9 user stories (see the MVP cut
 line below for what ships in Increment 1); single reusable
 kernel serving 8+ surfaces (CLI, chat, web, REST/gRPC, email, cron, Telegram, Zalo)
 plus per-user personal connectors (Gmail/Drive/Calendar); startup (5 people) →
@@ -117,7 +121,7 @@ the Security, Delivery/Scale, and Workflow constraint sections).
 | II | Immutable Models, Append-Only State | Agent/Tool/Model/config immutable; only mutable state is the append-only event log; every `tool_use` paired with a `tool_result` (synthetic on cancel/error) (FR-003, FR-006). | PASS |
 | III | Cache-Stable Context Is Architecture | Byte-stable prefix + volatile tail; per-turn content banned from the prefix; >90% cache-read target; structured off-loop compaction (FR-013, FR-014, FR-015). | PASS |
 | IV | Stop on Cost, Not Vibes | Per-turn token metering attributed to task+tenant; hard per-task/per-tenant ceilings → `cost_exhausted`; iteration/wall-clock are backstops; η$ and CPM in the release gate (FR-016, FR-017, FR-018). | PASS |
-| V | Safety Is Per-Invocation and Fails Closed | Per-invocation safety on parsed input; fail-closed tool defaults; layered defense; Rule of Two; untrusted tool/retrieved content (FR-008, FR-009, FR-032, FR-033). | PASS |
+| V | Safety Is Per-Invocation and Fails Closed | Per-invocation safety on parsed input; fail-closed tool defaults; layered defense; Rule of Two; untrusted tool/retrieved content (FR-008, FR-009, FR-032, FR-033). Human oversight is specified as a transaction rather than a flag — approval binds the digest of the exact resolved call, carries a decision-ready context package, is resolvable only by an authorized human, is invalidated with the run it gates, and sits in one published total resolution order in which a deny is final and neither the per-invocation safety check nor the Rule of Two can be short-circuited by any scope, batch, or autonomy level (FR-103–FR-112). | PASS |
 | VI | Tenant First; Audit & Observability Day-One | Tenant is the first dimension of session key/row/workspace/cost/secret; DB row-level security with **transaction-local** scope that survives the transaction-pooling tier, proven by an isolation test run through that pooler; **hash-chained, externally anchored** audit log with sign-only key custody; per-turn structure-only observability (FR-038, FR-039, FR-040, FR-081). | PASS |
 | VII | Model- and Provider-Agnostic by Abstraction | One provider abstraction + normalized stream contract; native tool-calling only; deterministic auditable routing by data label + difficulty; regulated payloads → self-hosted (FR-027, FR-037). | PASS |
 | VIII | Reliability: Classify, Resume, Never Silently Retry | Typed failure classification before retry; logged backoff+jitter; circuit-break at 3 identical failures; durable checkpoint/resume; stuck detection; rainbow deploy (FR-023, FR-024, FR-025, FR-026). | PASS |
