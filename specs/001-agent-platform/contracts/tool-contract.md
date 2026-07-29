@@ -22,10 +22,28 @@ gates (FR-011). Safety is judged per invocation on parsed input (FR-009).
   catalog in the prompt prefix stays byte-stable (Constitution III).
 - External connectors register only through the vetted, per-tenant, RBAC-scoped
   MCP catalog (FR-012).
+- **Catalog admission scan (FR-113)**: before any descriptor (built-in, connector,
+  or MCP) is added to the registry — or re-admitted on a version bump — its name,
+  description, parameter docs, and schema are scanned for injected instructions,
+  the same posture FR-075 requires of ingested documents. `catalog_scan_status`
+  moves `pending → clean` (enumerable to the model) or `pending → flagged/rejected`
+  (never enumerable, fail closed); the result and the scan policy version are
+  recorded against the tool's FR-096 governance sign-off. A tool description is
+  read by the model exactly like retrieved content — vetting the server's
+  provenance (FR-078) and treating its runtime output as untrusted (FR-070) does
+  not, by itself, catch an attacker who plants the payload in the listing itself.
 - Personal connectors (Gmail/Drive/Calendar) are catalog entries with
   `auth_kind = per_user_oauth`: the calling user authorizes them via per-user OAuth,
   and step 9 injects that user's vaulted token by `(tenant, user, connector)` at
   execution time (model sees only a handle) (FR-052, FR-053, FR-054).
+- **Audience-bound tokens (FR-114)**: every token minted for a connector or MCP
+  server — `tenant_service` (`Connector.token_audience`) or `per_user_oauth`
+  (`Connector Authorization.resource_audience`) — MUST be restricted to that one
+  connector/server (RFC 8707 resource indicator or the provider's narrowest
+  equivalent scope). A connector whose provider cannot support this is rejected at
+  registration rather than issued a tenant-wide credential as a fallback, because a
+  vaulted-but-unrestricted token still lets a compromised connector replay it
+  against a different upstream resource once injected at step 9.
 
 ## The three gates (fail-closed)
 
@@ -36,6 +54,16 @@ Gate 2 — Capability metadata : read-only vs mutating ; concurrency class ;
                                reads_private_data, mutates_external} ; effect class
 Gate 3 — Per-invocation check: safety classifier on PARSED input (fail closed)
 ```
+
+**Gate 3 is a hybrid, layered classifier, not one mechanism (FR-116)**: a fast
+deterministic rule pass (allow/deny/blocklist over the parsed input) runs first
+in-process and resolves the common case with no external call; only input the
+rule pass cannot classify falls through to a model-based classifier. That
+model-based leg carries its own bounded timeout and fails closed to `ASK` — never
+`ALLOW` — on timeout, error, or an unparseable verdict. Rules alone under-block
+novel or obfuscated attacks; a model call on every invocation would put a
+non-deterministic, metered round-trip on the hot path that the cache-read and
+cost goals (FR-014, FR-017) cannot absorb — the hybrid is required.
 
 - Any gate denies → the invocation is refused; default is deny.
 - **Taint declarations are mandatory metadata** (FR-087). They are the inputs the
@@ -83,9 +111,9 @@ Ordered steps applied to every call (FR-007, FR-010):
 2. **Abort check** (cancellation / stop hook)
 3. **Schema validation** (`inputSchema`) — instructive error on failure
 4. **Semantic validation** (`validateInput`)
-5. **Speculative permission classifier** (parsed input; Rule of Two evaluated from
-   the tool's declared taint legs plus the session's accumulated taint state,
-   FR-033, FR-087)
+5. **Speculative permission classifier** (parsed input via the hybrid rule/model
+   Gate 3 of FR-116; Rule of Two evaluated from the tool's declared taint legs
+   plus the session's accumulated taint state, FR-033, FR-087)
 6. **Input backfill** (defaults, absolute-path coercion — poka-yoke, FR-007)
 7. **PreToolUse hooks**
 8. **Permission resolution chain** — the total order above (FR-111)

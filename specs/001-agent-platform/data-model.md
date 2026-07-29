@@ -138,10 +138,14 @@ or a per-tenant permission-scoped connector (FR-007, FR-011).
 | `effect_class` | enum (nullable) | For mutating tools: `payment` / `delete` / `external_send` / `prod_change` / `other` — the unit an approval scope may cover (FR-036) |
 | `idempotency_key_spec` | jsonb (nullable) | How a stable per-effect key is derived for state-changing calls (FR-071) |
 | `connector_id` | UUID (FK, nullable) | Set when tool is a connector |
+| `catalog_scan_status` | enum | `pending` / `clean` / `flagged` / `rejected` — result of the descriptor injection scan (FR-113). A tool MUST NOT be enumerable to the model while `pending` or `rejected` |
+| `scan_policy_version` | string | Version of the injection-scan policy that produced `catalog_scan_status`, so a past admission decision is replayable (FR-113) |
+| `scanned_at` | timestamptz | Set on first registration and on every version bump (FR-113) |
 
 - **Note**: safety is judged **per invocation on parsed input**, not stored per tool (FR-009). The three taint booleans are *declarations* consumed by the Rule-of-Two evaluator (FR-087); a tool whose declarations are missing is treated as engaging all three legs.
 - **RLS**: policy applies where `tenant_id IS NOT NULL`; a tenant can neither enumerate nor invoke another tenant's catalog entries (FR-011, FR-039).
 - **Built-ins**: the platform ships built-in tools — workspace-restricted filesystem (`file_read`/`file_write`/`file_search`/…), a sandboxed shell/code-execution tool, and web search/fetch (egress-allowlisted, untrusted results) — governed by the same three gates and per-invocation safety (FR-056–FR-058).
+- **Catalog admission**: `catalog_scan_status` transitions `pending → clean` (admitted) or `pending → flagged/rejected` (refused, fail-closed) before a descriptor is ever added to the tenant's tool catalog or re-admitted on a version bump; the transition is recorded as part of the tool's FR-096 governance sign-off, not as a silent background job (FR-113).
 
 ### Model / Provider
 A pluggable backend accessed only through one abstraction with a normalized stream
@@ -201,6 +205,9 @@ per-tenant, RBAC-scoped catalog (FR-012).
 | `secret_handle` | string | Vault handle; never the raw credential (FR-034) |
 | `scope` | jsonb | RBAC scope, per calling user |
 | `auth_kind` | enum | `tenant_service` (admin-configured) / `per_user_oauth` (personal, FR-052) |
+| `token_audience` | string (nullable) | Resource indicator / audience the `tenant_service` token is minted for (FR-114); NULL only when the provider's token model has no separable audience and the narrowest available scope is used instead — a connector with neither MUST fail registration |
+
+- **Audience restriction (FR-114)**: a connector whose provider cannot issue an audience-/resource-restricted token (or the narrowest equivalent scope) is rejected at the same governance gate as an over-broad permission scope (FR-078) — never registered with a tenant-wide credential as a fallback.
 
 ### Connector Authorization
 A per-user OAuth grant binding a `User` to a `Connector`, stored only in the
@@ -215,11 +222,13 @@ personal connectors (`auth_kind = per_user_oauth`, e.g. Gmail/Drive/Calendar).
 | `connector_id` | UUID (FK) | Unique per `(tenant, user, connector)` |
 | `token_handle` | string | Vault handle for access+refresh tokens; never in prompt/log (FR-052) |
 | `scopes` | string[] | OAuth scopes granted at consent |
+| `resource_audience` | string | The RFC 8707 resource indicator (or provider's narrowest equivalent) the vaulted token is restricted to; MUST NOT be a tenant- or IdP-wide credential (FR-114) |
 | `expires_at` | timestamptz | Access-token expiry; auto-refresh on/after |
 | `status` | enum | `active` / `expired` / `revoked` |
 | `created_at` | timestamptz | |
 
 - **Uniqueness**: one active row per `(tenant_id, user_id, connector_id)`.
+- **Audience restriction (FR-114)**: `resource_audience` is set at consent time from the connector's declared token model; a personal connector whose provider cannot support it is rejected at registration (same gate as `Connector.token_audience`), never silently issued a broader grant.
 - **Lifecycle**: `active → expired (auto-refresh) → active`; user revoke → `revoked` (blocks use, fail-closed).
 - **Secret rule**: only `token_handle` is stored; raw tokens live in the vault and never enter a prompt, transcript, or log.
 
@@ -317,7 +326,7 @@ log alone, and identical to the externally published event contract (FR-085):
 | Safety | `taint_transition` · `sanitization_boundary` (FR-087) |
 | Delegation | `delegation_requested` · `delegation_refused` (bound/scope/admission) · `delegation_returned` · `delegation_reaped` (FR-098–FR-101) |
 | Orchestration | `plan_started` · `plan_step_entered` · `plan_transition` · `plan_step_exited` · `plan_completed` (FR-102) |
-| Lifecycle | `error` · `terminal` (carries the FR-004 typed reason) · `erasure` (FR-080) |
+| Lifecycle | `error` · `stuck_suspected` (first stuck-heuristic trip, non-terminal, FR-115) · `terminal` (carries the FR-004 typed reason) · `erasure` (FR-080) |
 
 - **Invariant**: every `tool_use` has a paired `tool_result` (synthetic on cancel/error) before the next model call — a **total** invariant over all histories, therefore property-tested (FR-097).
 - **Replay completeness**: a run whose steering, approval outcome, or termination cannot be reconstructed from these events alone violates FR-006.

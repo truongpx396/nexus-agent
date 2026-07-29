@@ -427,6 +427,49 @@ not measurable from the designed data.
 
 ---
 
+## 25. Comparative gap-closure: catalog trust, token audience, stuck-detection, hybrid classification
+
+- **Decision**: A 2026 comparative pass against Claude Code, OpenHands, SWE-agent,
+  OpenAI Agents SDK, OpenClaw/GoClaw, Hermes, and the OWASP Agentic Security
+  Initiative Top 10 closed four specific gaps: (1) tool/connector/MCP descriptors
+  are now scanned for injected instructions at catalog admission and on every
+  version bump, not just vetted for provenance and treated as untrusted at runtime
+  (FR-113); (2) every connector/MCP token is minted audience-/resource-restricted
+  to its own server, never a tenant-wide credential, closing a confused-deputy/
+  token-passthrough path the vault-handle model alone didn't close (FR-114); (3)
+  the FR-025 stuck-detection heuristic is now eval-gated against a negative-case
+  set and escalates from a logged, non-terminal `stuck_suspected` signal to a hard
+  terminate only on a corroborating second trip (FR-115); (4) the per-invocation
+  safety classifier (Gate 3) is specified as a hybrid deterministic-rule-then-model
+  classifier with a fail-closed timeout, rather than leaving the mechanism
+  unstated (FR-116).
+- **Rationale**: (1) and (2) are named 2026 attack classes ("tool poisoning" and
+  "confused deputy via token passthrough") that this platform's existing controls
+  don't structurally prevent — FR-078 vets what a server claims to be and FR-070
+  treats what it returns as untrusted, but neither scans the descriptor text
+  itself or restricts the token's audience, which is exactly where the named
+  attacks land. (3) is a documented lesson from a comparable project: SWE-agent
+  tried and abandoned a code-based loop detector for an unacceptable
+  false-positive rate against legitimate retry-with-variation sequences; shipping
+  FR-025 without the same evaluation discipline applied to prompts/models risks
+  repeating that mistake at the cost of discarded partial work. (4) mirrors Claude
+  Code's own documented hook design (fast deterministic checks first, slow AI
+  classification only for the ambiguous remainder) and forecloses two failure
+  modes symmetrically: a rules-only Gate 3 under-blocks novel/obfuscated attacks,
+  while a model-only Gate 3 puts a metered, non-deterministic call on every tool
+  invocation's hot path.
+- **Alternatives considered**: Scanning only at runtime via the Rule of Two
+  (rejected for (1) — a poisoned description is read by the model before any
+  runtime taint check ever fires); relying on the vault handle alone without
+  audience restriction (rejected for (2) — the handle still unlocks more than the
+  one call it was injected for if the token itself is unscoped); a single hard
+  terminate on first stuck-heuristic trip (rejected for (3) — indistinguishable
+  from the false-positive failure mode SWE-agent already reversed); a model-only
+  or rules-only Gate 3 (rejected for (4) — each fails in the direction the other
+  covers).
+
+---
+
 ## Resolved unknowns summary
 
 | Technical Context item | Resolution |
@@ -455,5 +498,6 @@ not measurable from the designed data.
 | At-rest / residency / DR | Per-tenant keys + BYOK; pinned placement; RPO 5m / RTO 4h (§22) |
 | Test determinism | Recorded/fake provider + property tests (§23) |
 | Sequencing | Evals foundational; explicit MVP cut line (§24) |
+| Catalog/token/reliability gap-closure | Descriptor injection scan; audience-bound tokens; eval-gated stuck detection; hybrid Gate-3 classifier (§25) |
 
 **No `NEEDS CLARIFICATION` remain.** Proceed to Phase 1.
