@@ -132,7 +132,7 @@ principles). Every design decision maps back to one of them:
 | III | ⚡ **Cache-Stable Context Is Architecture** | A byte-stable prefix + volatile tail; per-turn content is banned from the prefix; >90% cache-read target. |
 | IV | 💰 **Stop on Cost, Not Vibes** | Per-turn token metering attributed to task + tenant; hard per-task/per-tenant ceilings → `cost_exhausted`. |
 | V | 🛡️ **Safety Is Per-Invocation and Fails Closed** | Per-invocation safety checks on parsed input; fail-closed tool defaults; the Rule of Two. |
-| VI | 🏢 **Tenant First; Audit & Observability Day-One** | Tenant is the first dimension of every key/row/workspace/cost/secret; DB row-level security with transaction-local scope that survives connection pooling; hash-chained, externally anchored audit log. |
+| VI | 🏢 **Tenant First; Audit & Observability Day-One** | Tenant is the first dimension of every key/row/workspace/cost/secret; DB row-level security with transaction-local scope that survives connection pooling; hash-chained, externally anchored audit log; telemetry is content-free by construction and reading conversation content is an audited, expiring grant. |
 | VII | 🔌 **Model- and Provider-Agnostic by Abstraction** | One provider abstraction + normalized stream contract; native tool-calling only; deterministic auditable routing. |
 | VIII | 🔄 **Reliability: Classify, Resume, Never Silently Retry** | Typed failure classification before retry; logged backoff + jitter; circuit-break; durable checkpoint/resume. |
 | IX | ✅ **Verify Against Acceptance Criteria; Govern Every Change** | No self-declared success; prompts/tools/skills are versioned, reviewed, and eval-gated (≥90% pass + zero regressions), with the gate in place before the first behavior-bearing slice and a deterministic provider harness behind the tests. |
@@ -156,8 +156,13 @@ principles). Every design decision maps back to one of them:
   unattended; the third requires human approval.
 - 💰 **Cost governance** — per-turn token/cost metering attributed to task + tenant,
   hard ceilings with `cost_exhausted` stops and alerts (never a surprise bill).
-- 🔭 **Structure-only observability** — operators inspect decision patterns and
-  per-turn cost/latency/token spans without reading private conversation content.
+- 🔭 **Content-free observability** — telemetry is a signal class that *structurally
+  cannot* carry conversation content (deny-by-default attribute allowlist, no
+  content-admitting flag), so it stays inside the crypto-shredding erasure boundary.
+  Spans are derived from the event log and turn-scoped, so a run suspended for hours
+  on an approval or killed mid-turn still traces; every span resolves to the exact
+  event range it covers and back. Reading actual prompts is an audited, expiring
+  grant that emits a receipt per read — not an operator capability.
 - 🕸️ **Bounded delegation** — single-threaded by default; sub-agents are read-only
   context firewalls whose capability can only *shrink* on descent while taint only
   *grows* on return, bounded on depth, concurrency, and per-run totals, drawing from
@@ -218,14 +223,17 @@ backend-go/
 │   ├── memory/               # file-first memory, per-tenant, injection screening, retention
 │   ├── skills/               # progressive disclosure + propose → gate → version → promote
 │   ├── cost/                 # per-turn token/cost meter, per-task/per-tenant ceilings
-│   ├── reliability/          # failure classifier, circuit breaker, stuck detection, resume
+│   ├── reliability/          # failure classifier, circuit breaker, stuck detection,
+│   │                         #   checkpoint/snapshot/hydrate, write-ahead effect claims, resume
 │   ├── tenancy/              # tenant context, RLS scoping, per-tenant budgets/limits
 │   ├── security/             # layered defense, Rule of Two, receipts, egress, secrets vault
 │   ├── audit/                # immutable audit log + tamper-evident tool receipts
 │   ├── queue/                # durable job queue (NATS JetStream default), session-key routing
 │   ├── sandbox/              # warm pool, TTL/reclamation, per-tenant caps, resource limits
 │   ├── surfaces/             # per-surface adapter translators
-│   └── observability/        # OTel spans, structure-only tracing, cost/latency/token spans
+│   └── observability/        # log-derived turn-scoped spans, content-free attribute allowlist,
+│                             #   versioned attribute model, fixed metric labels + exemplars,
+│                             #   trace-context propagation, cost/latency/token spans
 ├── migrations/               # Postgres schema incl. row-level security policies
 └── tests/                    # contract · integration · load · unit
 
@@ -356,6 +364,18 @@ boundary.
 - 🔄 **Classify, resume, never silently retry** — every failure is classified before
   any retry, logged with reason, backed off with jitter, and circuit-broken after
   3 identical failures. Runs resume from durable Postgres checkpoints.
+- 🧩 **Three state artifacts, never conflated** — a *condensation* (model-facing
+  context), a *checkpoint* (machine-facing resume: in-flight effect claim, held
+  reservation, sandbox handle, pending approval digest), and a *snapshot*
+  (disposable projection cache that bounds hydration). A summary cannot tell you
+  whether the payment went out; the checkpoint can.
+- 💳 **Write-ahead effect claims** — the idempotency claim is committed *before* the
+  effect leaves the process, so a crash **during** a payment or send is resolved by
+  probe or a human decision — never by re-execution, never by silent discard.
+- 🍴 **Replay · resume · fork** — three distinct operations: a pure projection
+  rebuild, a continuation of the same run, and a *fork* of a failed run at any step
+  with a patched prompt and external effects disabled — the primitive that makes a
+  production incident reproducible against a candidate fix.
 - 🚦 **Stuck detection** — repeated actions, oscillation, or zero net change over K
   steps breaks the loop with a clear reason.
 - 🟢 **Deploy safety** — in-flight runs are never cut over mid-task (rainbow deploy).
@@ -453,9 +473,15 @@ long-running sessions (~5,000+ per single-org deployment).
   compaction at ~80% budget on a cheaper helper model, off the paying loop.
 - 🔀 **Deterministic routing** — by data label (sensitivity) and difficulty
   (capability floor); auditable, never model discretion.
-- 🔭 **Structure-only tracing** — OTel spans expose decision patterns and per-turn
-  cost/latency/token spans without reading conversation content; the actual
-  prompt/response is inspectable only under authorized debugging.
+- 🔭 **Content-free tracing** — turn-scoped OTel traces emitted *from the event log*
+  expose decision structure and per-turn cost/latency/token spans; attributes are
+  allowlisted by key so content cannot leak into a monitoring backend the tenant's
+  content key never reaches. Metric labels are fixed with per-run detail reached via
+  exemplars; latency SLIs are computed on active time, never wall-clock inflated by
+  a human approval wait.
+- 🧾 **Cost that can't be lost** — per-turn records are appended with the turn and
+  shipped through a durable outbox; a control-plane outage delays accounting, never
+  loses it.
 
 ---
 

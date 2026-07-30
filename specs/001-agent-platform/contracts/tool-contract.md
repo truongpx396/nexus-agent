@@ -130,9 +130,19 @@ Ordered steps applied to every call (FR-007, FR-010):
 9a. **Digest re-verification** — recompute the canonical digest and compare it to
    the approved one. Divergence → refuse with a typed `approval_mismatch` synthetic
    result; never silently re-request approval within the same turn (FR-103)
+9b. **Write-ahead idempotency claim** for state-changing invocations — commit the
+   claim durably in `in_flight` state, keyed on the step-8a digest, **before** the
+   effect leaves the process (FR-127). An existing `completed` claim short-circuits
+   to its recorded result rather than executing; an existing `in_flight` claim is a
+   crash-recovery case, not a retry, and is resolved by step 10a
 10. **Execute** in the per-tenant sandbox — default E2B backend, hard resource
     limits (CPU/memory/PID/wall-clock; breach → terminate + reclaim) and network
     default-deny (egress only via the domain allowlist, FR-037, FR-059)
+10a. **Claim resolution** — move the claim to `completed` / `failed` on a recorded
+    outcome. On resume, a claim still `in_flight` is resolved by querying the
+    external system where the provider supports it, or by escalating to a human as
+    a typed decision where it does not — **never** by re-executing and never by
+    discarding it as unattempted (FR-127)
 11. **Result budgeting** — cap/paginate (~25K tokens); spill oversized output to
     object storage, return a preview + "do not infer success from the preview"
     banner (FR-010)
@@ -148,7 +158,12 @@ Ordered steps applied to every call (FR-007, FR-010):
 15. **Record taint transition** — the tool's declared legs are folded into the
     session's taint state as an event (FR-087)
 16. **Error classification + telemetry** (typed failure class, per-turn cost span
-    split by token class: uncached / cache-read / cache-write / output, FR-016)
+    split by token class: uncached / cache-read / cache-write / output, FR-016).
+    The span carries structure only — tool id, effect class, typed outcome, sizes,
+    durations, digests — and the events it covers carry the reciprocal
+    `trace_id`/`span_id` (FR-117, FR-119). Tool arguments and results never appear
+    on a span, and the cost record is appended in this transaction and shipped
+    through the outbox (FR-124)
 
 ## Invariants
 
@@ -174,6 +189,12 @@ Ordered steps applied to every call (FR-007, FR-010):
   binds, what dedup keys off, and what step 9a re-verifies — so the approved
   invocation, the executed invocation, and the de-duplicated invocation are
   provably one invocation.
+- **The claim precedes the effect** (FR-127): the dedup record is committed
+  `in_flight` at step 9b, before execution, and closed at step 10a. A record
+  written only on success protects against a *retried call* but not a *crash
+  mid-call* — the case a checkpoint cannot see, because a checkpoint records where
+  the run was, never whether the payment was taken. A resume resolves `in_flight`
+  by probe or by human decision; re-execution is never a resolution.
 - **Only an authorized human resolves** (FR-105): agent and service principals
   never grant; irreversible classes require a resolver distinct from the run's
   initiator and, where the tenant's policy says so, fresh step-up authentication;

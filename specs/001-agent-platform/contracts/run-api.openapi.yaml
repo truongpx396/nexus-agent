@@ -108,13 +108,61 @@ paths:
                 from_checkpoint_id: { type: string, format: uuid }
       responses:
         '202': { description: Re-queued; resumes from checkpoint, not from scratch }
+  /runs/{sessionId}/fork:
+    post:
+      summary: Fork a run into a new run from a chosen sequence, effects disabled (FR-128)
+      description: >
+        Branches a NEW run from this one at `at_seq` with declared overrides, for
+        reproducing a production failure against a candidate fix. External effects
+        are disabled or confined to a scratch sandbox; the fork inherits no
+        approvals (FR-106), draws its own budget, and writes its own audit chain —
+        the source run's cost attribution and receipts are untouched. A
+        harness-digest divergence from the source is reported, not hidden
+        (FR-129). Forking another tenant's run requires a content-access grant
+        (FR-118). This is not `resume`, which continues the same run.
+      operationId: forkRun
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [at_seq]
+              properties:
+                at_seq: { type: integer, format: int64 }
+                overrides:
+                  type: object
+                  description: Declared divergences under test (agent version, prompt, tool catalog, model)
+      responses:
+        '202':
+          description: Fork accepted; a new session_id is returned
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session_id: { type: string, format: uuid }
+                  forked_from_session_id: { type: string, format: uuid }
+                  fork_seq: { type: integer, format: int64 }
+                  harness_digest_diverged: { type: boolean }
+        '403': { description: Content-access grant required to fork another tenant's run (FR-118) }
+        '404': { description: No such sequence in the source run }
   /runs/{sessionId}/events:
     get:
       summary: Stream structure-only run progress (SSE)
       description: >
         Emits typed event structure and per-turn spans WITHOUT requiring reads of
-        conversation content (FR-040). Conversation content is available only via
-        an authorized debugging scope. A dropped subscriber resumes from its last
+        conversation content (FR-040). Conversation content is available only
+        through a scoped, expiring content-access grant that emits a hash-chained
+        receipt on grant and on every read under it (FR-118) — never through a
+        telemetry or debug flag, which do not exist (FR-117). Each event carries
+        the trace/span it was appended under, so a stream position resolves to a
+        trace and back (FR-119). A dropped subscriber resumes from its last
         observed seq via Last-Event-ID (or ?from_seq=) with no loss or duplication.
       operationId: streamRunEvents
       parameters:

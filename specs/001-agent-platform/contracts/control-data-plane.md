@@ -25,6 +25,8 @@ older data plane during a rainbow rollout — FR-026).
 | Approval routing, reminder, escalation (FR-108) | Approval context rendering under `local` mode (FR-104) |
 | Audit sink + chain anchoring (FR-040, FR-081) | Emits audit receipts + cost records upstream |
 | Erasure/key-destruction orchestration (FR-080) | Holds content keys per tenant (FR-089) |
+| Content-access grant authorization (FR-118) | Enforces the grant at the decryption boundary; emits a receipt per read |
+| Telemetry ingest + SLO/burn-rate alerting (FR-095) | Emits **content-free** spans/metrics from the event log (FR-117, FR-120) |
 
 ## Data-egress boundary (FR-091)
 
@@ -42,7 +44,16 @@ leaves it, and nothing else:
 - `audit_sink_mode` and `telemetry_sink_mode` are per-deployment configuration:
   `upstream` (default for SaaS) or **`local`** — with `local`, the data plane
   keeps its own audit chain and anchors, and *nothing* crosses the boundary
-  (required for BYOC tenants who accept no metadata egress).
+  (required for BYOC tenants who accept no metadata egress). Because spans are
+  emitted from the durable event log rather than from in-process state (FR-120),
+  `local` telemetry is the same code path with a different sink — not a reduced
+  feature set.
+- **Telemetry is not an egress exception.** Everything on the left column is
+  structural by construction: the export path applies a deny-by-default attribute
+  allowlist, so a content-bearing attribute cannot cross the boundary even under a
+  debug setting, because none exists (FR-117). This is what keeps the erasure
+  attestation (FR-080) true across the telemetry pipeline and not merely across
+  the database.
 - Region pinning is enforced at admission: a run whose placement would fall
   outside the tenant's pinned region is refused, not relocated.
 
@@ -175,6 +186,36 @@ POST /v1/telemetry/cost
   derived from these measurements, not estimated.
 - Actuals replace the hold; the unused remainder is released. Rolling sums are a
   reconciliation and reporting path, **not** the enforcement path.
+- **This call is a shipper, not the record** (FR-124). The cost record is appended
+  to the event log in the same transaction as the turn and delivered from a
+  **durable outbox**: at-least-once, idempotent on
+  `(session_id, turn_seq, reservation_id)`, retried with backoff, and swept for
+  unshipped records. A failed or lost call delays accounting; it never loses it —
+  this data feeds ceilings (FR-083), chargeback (FR-093), and the release gate's
+  cost metrics (FR-018). A reservation whose reconciliation never arrives expires
+  **and is reported**, never silently released as though the spend had not
+  happened.
+- Outbox backlog and reservation-expiry-without-reconciliation are reported
+  signals (FR-095).
+
+### `AuthorizeContentAccess(v1)` (FR-118) — the only path to plaintext
+
+```
+POST /v1/content-access/grants
+  { tenant_id, scope: { session_ids[] }, requester_user_id, purpose, ttl_seconds }
+Response 200: { grant_id, expires_at }   // 403 when requester == authorizer on cross-tenant scope
+```
+
+- The control plane authorizes; the **data plane enforces at the decryption
+  boundary** and emits a hash-chained receipt on the grant *and on every read
+  under it*, so the audit answers "who read what, when, under whose
+  authorization" (FR-081, FR-118).
+- Agent and service principals are refused outright. A grant authorizes *reading*
+  and can never satisfy an approval (FR-036).
+- Refused and expired attempts are recorded and reported as a signal (FR-095) — a
+  rising refusal rate is an insider-risk indicator.
+- Under `local` sink mode the grant may be authorized entirely in-boundary, so a
+  BYOC tenant can operate support access without any content or metadata leaving.
 
 ### `EmitAuditReceipt(v1)` (FR-040, FR-081)
 ```

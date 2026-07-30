@@ -100,7 +100,7 @@ named approver as a decision-ready package, resolvable only by an authorized hum
 classes), invalidated with the run it gates, and unanswered-after-escalation
 expiring as a denial (`approval_expired`)
 
-**Scale/Scope**: 112 functional requirements across 9 user stories (see the MVP cut
+**Scale/Scope**: 130 functional requirements across 9 user stories (see the MVP cut
 line below for what ships in Increment 1); single reusable
 kernel serving 8+ surfaces (CLI, chat, web, REST/gRPC, email, cron, Telegram, Zalo)
 plus per-user personal connectors (Gmail/Drive/Calendar); startup (5 people) →
@@ -122,7 +122,7 @@ the Security, Delivery/Scale, and Workflow constraint sections).
 | III | Cache-Stable Context Is Architecture | Byte-stable prefix + volatile tail; per-turn content banned from the prefix; >90% cache-read target; structured off-loop compaction (FR-013, FR-014, FR-015). | PASS |
 | IV | Stop on Cost, Not Vibes | Per-turn token metering attributed to task+tenant; hard per-task/per-tenant ceilings → `cost_exhausted`; iteration/wall-clock are backstops; η$ and CPM in the release gate (FR-016, FR-017, FR-018). | PASS |
 | V | Safety Is Per-Invocation and Fails Closed | Per-invocation safety on parsed input via a hybrid deterministic-rule + fail-closed-timeout model classifier; fail-closed tool defaults; layered defense; Rule of Two; untrusted tool/retrieved content (FR-008, FR-009, FR-032, FR-033, FR-116). Human oversight is specified as a transaction rather than a flag — approval binds the digest of the exact resolved call, carries a decision-ready context package, is resolvable only by an authorized human, is invalidated with the run it gates, and sits in one published total resolution order in which a deny is final and neither the per-invocation safety check nor the Rule of Two can be short-circuited by any scope, batch, or autonomy level (FR-103–FR-112). The tool/connector/MCP catalog itself is a trust boundary: every descriptor is scanned for injected instructions at admission and on version bump, and every connector/MCP token is minted audience-restricted to its own server (FR-113, FR-114). | PASS |
-| VI | Tenant First; Audit & Observability Day-One | Tenant is the first dimension of session key/row/workspace/cost/secret; DB row-level security with **transaction-local** scope that survives the transaction-pooling tier, proven by an isolation test run through that pooler; **hash-chained, externally anchored** audit log with sign-only key custody; per-turn structure-only observability (FR-038, FR-039, FR-040, FR-081). | PASS |
+| VI | Tenant First; Audit & Observability Day-One | Tenant is the first dimension of session key/row/workspace/cost/secret; DB row-level security with **transaction-local** scope that survives the transaction-pooling tier, proven by an isolation test run through that pooler; **hash-chained, externally anchored** audit log with sign-only key custody. Observability is specified as a mechanism rather than an intention: telemetry is a **content-free signal class** enforced by a deny-by-default attribute allowlist so it stays inside the crypto-shredding erasure boundary, spans are derived from the log and turn-scoped so long and killed runs still trace, events and spans carry a bidirectional join key, metric labels are fixed with per-run detail via exemplars, and reading decrypted content is an audited, expiring, receipt-emitting grant rather than an operator capability (FR-038, FR-039, FR-040, FR-081, FR-117–FR-125). | PASS |
 | VII | Model- and Provider-Agnostic by Abstraction | One provider abstraction + normalized stream contract; native tool-calling only; deterministic auditable routing by data label + difficulty; regulated payloads → self-hosted (FR-027, FR-037). | PASS |
 | VIII | Reliability: Classify, Resume, Never Silently Retry | Typed failure classification before retry; logged backoff+jitter; circuit-break at 3 identical failures; durable checkpoint/resume; stuck detection — itself eval-gated against a negative-case set and escalating from a logged `stuck_suspected` signal to a hard terminate only on a corroborating second trip, so an imprecise heuristic never silently discards partial work; rainbow deploy (FR-023, FR-024, FR-025, FR-026, FR-115). | PASS |
 | IX | Verify Against Acceptance Criteria; Govern Every Change | No self-declared success; verified against explicit criteria; prompts/tools/skills are versioned, reviewed, eval-gated (≥90% pass + zero regressions); skills promoted only via human/eval gate (FR-021, FR-042, FR-043, FR-044). Eval set + CI gate delivered in **Foundational**, before the first behavior-bearing slice; correctness suite runs on a deterministic provider harness (FR-097). | PASS |
@@ -133,12 +133,15 @@ compliance) → FR-034–FR-037, FR-045, FR-080–FR-082, FR-089–FR-092; Deliv
 Scale & Technology (control/data-plane split, config-not-forks, stateless
 externalized state, files-first memory, pre-spend ceilings, versioned event
 envelope, expand/contract migration, rehearsed restore) → FR-019, FR-030,
-FR-046–FR-050, FR-083, FR-086, FR-090, FR-094; Development Workflow (evals as
-release gate, reviewed config, structure-only observability, SLO/error budget,
-named ownership, go-live gate) → FR-042–FR-045, FR-095–FR-097.
+FR-046–FR-050, FR-083, FR-086, FR-090, FR-094, plus the separated durable-state
+artifacts, write-ahead effect claims, replay/resume/fork, and the harness digest
+(FR-126–FR-129); Development Workflow (evals as release gate, reviewed config,
+content-free observability with audited content access, SLO/error budget, named
+ownership, go-live gate) → FR-042–FR-045, FR-095–FR-097, FR-117–FR-125,
+FR-130.
 
 **Result**: PASS on principles I–IX with **one recorded tension** (see Complexity
-Tracking): the constitution's "build for the current stage" rule versus a 97-FR,
+Tracking): the constitution's "build for the current stage" rule versus a 130-FR,
 8-surface, 4-topology target architecture starting from zero code. This is
 resolved by sequencing, not by scope reduction — the spec remains the target
 architecture and the MVP cut line below states what actually ships first. The
@@ -160,8 +163,14 @@ rather than implicitly assumed.
 - One provider adapter + the **deterministic recorded/fake provider** (FR-097).
 - Built-in tools: workspace-restricted filesystem, sandboxed shell, web fetch —
   each with taint declarations (FR-087).
-- Postgres event log with `schema_version`, RLS with **transaction-local** scope,
-  and the isolation test running through PgBouncer (FR-039).
+- Postgres event log with `schema_version`, the `trace_id`/`span_id` join key
+  (FR-119), the `harness_digest` and fork columns (FR-129, FR-128), the separated
+  `Checkpoint`/`Snapshot`/`IdempotencyClaim` tables (FR-126, FR-127), RLS with
+  **transaction-local** scope, and the isolation test running through PgBouncer
+  (FR-039).
+- A **content-free** telemetry export path: deny-by-default attribute allowlist,
+  bounded value lengths, and no flag that admits content (FR-117) — cheap on day
+  one, and the only way the erasure attestation stays true once telemetry exists.
 - Cost: token classes split, versioned price book, **reserve-then-reconcile**
   ceilings (FR-016, FR-083, FR-084).
 - Audit: hash-chained receipts + verifier (FR-081); per-tenant envelope
@@ -181,6 +190,8 @@ rather than implicitly assumed.
 | Sub-agent delegation (behavior) | A single continuous context stops being sufficient for a real workload. **The delegation *seams* are not deferred** — the chain columns (`root_session_id`/`parent_session_id`/`depth`, receipt `delegation_path`) and the `Delegation` interface ship in Increment 1, because retrofitting a chain onto historical cost records and audit receipts is exactly the event-log migration this cut line exists to prevent |
 | The orchestration plane (US9, P2) | The first customer process that must run the same way twice. It follows US3 + US4 (it needs approval gates and cost/eval governance) but **not** US5 — plans without `delegate_fanout` steps need no delegation machinery. Deferred from Increment 1 as *behavior*, not as a seam: the `plan_*` event types and `Session.plan_id`/`plan_version` are in the Foundational taxonomy so a plan run replays from a log written before plans existed |
 | Multi-region residency, BYOK, chargeback export | A tenant contract requires them; the schema seams (`region`, `Encryption Key`, cost dimensions) exist from day one so they are additive |
+| Fork-based incident debugging, snapshot-bounded hydration, log-derived span emission (FR-128, FR-126, FR-120) | The first long-running production incident and the first session long enough for full replay to hurt. **The seams are not deferred**: the join key, harness digest, fork columns, claim table, and separated checkpoint/snapshot tables ship in Increment 1, because each is a column on an append-only log |
+| Content-access grants as a workflow (UI, approver routing) (FR-118) | Support access is needed operationally. The *enforcement point* — no plaintext read outside a grant, receipt per read — ships with encryption in Increment 1; only the routing and UI wait |
 | Four-topology packaging, Helm/Terraform, rainbow deploy | Increment 3 — before the first customer-operated deployment |
 
 The rule this encodes: **seams and schema decisions are made early because they
@@ -234,7 +245,8 @@ backend-go/
 │   ├── memory/               # file-first memory, per-tenant, injection screening, retention
 │   ├── skills/               # progressive disclosure + propose→gate→version→promote
 │   ├── cost/                 # per-turn token/cost meter, per-task/per-tenant ceilings
-│   ├── reliability/          # failure classifier, circuit breaker, stuck detection, resume
+│   ├── reliability/          # failure classifier, circuit breaker, stuck detection,
+│   │                         #   checkpoint/snapshot/hydrate, write-ahead effect claims, resume
 │   ├── tenancy/              # tenant context, RLS scoping, per-tenant budgets/limits
 │   ├── security/             # layered defense, Rule of Two, receipts, egress, secrets vault
 │   ├── audit/                # immutable audit log + tamper-evident tool receipts
@@ -243,7 +255,9 @@ backend-go/
 │   ├── sandbox/              # warm pool, TTL/reclamation, per-tenant caps, resource limits
 │   │                         #   (CPU/mem/PID/wall-clock) + network default-deny; E2B default backend
 │   ├── surfaces/             # per-surface adapter translators (cli, api, chat, email, cron, telegram, zalo)
-│   └── observability/        # OTel spans, structure-only tracing, cost/latency/token spans
+│   └── observability/        # log-derived turn-scoped spans, content-free attribute allowlist,
+│                             #   versioned attribute model, fixed metric labels + exemplars,
+│                             #   trace-context propagation, cost/latency/token spans
 ├── migrations/               # Postgres schema incl. row-level security policies
 └── tests/
     ├── contract/             # kernel ABI + control/data-plane + run-API contract tests
@@ -287,7 +301,7 @@ declare away. Each is resolved by an explicit mechanism, not by assertion.
 
 | Tension | Why the complexity is needed | Simpler alternative rejected because | Resolution |
 |---------|------------------------------|--------------------------------------|------------|
-| **Target scope (97 FRs, 8 surfaces, 4 topologies) vs. "build for the current stage"** | The spec is a target architecture for a platform whose whole thesis is that the enterprise tax cannot be retrofitted; the schema, contract, and trust seams must be right before the first migration. | Writing a smaller spec would hide the retrofit cost rather than remove it — the expensive decisions (event envelope, encryption/erasure model, audit chain, tenant scoping) are *schema* decisions that cannot be deferred cheaply. | The **MVP cut line** above: seams and schema early, infrastructure late. Every deferred item is additive against Increment 1's schema. |
+| **Target scope (130 FRs, 8 surfaces, 4 topologies) vs. "build for the current stage"** | The spec is a target architecture for a platform whose whole thesis is that the enterprise tax cannot be retrofitted; the schema, contract, and trust seams must be right before the first migration. | Writing a smaller spec would hide the retrofit cost rather than remove it — the expensive decisions (event envelope, encryption/erasure model, audit chain, tenant scoping) are *schema* decisions that cannot be deferred cheaply. | The **MVP cut line** above: seams and schema early, infrastructure late. Every deferred item is additive against Increment 1's schema. |
 | **Three languages (Go / Python / TypeScript)** | Go for the concurrency-bound kernel and small BYOC-shippable binaries; Python only where the ML/eval ecosystem lives, and strictly **off the paying loop**; TypeScript only for the web surface. | A single-language stack would either lose the eval/judge ecosystem (Go-only) or the deployable-binary and concurrency properties the data plane needs (Python-only). | Python is confined to `ml-python/` (evals, judge, condenser) and reaches the runtime only through the queue/contract — it is never in the request path. |
 | **Control/data-plane split before any customer needs BYOC** | Principle-mandated, and "move the data plane into the customer VPC" is only a flag if the planes never bled together in the first place. | Building one plane and splitting later is the rewrite the constitution's Delivery section exists to prevent. | The **contract and package boundary** ship in Increment 1; the *physical* split is deferred until a BYOC customer exists (see cut line). |
 

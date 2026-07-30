@@ -139,20 +139,35 @@ make verify-erasure SUBJECT=<user_id>
 
 ## Scenario 4 — Cost governance & observability (User Story 4, P2)
 
-**Goal**: per-turn metering attributed to task + tenant, a structure-only trace,
-and an eval gate in CI (FR-016, FR-040, FR-043).
+**Goal**: per-turn metering attributed to task + tenant, a content-free trace that
+joins to the event log, audited content access, and an eval gate in CI (FR-016,
+FR-040, FR-043, FR-117–FR-124).
 
 ```bash
 make trace SESSION=<session_id>       # decision structure + per-turn cost/latency/token
+make verify-telemetry-content-free    # inject content at every call site; assert nothing exports
+make verify-trace-join SESSION=<id>   # span → event range → span, both directions
+make content-access SESSION=<id> PURPOSE="incident 4821"   # request a scoped, expiring grant
 make evals                            # runs the ~20-case set with the LLM-as-judge
 ```
 
 **Expected**:
 - Each turn records input/output tokens, latency, and cost attributed to the task
   chain and tenant; the trace shows structure **without** conversation content.
+- `verify-telemetry-content-free` shows 100% of injected content-shaped values
+  dropped by the attribute allowlist before any exporter, and no flag exists that
+  would change that (FR-117, SC-033).
+- `verify-trace-join` resolves every span to the exact event range it covers and
+  every event back to its trace — including for a suspended run and a run whose
+  worker was killed mid-turn (FR-119, FR-120, SC-035).
+- `content-access` fails without an authorizer distinct from the requester, and on
+  success emits a chained receipt for the grant **and** for each read; the grant
+  expires and cannot satisfy an approval (FR-118, SC-034).
 - The eval gate passes only at **≥90% pass AND zero regressions** vs baseline; a
   prompt/model/tool/skill change that regresses any previously-passing case is
-  blocked in CI (FR-043); held-out grader tests are not agent-editable.
+  blocked in CI (FR-043); held-out grader tests are not agent-editable. Production
+  cases enter the corpus only through the consented, redacted, governance-signed
+  export — never by reading telemetry (FR-125).
 
 ## Scenario 5 — Memory & skills (User Story 5, P3)
 
@@ -214,13 +229,22 @@ and graceful degradation under overload (FR-023–FR-026, FR-046–FR-049).
 ```bash
 make chaos-crash SESSION=<long_task>   # kill the worker mid-run
 # → job re-queues; resumes from last checkpoint, not from scratch
+make chaos-crash-mid-effect SESSION=<id>  # kill between dispatch and result of a paying call
+make fork SESSION=<failed_id> AT_SEQ=<n> PROMPT=<patched>  # reproduce with effects disabled
 make deploy-during-run                 # rainbow deploy while a run is active
 make load-test CONCURRENCY=5000        # drive past capacity
 make capacity-check                    # measure SC-008 SLAs + gate high-concurrency go-live
 make restore-drill                     # measure RPO/RTO; chain must verify + log must replay
 ```
 
-**Expected**: the run resumes from its last checkpoint preserving partial work;
+**Expected**: the run resumes from its last checkpoint preserving partial work —
+restoring the in-flight claim, held reservation, sandbox handle, and pending
+approval, none of which a context compaction could supply (FR-126);
+`chaos-crash-mid-effect` leaves an `in_flight` claim that resume resolves by probe
+or human escalation, never by re-charging and never by silent discard (FR-127,
+SC-036); `make fork` reproduces the failed trajectory in a new run with external
+effects disabled, leaving the source run's cost, approvals, and audit chain
+untouched and reporting any harness-digest divergence (FR-128, FR-129, SC-037);
 in-flight runs are not cut over mid-task; under overload the system applies
 admission control / fair scheduling / load-shedding (429 + `Retry-After`) and
 degrades gracefully instead of collapsing; identical failing calls circuit-break

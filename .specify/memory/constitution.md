@@ -1,7 +1,29 @@
 <!--
 SYNC IMPACT REPORT
 ==================
-Version change: 1.0.0 → 1.1.0
+Version change: 1.1.0 → 1.2.0
+Bump rationale: MINOR — materially expanded the Development Workflow
+  observability rule and added a state-artifact rule, closing gaps found in the
+  2026-07-30 observability & state-management design review. No principle removed
+  or redefined; all 1.1.0 rules remain binding.
+
+Modified sections (1.1.0 → 1.2.0):
+  - Development Workflow & Quality Gates → "Observability captures structure, not
+    content" now names the mechanism (deny-by-default attribute allowlist, no
+    content-admitting flag) and reconciles telemetry with the crypto-shredding
+    erasure boundary; debugging access to prompts/responses is now an audited,
+    scoped, expiring grant emitting a receipt per read.
+  - Development Workflow & Quality Gates → new "State artifacts are not
+    interchangeable": compaction / checkpoint / snapshot separated; write-ahead
+    effect claims resolved by probe or human, never re-execution; replay vs
+    resume vs fork named; per-run configuration digest required for
+    reproducibility.
+
+Templates requiring updates: none (generic Constitution Check remains compatible)
+Follow-up TODOs: none
+
+---
+PRIOR REPORT (1.0.0 → 1.1.0)
 Bump rationale: MINOR — materially expanded existing principles and constraint
   sections to close design-review gaps. No principle removed or redefined; all
   1.0.0 rules remain binding.
@@ -302,7 +324,26 @@ are binding in addition to Principle V:
   and autonomy levels.
 - **Observability captures structure, not content**: Decision patterns and per-turn
   cost/latency/token spans MUST be inspectable without reading conversation
-  content; the actual prompt/response MUST remain inspectable for debugging.
+  content. This is a property of the pipeline, not a convention: telemetry is a
+  **content-free signal class** enforced by a deny-by-default attribute allowlist,
+  and no flag may admit content to it — a content-bearing span is an unencrypted
+  copy of customer data outside the crypto-shredding boundary, which would render
+  an erasure attestation false. The actual prompt/response MUST remain inspectable
+  for debugging, but **only** through an audited, scoped, expiring content-access
+  grant that emits a hash-chained receipt on grant and on every read under it.
+  Reading a customer's conversation MUST NOT be the one privileged operation
+  without a receipt in a system where every mutating action has one.
+- **State artifacts are not interchangeable**: A model-facing context compaction,
+  a machine-facing resume checkpoint, and a disposable projection snapshot are
+  three distinct artifacts and MUST NOT be conflated — a compaction cannot answer
+  whether an external effect completed. The exactly-once claim for a
+  state-changing effect MUST be committed **write-ahead**, before the effect
+  leaves the process, and an in-flight claim MUST be resolved on resume by probe
+  or by human decision, never by re-execution and never by silent discard.
+  "Replay" MUST be three named operations with distinct guarantees — a pure
+  projection rebuild, a resume of the same run, and a fork into a new run with
+  external effects disabled — and every run MUST persist the digest of the
+  configuration that determined its behavior, or it is not reproducible.
 - **Go-live gate**: No production launch without the go-live checklist green —
   attributable audit log, vaulted per-tenant secrets, sandboxing + human approval
   for high-impact actions, at least one leg of the lethal trifecta broken per risky
@@ -330,4 +371,4 @@ MUST be resolved before merge.
 - **Runtime guidance**: Agent-specific and contributor guidance files are
   subordinate to this constitution and MUST be kept consistent with it.
 
-**Version**: 1.1.0 | **Ratified**: 2026-07-17 | **Last Amended**: 2026-07-27
+**Version**: 1.2.0 | **Ratified**: 2026-07-17 | **Last Amended**: 2026-07-30
