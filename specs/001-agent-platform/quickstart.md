@@ -150,7 +150,10 @@ make adapter-conformance ADAPTER=litellm   # capability matrix: supported / degr
 make verify-no-vendor-sdk             # exactly one telemetry write path (OTLP behind the allowlist)
 make verify-trace-join SESSION=<id>   # span → event range → span, both directions
 make content-access SESSION=<id> PURPOSE="incident 4821"   # request a scoped, expiring grant
-make evals                            # runs the ~20-case set with the LLM-as-judge
+make evals                            # k trials/case, per-case intervals, three-valued verdict
+make evals-calibrate                  # judge vs human-labelled gold set; kappa floor 0.6
+make evals-baseline                   # record the current baseline + environment digest
+make verify-online-scoring            # production quality score with zero content egress
 ```
 
 **Expected**:
@@ -174,9 +177,29 @@ make evals                            # runs the ~20-case set with the LLM-as-ju
 - `verify-no-vendor-sdk` fails the build if any vendor tracing SDK,
   auto-instrumentation agent, or framework callback hook is present — telemetry has
   exactly one write path (FR-134, SC-043).
-- The eval gate passes only at **≥90% pass AND zero regressions** vs baseline; a
-  prompt/model/tool/skill change that regresses any previously-passing case is
-  blocked in CI (FR-043); held-out grader tests are not agent-editable. Production
+- The eval gate passes only at **≥90% `pass^k` on the regression class AND zero
+  cases whose interval separates downward from baseline** — a *statistical*
+  verdict over k trials, not a single run (FR-137). A change the corpus cannot
+  resolve returns `inconclusive`, which gathers more trials and then blocks for
+  human adjudication; it is never resolved as a pass. A `safety`-class case
+  failing one trial blocks with no waiver. A change that holds quality while
+  regressing tokens or turns beyond the declared band is blocked too (FR-145).
+- `evals` refuses to compare against a baseline recorded under a different
+  `eval_environment_digest`, provisions a **cold** sandbox per trial rather than
+  drawing from the warm pool, and excludes `infra_error` outcomes from the
+  pass-rate denominator (FR-138, SC-045).
+- `evals-calibrate` must have passed before the gate can block anything: a judge
+  with no current calibration, or one that has drifted below the κ floor, is out
+  of service — that condition reads as an instrument failure, not as an agent
+  regression (FR-141, SC-048).
+- `verify-online-scoring` re-runs the content-injection sweep end to end through
+  the in-boundary scorer's export path: quality is scored on production traffic,
+  100% of content-shaped values are dropped, the scorer's reads appear in the
+  audit chain, and a seeded regression on a canary slice trips the guardrail and
+  auto-rolls-back (FR-140, SC-047).
+- Held-out grader tests are not agent-editable, the grader store has no route from
+  any sandbox, and every run reports the visible-versus-held-out gap as a
+  reward-hacking signal (FR-146, SC-053). Production
   cases enter the corpus only through the consented, redacted, governance-signed
   export — never by reading telemetry (FR-125).
 

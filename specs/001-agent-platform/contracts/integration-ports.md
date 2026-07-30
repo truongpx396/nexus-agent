@@ -40,7 +40,7 @@ responsibilities are never delegated:
 | Durable queue (FR-046) | NATS JetStream | SQS, Redis Streams, **Temporal / Restate / Inngest / DBOS** | Scheduler + delivery guarantee | The event log; the approval mechanism; the exactly-once mechanism (FR-136) |
 | Plan runner (FR-102) | Platform plan evaluator | Same durable-execution engines | Step scheduling and durability | The source of branch decisions, which must replay from the log |
 | Telemetry export (FR-117) | OTLP → self-hosted collector | **Langfuse**, Arize/Phoenix, Braintrust, Grafana/Tempo, Datadog, Honeycomb | A view of structure, latency, tokens, and cost | A content store; an audit record; a second write path (FR-134) |
-| Eval / datasets (FR-043) | Platform eval runner + judge in CI | Langfuse datasets, Braintrust, Promptfoo, DeepEval | Corpus hosting, score storage, analysis | The gate (FR-135) |
+| Eval / datasets (FR-043) | Platform eval runner + judge in CI | Langfuse datasets, Braintrust, Promptfoo, DeepEval | Corpus hosting, score storage, analysis | The gate (FR-135); the judge's calibration (FR-141); the trial statistics or verdict (FR-137) |
 | `Workspace` / sandbox (FR-047) | E2B | Docker, Firecracker, gVisor, local-OS isolation | The execution boundary | A path around the resource limits or egress allowlist |
 | Connector catalog (FR-012) | Built-in connectors | MCP servers, per-tenant connectors | Capability | Unvetted, unscanned, or audience-unrestricted access (FR-113, FR-114) |
 | Memory / retrieval (FR-019, FR-022) | File-first per-tenant memory | pgvector, Qdrant, Weaviate, a knowledge graph | A retrieval tier when scale justifies it | A trusted instruction channel — retrieved content stays untrusted (FR-087) |
@@ -98,6 +98,7 @@ What a backend receives, and what it therefore can and cannot do:
 | Per-class tokens and cost by model / tenant / surface | Prompt playground / replay |
 | Sessions grouping a run's turn-scoped traces (FR-120) | LLM-as-judge over production traces |
 | Scores pushed from the eval gate | "Add to dataset" from a live trace |
+| Online quality scores from the in-boundary scorer (FR-140) | The scorer itself — it runs in-boundary, never in the backend |
 | Terminal-reason, stuck-rate, approval-fatigue signals (FR-095) | Annotation of real conversations |
 
 The right-hand column is not a gap awaiting a fix. Re-enabling it means content

@@ -73,6 +73,17 @@ erDiagram
     MODEL ||--o{ EVENT : produced_by
     INTEGRATION_ADAPTER ||--o{ MODEL : fronted_by
     PRICE_BOOK ||--o{ COST_RECORD : prices
+    EVAL_SUITE ||--o{ EVAL_CASE : contains
+    EVAL_CASE ||--o{ EVAL_TRIAL : executed_as
+    EVAL_RUN ||--o{ EVAL_TRIAL : records
+    EVAL_RUN ||--o| EVAL_RUN : compared_to_baseline
+    JUDGE ||--o{ EVAL_RUN : scores
+    JUDGE ||--o{ JUDGE_CALIBRATION : calibrated_by
+    TENANT ||--o{ EVAL_CASE : consented_source_of
+    SESSION ||--o| EVAL_CASE : forked_prefix_for
+    EVAL_RUN ||--o| ORCHESTRATION_PLAN : clears
+    EVAL_RUN ||--o| APPROVAL_POLICY : clears
+    EVAL_RUN ||--o| SKILL : clears
 ```
 
 ---
@@ -162,6 +173,7 @@ contract and deterministic, auditable routing (FR-027).
 | `model_id` | string (PK) | e.g. `anthropic:...`, `self-hosted:vllm-...` |
 | `provider` | enum | `anthropic` / `openai_compatible` / `bedrock` / `vertex` / `cli` / `self_hosted` |
 | `pinned_snapshot` | string | Exact provider snapshot; a change is an eval-gated deploy (FR-078) |
+| `eval_run_id` | UUID (nullable) | The run that cleared the current snapshot; a bump without one is not adoptable, and the scheduled re-run of FR-143 re-verifies it against drift no bump announces |
 | `capability_floor` | int | Feature-demand routing floor |
 | `data_labels_allowed` | string[] | e.g. `regulated` → self-hosted only (FR-037) |
 | `regions_allowed` | string[] | Region pinning — a run MUST NOT route outside its tenant's region (FR-091) |
@@ -216,9 +228,12 @@ a human/eval promotion gate (FR-020, FR-021).
 | `body` | text | Loaded on demand |
 | `version` | int | Immutable per version |
 | `status` | enum | `proposed` / `approved` / `promoted` — never auto-promoted |
+| `suite_id` | string (FK) | The skill's **own** case set; a proposal without one is refused at the gate (FR-143) |
+| `eval_run_id` | UUID (nullable) | The run that cleared it; required to reach `promoted` (FR-021, FR-043) |
 | `created_at` | timestamptz | |
 
 - **State transitions**: `proposed → approved (human+eval gate) → promoted`. No edge skips the gate.
+- **The gate is the skill's own suite plus the platform corpus** (FR-143): the global corpus measures the platform, not this skill, so promotion on the strength of cases the skill never exercises measures nothing about it.
 
 ### Connector
 An external system-of-record integration attached only through the vetted,
@@ -744,6 +759,156 @@ hard resource limits; the trust boundary for all code/shell execution
 | `network_policy` | enum | `deny` (default) / `allowlist` (egress only via FR-037 domain allowlist) |
 | `reclaim_reason` | enum (nullable) | `ttl` / `terminal` / `stuck` / `cpu` / `mem` / `pid` / `wallclock` / `egress_denied` |
 
+- **Eval trials do not draw from the warm pool** (FR-138): a trial provisions a
+  cold sandbox, because pooled state shared between trials produces correlated
+  failures and silently inflated scores. The pool optimises production latency;
+  reusing it for measurement optimises the number instead of the agent.
+
+---
+
+## Evaluation & measurement entities
+
+Every other governed artifact in this document names an `eval_run_id`; these are
+the tables that identifier resolves to. They live outside tenant RLS — the corpus
+is platform-owned, not tenant-owned — with the single exception of `EvalCase`
+provenance, which names the tenant a production-derived case came from so consent
+withdrawal and erasure can reach it (FR-125, FR-146).
+
+### Eval Suite
+A named class of cases with its own threshold and its own blocking semantics,
+because one threshold cannot serve both "this is starting to work" and "this must
+never break" (FR-139).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `suite_id` | string (PK) | e.g. `regression`, `capability`, `safety`, `negative`, `skill:invoice-triage` |
+| `class` | enum | `regression` / `capability` / `safety` / `negative` |
+| `scope` | enum | `platform` / `skill` / `tool` / `plan` / `approval_policy` / `condenser` (FR-143) |
+| `scope_ref` | string (nullable) | The artifact this suite travels with, for non-`platform` scope |
+| `metric` | enum | `pass_hat_k` (all k trials pass) / `pass_at_k` (≥1 of k passes) |
+| `trials_dev` | int | Default 3 |
+| `trials_release` | int | Default ≥10 |
+| `threshold` | numeric | `1.0` for `safety` — **no value below 1.0 is representable for that class** |
+| `blocking` | bool | `capability` is reported, not blocking, except on a graduated case |
+
+- **Safety admits no waiver**: the class carries a check constraint, not a convention — a threshold below 1.0 for `class = safety` is unrepresentable rather than discouraged (FR-139, SC-046).
+- **Graduation and retirement** move a case between suites; both are recorded, because a corpus silently losing its hard cases looks identical to an agent that got better.
+
+### Eval Case
+One addressable, versioned unit of measurement. Never an anonymous fixture: a
+corpus that cannot say where a case came from cannot honour a withdrawal
+(FR-125, FR-144).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `case_id` | UUID (PK) | |
+| `suite_id` | string (FK) | Its current class; changes on graduation/retirement |
+| `version` | int | Immutable per version |
+| `shape` | enum | `end_state` (FR-044) / `fork` (FR-142 — an event-log prefix, effects disabled) |
+| `input` | jsonb (encrypted) | Task input, or for `fork` shape the source `session_id` + `seq` and overrides |
+| `graders` | jsonb | Ordered list, each `{kind: code\|model\|human, ref, visible\|held_out}` (FR-144) |
+| `reference_solution` | jsonb (encrypted) | A known output that passes **all** its graders; absent ⇒ case not admissible |
+| `acceptance` | text | Unambiguous enough that two qualified reviewers reach the same verdict |
+| `acceptable_actions` | jsonb (nullable) | For `fork` shape: the acceptable-action set — never a required step sequence (FR-142) |
+| `efficiency_budget` | jsonb | Per-class tokens, turns, tool calls, active seconds + regression band (FR-145) |
+| `provenance` | enum | `authored` / `production_export` |
+| `source_tenant_id` | UUID (nullable) | Set for `production_export`; the handle consent withdrawal and erasure act on (FR-125) |
+| `consent_id` | UUID (nullable) | The recorded tenant consent this case was exported under |
+| `governance_signoff` | jsonb (nullable) | Required for `production_export` (FR-096, FR-125) |
+| `status` | enum | `active` / `quarantined` / `retired` / `revoked` |
+
+- **Quarantine is the default reading of 0%**: a case failing every one of k trials is presumed **broken** and quarantined for review, not scored as agent incapability (FR-144, SC-051).
+- **Revocation is a first-class state**: consent withdrawal or erasure moves derived cases to `revoked` and removes them from every subsequent run; the *fact* a case existed remains, its content does not — the same reconciliation FR-080 makes for events.
+- **Held-out graders are not stored where the agent can reach them** (FR-146): `graders[].ref` for a `held_out` grader resolves in a store with no egress route from any sandbox and no catalog, connector, retrieval, or memory path from an eval tenant.
+
+### Eval Run
+The release gate's audit artifact, and the object every `eval_run_id` elsewhere in
+this document points at (FR-137, FR-138).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `eval_run_id` | UUID (PK) | Referenced by `ORCHESTRATION_PLAN`, `APPROVAL_POLICY`, `SKILL`, `MODEL`, `INTEGRATION_ADAPTER` |
+| `corpus_version` | string | The case-set version measured |
+| `harness_digest` | bytea | Behavior-determining **configuration** under test (FR-129) |
+| `eval_environment_digest` | bytea | Behavior-affecting **substrate** (see below, FR-138) |
+| `judge_id` | string (FK, nullable) | Instrument identity; null for a code-graded-only run (FR-141) |
+| `baseline_run_id` | UUID (nullable) | What "regression" is measured against; comparison **refused** across differing environment digests |
+| `trials_per_case` | int | k actually executed |
+| `verdict` | enum | `pass` / `fail` / `inconclusive` — **`inconclusive` MUST NOT be resolved as `pass`** (FR-137) |
+| `minimum_detectable_effect` | numeric | The smallest regression this run could have resolved; published, not implied |
+| `infra_error_rate` | numeric | Excluded from the pass-rate denominator; over bound ⇒ `inconclusive` |
+| `held_out_gap` | numeric | Visible-criterion pass rate minus held-out pass rate — a persistently positive gap is a reward-hacking signal (FR-146) |
+| `efficiency_delta` | jsonb | Tokens/turns/tool-calls/active-time vs baseline; a breach blocks on the same footing as quality (FR-145) |
+| `report` | jsonb | Per-case outcome, interval, η$, CPM (FR-018) |
+| `created_at` | timestamptz | |
+
+- **A verdict is not a number**: `pass` requires clearing the class threshold *and* zero downward interval separations *and* the efficiency band. Any one failing yields `fail`; insufficient resolution yields `inconclusive`, which escalates trials to a bounded ceiling and then blocks for human adjudication.
+- **The run is the receipt.** "This change cleared the gate" is provable only if the corpus version, both digests, the instrument, and k are recoverable from this row.
+
+### Eval Trial
+One execution of one case. The unit the statistics are computed over, and the
+reason a "pass rate" in this system is an interval rather than a fraction
+(FR-137).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `trial_id` | UUID (PK) | |
+| `eval_run_id` | UUID (FK) | |
+| `case_id` | UUID (FK) | |
+| `trial_index` | int | 0…k−1 |
+| `session_id` | UUID (nullable) | The run this trial produced — the trajectory a reviewer reads when a grader is doubted |
+| `outcome` | enum | `pass` / `fail` / `infra_error` — `infra_error` is **not** a fail and leaves the denominator (FR-138) |
+| `grader_results` | jsonb | Per grader, with `visible` / `held_out` marked so the FR-146 gap is computable |
+| `efficiency` | jsonb | Tokens by class, turns, tool calls, active seconds (FR-120, FR-145) |
+
+- **Trials are retained, not just their aggregate**: "read the transcripts" is the only way to tell a genuine failure from a broken grader, and it is impossible if only the score survived.
+
+### Eval Environment Digest
+The identity of the substrate a measurement was produced on — the companion to
+`harness_digest`, and the reason two scores are comparable or are refused
+comparison (FR-138). Stored as the digest input, not only its hash.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `env_digest` | bytea (PK) | Hash over every field below |
+| `sandbox_image` | string | Pinned like any production dependency (FR-078) |
+| `cpu_guaranteed` / `cpu_ceiling` | numeric | **Separate values.** Guaranteed allocation prevents spurious failures; the hard-kill ceiling bounds them — collapsing the two into one number is how resource configuration becomes an invisible confounder |
+| `mem_guaranteed_mb` / `mem_ceiling_mb` | int | As above |
+| `pid_limit` / `wallclock_limit_s` | int | |
+| `trial_concurrency` | int | Contention is a confounder; it is declared, not discovered |
+| `egress_policy` | string | |
+| `provider_region` | string | |
+| `adapter_versions` | jsonb | Every `IntegrationAdapter` in the path (FR-133) |
+
+- **Resource bands are calibrated empirically, not guessed**: headroom up to a measured point removes infrastructure noise; beyond it, extra headroom starts changing what the agent can solve, which is a different measurement wearing the same name.
+
+### Judge
+The measuring instrument, governed as a pinned dependency rather than as a helper
+script (FR-141).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `judge_id` | string (PK) | |
+| `model_snapshot` | string | Pinned under FR-078; a bump is a deploy requiring re-validation |
+| `rubric_version` | string | Versioned with the corpus |
+| `family` | string | SHOULD differ from the agent-under-test's family; MUST NOT be the same snapshot |
+| `calibration_id` | UUID (FK, nullable) | Latest passing calibration; **absent ⇒ the judge cannot block a change** |
+
+### Judge Calibration
+Agreement between the instrument and human labels, measured before the gate is
+trusted and re-measured on a schedule (FR-141).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `calibration_id` | UUID (PK) | |
+| `judge_id` | string (FK) | |
+| `gold_set_version` | string | Human-labelled; carries a held-out adversarial slice the judge is never tuned against |
+| `agreement_statistic` | enum | `cohens_kappa` (two raters) / `fleiss_kappa` / `krippendorff_alpha` |
+| `agreement_value` | numeric | Floor κ ≥ 0.6; below floor ⇒ the judge is out of service, not the agent in regression |
+| `sampled_at` | timestamptz | Re-sampled on schedule against fresh labels to detect drift |
+
+- **Calibration precedes blocking** (SC-048): a gate steering development on an uncalibrated instrument is unmeasured development wearing a green check.
+
 ---
 
 ## Cross-cutting rules
@@ -752,7 +917,12 @@ hard resource limits; the trust boundary for all code/shell execution
   policy; queries without a tenant context return zero rows (FR-039). Only
   genuinely global catalog rows (`Model`, `Price Book`, and built-in `Tool`
   definitions with `tenant_id IS NULL`) are untenanted — a per-tenant connector's
-  tools are **not** global and carry their tenant (FR-011).
+  tools are **not** global and carry their tenant (FR-011). The **evaluation
+  tables** are platform-owned rather than tenant-owned and are likewise
+  untenanted, with one deliberate exception: `EvalCase.source_tenant_id` names the
+  tenant a production-derived case came from, because consent withdrawal and
+  erasure must be able to reach it (FR-125, FR-146). That column makes the corpus
+  reachable *by* a tenant's erasure, never *to* another tenant.
 - **Tenant scope is transaction-local**: set with `SET LOCAL` inside the
   transaction, never at session level, because a transaction-pooling tier
   reassigns connections between tenants (FR-039). Isolation tests run through

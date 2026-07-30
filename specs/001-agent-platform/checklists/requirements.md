@@ -99,6 +99,20 @@ are now resolved in the spec (FR-080–FR-097), data model, contracts, and resea
 - [x] External eval/dataset platforms host corpora and scores; the release gate stays in the platform's CI (FR-135)
 - [x] Durable-execution engines may back the queue/plan runner with the log as truth, digest-bound approvals, and write-ahead claims intact; prompt stores author but never hot-swap (FR-136)
 
+### Evaluation & measurement (design review 2026-07-30)
+
+- [x] The gate is statistical: k trials, `pass^k`/`pass@k` by class, per-case intervals, regression as interval separation, three-valued verdict where `inconclusive` never resolves to `pass`, published minimum detectable effect (FR-137, SC-044)
+- [x] The environment is pinned as its own digest, comparison across digests refused, trials on cold sandboxes from a declared memory/skill baseline, infra errors excluded from the denominator (FR-138, SC-045)
+- [x] Suite classes (regression / capability / safety / negative) carry distinct thresholds and blocking semantics; safety admits no threshold below 100%; graduation and retirement recorded; every over-fireable control has a negative set (FR-139, SC-046)
+- [x] Quality is measured in production by an in-boundary scorer emitting structure-free scores through the allowlist, feeding drift alerts and a rollout guardrail — not by a vendor judge over traces (FR-140, SC-047)
+- [x] The judge is pinned, cross-family, and calibrated to a published agreement floor **before** it can block a change; drift re-sampled and alerted (FR-141, SC-048)
+- [x] Fork-based trajectory cases reach step-level behavior via FR-128, graded against an acceptable-action set rather than a required sequence (FR-142, SC-049)
+- [x] Every behavior-bearing artifact carries its own suite, and the corpus re-runs on a schedule to catch drift with no platform-side change (FR-143, SC-050)
+- [x] Grader selection rule, binary verdicts, tiered grading cost, and a case-authoring bar including a reference solution; 0%-across-k quarantined as broken (FR-144, SC-051)
+- [x] Efficiency (tokens / turns / tool calls / active time) blocks the gate on the same footing as quality; η$ and CPM reported as deltas (FR-145, SC-052)
+- [x] Held-out protection mechanized *and* measured: grader store unreachable from the sandbox, verdicts computed by the runner, visible-vs-held-out gap reported, contamination bounded on both channels the platform creates (FR-146, SC-053)
+- [x] `EvalSuite` / `EvalCase` / `EvalTrial` / `EvalRun` / `EvalEnvironmentDigest` / `Judge` / `JudgeCalibration` exist as first-class entities — every `eval_run_id` in the data model now resolves (data-model.md)
+
 ## Notes
 
 - Items marked incomplete require spec updates before `/speckit.clarify` or `/speckit.plan`
