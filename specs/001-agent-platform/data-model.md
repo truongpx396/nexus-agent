@@ -71,6 +71,7 @@ erDiagram
     CONNECTOR ||--|| TOOL : exposes
     SESSION ||--|| SANDBOX : bound_to
     MODEL ||--o{ EVENT : produced_by
+    INTEGRATION_ADAPTER ||--o{ MODEL : fronted_by
     PRICE_BOOK ||--o{ COST_RECORD : prices
 ```
 
@@ -164,6 +165,27 @@ contract and deterministic, auditable routing (FR-027).
 | `capability_floor` | int | Feature-demand routing floor |
 | `data_labels_allowed` | string[] | e.g. `regulated` → self-hosted only (FR-037) |
 | `regions_allowed` | string[] | Region pinning — a run MUST NOT route outside its tenant's region (FR-091) |
+| `adapter_id` | string (FK, nullable) | The `IntegrationAdapter` this model is reached through — NULL for a built-in direct adapter, set when a gateway/proxy fronts it (FR-132) |
+
+- **A gateway is transport, not the router**: when `adapter_id` names a gateway, the request still carries this row's `pinned_snapshot`, and a response whose model does not match it is a typed failure, never a substitution (FR-132). Gateway-side aliasing and fallback are disabled on the adapter.
+
+### Integration Adapter
+An optional third-party implementation of an existing port, admitted only with a
+recorded capability matrix (FR-131, FR-133). Configuration, never a kernel fork.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `adapter_id` | string (PK) | e.g. `litellm`, `temporal`, `langfuse-otlp`, `qdrant` |
+| `port` | enum | `provider` / `queue` / `plan_runner` / `telemetry_export` / `sandbox` / `connector` / `retrieval` / `prompt_source` / `vault` |
+| `version` | string | Pinned; a bump is an eval-gated dependency deploy (FR-078) |
+| `capabilities` | jsonb | Per contract feature: `supported` / `degraded` / `unsupported` — e.g. `token_class_reporting`, `cache_breakpoints`, `cache_affinity_ttl`, `native_tool_calling`, `schema_normalization`, `reasoning_roundtrip`, `stream_ordering` (FR-133) |
+| `conformance_run_id` | UUID | The suite run that produced `capabilities`; absent ⇒ not enablable |
+| `governance_signoff` | jsonb | Recorded approver + timestamp, as for any new tool or connector (FR-096) |
+| `enabled_for_tenants` | UUID[] | Per-tenant enablement; disabled everywhere is the default |
+
+- **Optional by construction**: the platform passes its full suite with every adapter row disabled (FR-131, SC-040).
+- **A degraded capability withdraws the claim it supports**: e.g. an adapter with `token_class_reporting: degraded` means the FR-014/SC-003 cache-read gate is **not claimed** on that path — recorded, surfaced in the release report, never estimated around (FR-132, FR-133).
+- **Authority boundary** (FR-131): no adapter row can grant routing authority, ceiling authority, source-of-truth status, gate authority, audit-record status, or content access. Those are not fields here because they are not configurable.
 
 ### Price Book
 A versioned, effective-dated price table; cost is never computed from constants in

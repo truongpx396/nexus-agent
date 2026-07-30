@@ -179,6 +179,18 @@ principles). Every design decision maps back to one of them:
 - 🧠 **Memory & skills** — file-first per-tenant memory injected at session start
   (retention-bounded, injection-screened), and reusable skills loaded on demand;
   agent-proposed skills are promoted only through a human/eval gate.
+- 🔌 **Optional ecosystem adapters, one authority boundary** — model gateways
+  (LiteLLM, OpenRouter, vLLM/Ollama), LLM-observability backends (Langfuse,
+  Arize/Phoenix, Braintrust, Grafana, Datadog), eval/dataset platforms, and
+  durable-execution engines (Temporal, Restate, Inngest) all attach through
+  existing ports by configuration — and the platform runs complete with every one
+  of them off. Each may supply transport, capacity, storage, or presentation;
+  none may become the routing authority, the cost ceiling, the source of truth,
+  the release gate, the audit record, or a path to content. **Adopt the tool,
+  keep the authority.** Every adapter is admitted by a conformance suite that
+  records what it supports, degrades, and cannot do — so a proxy that quietly
+  stops reporting cache-read tokens withdraws the cache-read claim instead of
+  faking it.
 - ⚙️ **Config-not-forks onboarding** — new orgs are onboarded via tenant settings,
   agent definitions, seeded skills, enabled surfaces, and permission-scoped
   connectors — the kernel is never forked.
@@ -196,10 +208,10 @@ principles). Every design decision maps back to one of them:
 | ⚡ **Cache / locks** | Redis — session-key serial locks, rate-limit token buckets, sandbox-pool metadata, hot session cache |
 | 📨 **Durable queue / event plane** | NATS JetStream (default adapter behind a swappable queue port; SQS/Redis Streams/Temporal-class alternates) |
 | 📦 **Sandbox runtime** | E2B (default), swappable for Docker / Firecracker / gVisor / local-OS isolation |
-| 🤖 **LLM providers** | One provider abstraction + adapters: Anthropic native, OpenAI-compatible, Bedrock/Vertex, CLI-subprocess fallback |
+| 🤖 **LLM providers** | One provider abstraction + adapters: Anthropic native, OpenAI-compatible, Bedrock/Vertex, CLI-subprocess fallback; a model gateway (LiteLLM/OpenRouter/vLLM) may sit behind the same port as *transport only* |
 | 🗃️ **Object storage** | S3-compatible, for offloaded oversized tool outputs and large artifacts |
 | 🌍 **Web fetch** | crawl4ai (clean chunked markdown) |
-| 🔭 **Observability** | OpenTelemetry SDK |
+| 🔭 **Observability** | OpenTelemetry SDK — OTLP is the single write path; Langfuse / Arize / Braintrust / Grafana / Datadog are optional export targets (content-free) |
 | 🔗 **Connectors** | MCP client for external systems of record |
 | 🚢 **Packaging** | OCI images + Helm chart / Terraform module; KEDA/HPA autoscale on queue depth |
 
@@ -252,6 +264,7 @@ deploy/                       # OCI images + Helm chart / Terraform module; auto
 specs/001-agent-platform/     # Specification, plan, research, data model, contracts, tasks
 ├── spec.md · plan.md · research.md · data-model.md · quickstart.md
 ├── contracts/                # kernel ABI · control/data-plane · run-API OpenAPI · tool contract
+│                             #   · orchestration plane · integration ports
 └── checklists/
 ```
 
@@ -524,6 +537,7 @@ Full specification and design artifacts live under
 | [contracts/control-data-plane.md](specs/001-agent-platform/contracts/control-data-plane.md) | Versioned control-plane ↔ data-plane contract |
 | [contracts/run-api.openapi.yaml](specs/001-agent-platform/contracts/run-api.openapi.yaml) | External run-submission REST surface contract |
 | [contracts/tool-contract.md](specs/001-agent-platform/contracts/tool-contract.md) | Self-describing tool + execution-pipeline contract |
+| [contracts/integration-ports.md](specs/001-agent-platform/contracts/integration-ports.md) | Optional third-party adapters, the port map, and the authority boundary |
 | [contracts/orchestration-plane.md](specs/001-agent-platform/contracts/orchestration-plane.md) | Declarative orchestration plans — zero-token deterministic control flow |
 | [tasks.md](specs/001-agent-platform/tasks.md) | Dependency-ordered implementation tasks |
 

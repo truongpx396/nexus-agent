@@ -89,6 +89,16 @@ are now resolved in the spec (FR-080–FR-097), data model, contracts, and resea
 - [x] A single harness digest pins every behavior-determining artifact and doubles as the cache-prefix identity (FR-129)
 - [x] Compaction fidelity eval-gated, chain depth bounded, cache boundary ordered, execution mode declared (FR-130, SC-038)
 
+### Ecosystem integration (design review 2026-07-30)
+
+- [x] Integrations attach through existing ports, are optional, and the platform runs complete with all disabled (FR-131, SC-040)
+- [x] One authority boundary: no vendor becomes routing, ceilings, truth, the gate, the audit record, or a content path (FR-131)
+- [x] A model gateway is transport and capacity only — pinned snapshot per request, aliasing/fallback disabled, budgets as defense in depth (FR-132, SC-042)
+- [x] Adapters admitted by a conformance suite with a recorded capability matrix; a degraded capability withdraws the claim that depends on it (FR-133, SC-041)
+- [x] Observability backends integrate via OTLP only; vendor SDKs and auto-instrumentation prohibited (FR-134, SC-043)
+- [x] External eval/dataset platforms host corpora and scores; the release gate stays in the platform's CI (FR-135)
+- [x] Durable-execution engines may back the queue/plan runner with the log as truth, digest-bound approvals, and write-ahead claims intact; prompt stores author but never hot-swap (FR-136)
+
 ## Notes
 
 - Items marked incomplete require spec updates before `/speckit.clarify` or `/speckit.plan`

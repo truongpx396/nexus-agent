@@ -179,6 +179,56 @@ erasure guarantee.
   pre-compaction prefix served after compaction is a corrupted session), and
   whether compaction blocks the turn is a declared, measured property (FR-130)
 
+### Session 2026-07-30 (design review — ecosystem integration)
+
+The observability and state work (FR-117–FR-130) made the platform's seams
+concrete enough that adopting the surrounding ecosystem — model gateways
+(LiteLLM, OpenRouter), LLM-observability backends (Langfuse, Arize/Phoenix,
+Braintrust), evaluation and dataset platforms, durable-execution engines
+(Temporal, Restate, Inngest), and prompt-management tools — became a
+configuration question rather than a design question. What was *not* specified
+was the boundary: which of these may be adopted for leverage, and which platform
+responsibilities may never be handed to them.
+
+- Q: What may a third-party framework be allowed to become, and what must it
+  never become? → A: Integrations attach through existing ports and are always
+  optional; an external system may provide transport, capacity, storage, or
+  presentation, but may never become the routing authority, the cost-ceiling
+  authority, the source of truth for state or cost, the release gate, the audit
+  record, or a path to content — *adopt the tool, keep the authority* (FR-131)
+- Q: Can a model gateway such as LiteLLM sit in front of the providers, given it
+  already offers routing, fallbacks, and budgets that overlap the platform's own?
+  → A: Yes, as a `Provider` adapter acting as transport and capacity multiplexer
+  only — the routing decision is made and recorded before the call, the request
+  names one pinned model snapshot, gateway-side aliasing/fallback is disabled,
+  and gateway budgets are defense in depth rather than the ceiling (FR-132)
+- Q: How is a gateway's partial support detected before it silently degrades a
+  measured guarantee — a real example being a gateway that does not normalize
+  Anthropic cache-read tokens into its usage report, or whose router cache
+  affinity expires long before the provider's cache does? → A: A published
+  conformance suite produces a recorded per-adapter capability matrix, and where
+  an adapter cannot report cache-read tokens or hold cache affinity, the
+  cache-read gate is **not claimed on that path** rather than estimated (FR-133,
+  FR-132)
+- Q: Can Langfuse (or Arize, Braintrust, Datadog…) be plugged in for LLM
+  observability without reopening the content-egress hole FR-117 just closed? →
+  A: Yes — but only through the platform's OTLP export path so the attribute
+  allowlist applies; vendor SDKs, auto-instrumentation, and framework callback
+  hooks are prohibited because they write directly to the backend, and no vendor
+  feature justifies sending content to a system whose reads leave no FR-118
+  receipt (FR-134)
+- Q: If those platforms host datasets and LLM-as-judge evaluators, can they run
+  the release gate? → A: No. They may consume FR-125 exports and receive scores,
+  but the held-out graders and the deploy-blocking decision stay in the
+  platform's CI — an externally hosted gate reopens spec-gaming and makes a
+  third-party outage a release decision (FR-135)
+- Q: Can a durable-execution engine back the queue or the plan runner, and can an
+  external prompt store supply prompts at runtime? → A: The engine may implement
+  the port as long as the event log stays the source of truth, approvals stay
+  digest-bound, and the write-ahead claim stays the exactly-once mechanism; a
+  prompt store may author, but the run's prompt/tool/policy versions are pinned
+  into the harness digest at start and never hot-swapped mid-run (FR-136)
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Complete a real task through a reliable agent (Priority: P1)
@@ -401,6 +451,9 @@ An operator encodes a recurring business process — incident triage, contract r
 - **Worker killed mid-turn on a six-hour run**: The turn's trace still lands, because spans are emitted from durable events rather than held open in process memory, and the run is not modeled as one long root span that would export late or never (FR-120).
 - **Crash between a payment call and its result**: The idempotency claim was committed write-ahead in an `in_flight` state, so resume neither re-charges the card nor pretends the attempt never happened — it probes the provider where possible and escalates to a human where not, and an unresolved claim raises an operational signal instead of being cleaned up quietly (FR-127).
 - **Reproducing a production failure against a candidate fix**: The run is *forked* at the failing sequence into a new run with a patched prompt and external effects disabled, leaving the original run's cost attribution, approvals, and audit chain untouched; the fork executes under a recorded harness digest, so a divergence is attributable to the change under test rather than to unpinned config drift (FR-128, FR-129).
+- **A model gateway silently answers with a different model**: A proxy configured with an alias or an automatic fallback returns a cheaper or differently-hosted model than the one the routing decision named. This is refused by construction: the request carries one resolved, pinned snapshot, gateway-side aliasing and fallback are disabled on the adapter, and a response whose model does not match the recorded routing decision is a typed failure rather than a silent substitution — otherwise a `regulated` payload could leave the boundary and the cost record would price the wrong model (FR-132, FR-037, FR-084).
+- **A gateway under-reports cache-read tokens**: A proxy that folds provider-native cache-read counts into an undifferentiated input total, or whose router affinity expires before the provider's cache does, would make the >90% cache-read gate unmeasurable while appearing to work. The conformance suite records the missing capability against the adapter and the platform declines to claim the gate on that path rather than estimating it (FR-133, FR-016, SC-003).
+- **An observability vendor's SDK is added for convenience**: A framework callback or auto-instrumentation agent that writes traces directly to a backend bypasses the attribute allowlist and reintroduces content egress. Only the platform's OTLP export path is permitted, so the allowlist remains the single choke point and a vendor integration cannot become a second, unaudited copy of customer data (FR-134, FR-117).
 - **Compaction quietly loses the file the agent was editing**: Compaction fidelity is eval-gated on artifact trail, causal chain, continuity, and instruction retention rather than on compression ratio, the number of successive compactions in a run is bounded and alerted, and a stale pre-compaction prefix served into a post-compaction turn is a covered regression rather than a subtly corrupted session (FR-130).
 
 ## Requirements *(mandatory)*
@@ -597,6 +650,15 @@ revocable, expressive, routed, bounded, and provable.
 - **FR-049**: Under overload the platform MUST apply admission control, fair scheduling across tenants, priority load-shedding, and graceful degradation (e.g., route to a smaller tier) rather than collapsing.
 - **FR-050**: The same build MUST serve multi-tenant SaaS, single-tenant, self-hosted/BYOC, and hybrid topologies via configuration, with per-organization behavior expressed as data/config read at runtime and the kernel never forked per customer.
 
+### Functional Requirements — Ecosystem Integration & Optional Adapters
+
+- **FR-131**: Every third-party framework MUST attach through an existing internal port — `Provider` (FR-027), queue (FR-046), `Workspace`/sandbox (FR-047), connector/MCP catalog (FR-012), telemetry export (FR-117), memory/retrieval (FR-019, FR-022), plan runner (FR-102), or vault/KMS — selectable by configuration, and MUST be **optional**: the platform MUST remain fully functional with every optional integration disabled, and no integration may become a build-time or runtime prerequisite of the kernel. Each integration MUST also respect one **authority boundary**. An external system MAY provide transport, capacity, storage, or presentation; it MUST NEVER become (a) the routing authority (FR-037, FR-076), (b) the cost-ceiling authority (FR-083), (c) the source of truth for conversation state or cost (FR-006, FR-124), (d) the release gate (FR-043), (e) the audit record (FR-081), or (f) a path to conversation content outside FR-117/FR-118. The rule is *adopt the tool, keep the authority*: a platform that delegates any of those six to a vendor has swapped a governed control for an unaudited dependency, and every one of them is a control an enterprise buyer verifies directly.
+- **FR-132**: A **model gateway or proxy** (e.g. LiteLLM, OpenRouter, a cloud model gateway, or a self-hosted vLLM/Ollama endpoint) MAY be adopted as a `Provider` adapter behind the abstraction of FR-027, where it acts as a transport and capacity multiplexer — never as the router. The platform's routing decision (data label, difficulty, capability floor) MUST be made and recorded *before* the call (FR-088), and the request MUST name a single **resolved, pinned model snapshot** (FR-078); gateway-side aliasing, automatic model substitution, or silent fallback that changes which model answered MUST be disabled, because it would break data-label routing (FR-037), snapshot pinning, and price-book cost attribution (FR-084) simultaneously, and it would do so invisibly. Every gateway adapter MUST pass the conformance suite of FR-133 before it is enabled for a tenant, in particular: native tool-calling (FR-027), per-provider JSON-schema normalization (FR-065), opaque reasoning round-trip (FR-064 — a gateway that strips or rewrites a `thinking`/reasoning parameter changes model behavior), cache-breakpoint preservation and prefix stability (FR-013), and **per-class token reporting** (FR-016). Where a gateway cannot report cache-read tokens separately, or cannot hold cache affinity for the provider's actual cache lifetime, the FR-014/SC-003 cache-read gate MUST NOT be claimed on that path; the limitation MUST be recorded against the adapter and surfaced in the release report rather than estimated around. Gateway-side budgets and rate limits MAY be enabled as defense in depth but MUST NOT substitute for the worker-local pre-spend reservation (FR-083) — a ceiling enforced only in a component the platform does not own is not a ceiling.
+- **FR-133**: Every optional adapter MUST be admitted by a published **integration conformance suite** run against the same normalized contracts the built-in adapters satisfy (FR-097), producing a recorded, versioned **capability matrix** per adapter: which contract features it supports, which it degrades, and which it cannot satisfy. An adapter MUST NOT be enabled for a tenant with an unrecorded or failing capability that a claimed success criterion depends on, and a capability regression on an adapter version bump MUST be treated as a failed dependency deploy (FR-078). Undeclared partial support is the failure mode this closes: an integration that silently drops a parameter, coalesces a token class, or reorders a stream produces a platform that reports metrics it is no longer measuring.
+- **FR-134**: An external **observability or LLM-tracing backend** (e.g. Langfuse, Arize/Phoenix, Braintrust, a Grafana/Tempo stack, or any OTLP-compatible APM) MAY be configured as an export target, and MUST be integrated **only** through the platform's OpenTelemetry export path so the FR-117 attribute allowlist applies. Vendor SDKs, auto-instrumentation agents, and framework callback hooks that write directly to a backend MUST NOT be used, because they bypass the allowlist and reintroduce the content-egress path FR-117 exists to close. The tenant dimension MUST map to the backend's own isolation primitive (project/workspace/tenant), and the platform MUST record that a third-party backend enforces its own access control rather than the platform's row-level security and that reads performed in its interface produce **no FR-118 receipt** — which is why no vendor capability, however useful, justifies sending content to it. The export target MUST be selectable per deployment, including a fully in-boundary target (FR-091).
+- **FR-135**: An external **evaluation, dataset, or experiment-tracking platform** MAY consume cases exported through FR-125 and MAY receive scores and run metadata, but the **release gate remains the platform's** (FR-043): the held-out graders, the ≥90%-pass/zero-regression decision, and the artifact that blocks a deploy MUST live in the platform's CI under its own version control. An external platform MUST NOT be the gate, because a gate hosted in a system the agent's own ecosystem can write to reopens the spec-gaming path FR-043 closes, and because a third-party outage would otherwise either block every deploy or, worse, be configured to fail open.
+- **FR-136**: An external **durable-execution or workflow engine** (e.g. Temporal, Restate, Inngest, DBOS) MAY implement the durable-queue port (FR-046) or back the orchestration plan runner (FR-102) behind the same contract, provided the append-only event log remains the source of truth (FR-006): the engine's execution history is a journal of *how* work was scheduled, never the record of *what the agent did*, and projections, audit, replay, and fork (FR-128) MUST continue to derive from the platform's log. Approval gates MUST remain FR-103 digest-bound approvals rather than engine-native signals, and the write-ahead idempotency claim of FR-127 MUST remain the exactly-once mechanism — an engine's own idempotency is additive defense, not a replacement, because it cannot know whether the external effect occurred. Correspondingly, an external **prompt/config management** tool MAY be an authoring source, but the prompt version, tool catalog, skills, and policies a run executes under MUST be resolved and pinned by the platform into the `harness_digest` at run start (FR-129); a runtime hot-swap from an external store mid-run is prohibited, since it would break prefix stability (FR-013), evade the eval gate (FR-042), and make the run unreproducible (FR-088).
+
 ### Key Entities
 
 - **Agent**: An immutable configuration (persona/bootstrap definition, toolset profile, autonomy level) that produces the next action from history; not code, not forked per customer.
@@ -619,6 +681,7 @@ revocable, expressive, routed, bounded, and provable.
 - **Connector Authorization**: A per-user OAuth grant (access + refresh tokens, scopes, expiry) binding a `User` to an external connector, stored only in the per-tenant vault keyed by `(tenant, user, connector)`, auto-refreshed and user-revocable, never exposed to the model.
 - **Surface Identity**: A verified binding from an external consumer-surface identity (e.g., Telegram/Zalo user id) to a platform `User` within a tenant; required before any action runs from that surface.
 - **Model/Provider**: A pluggable backend accessed only through one abstraction with a normalized stream contract and deterministic, auditable routing.
+- **Integration Adapter**: An optional third-party implementation of an existing port (provider/gateway, queue or workflow engine, sandbox, connector, telemetry export target, retrieval store, prompt source), carrying a versioned **capability matrix** recorded by the conformance suite — what it supports, what it degrades, what it cannot do — and bound by the authority boundary: transport, capacity, storage, or presentation only, never routing, ceilings, truth, the gate, the audit record, or content (FR-131, FR-133).
 - **Tenant**: The first-class isolation boundary for data, secrets, budgets, rate limits, workspaces, and audit.
 - **User**: The delegated identity whose permission scope the agent acts within; provisioned just-in-time on first valid sign-in against the tenant's configured OIDC issuer (identified by `(tenant_id, external_subject)`), never registered separately in-platform.
 - **Skill**: A versioned, progressively disclosed procedure; growable by the agent only through a human/eval promotion gate.
@@ -671,6 +734,11 @@ revocable, expressive, routed, bounded, and provable.
 - **SC-037**: A completed run can be forked at any sequence into a new run with a patched prompt or tool and re-executed with external effects disabled, leaving the source run's cost attribution, approvals, and audit chain byte-identical; two forks of the same run under the same harness digest produce the same replayed prefix, and a fork under a different harness digest reports the divergence rather than hiding it (FR-128, FR-129).
 - **SC-038**: Compaction fidelity is measured, not assumed: the condenser clears the probe-based eval set (artifact trail, causal chain, continuity, instruction retention) with zero regressions before any change ships; a session driven past N successive compactions still resolves its original requirements and its most recently modified artifacts; and a pre-compaction cached prefix is never served into a post-compaction turn (FR-130).
 - **SC-039**: Cost data is durable end to end: under injected control-plane unavailability, zero metered turns are lost — records queue in the outbox, apply exactly once on recovery, and every reservation reaches a terminal state (reconciled or explicitly expired-and-reported), with the outbox backlog exposed as a signal (FR-124).
+
+- **SC-040**: Every optional integration is genuinely optional: the full test suite, the eval gate, and a complete run pass with **every** third-party adapter disabled (built-in defaults only), and enabling or disabling one is a configuration change requiring no kernel change and no migration (FR-131, FR-050).
+- **SC-041**: No adapter is enabled for a tenant without a recorded, passing capability matrix from the conformance suite; in a fault-injection test an adapter that drops a parameter, coalesces a token class, reorders a stream, or substitutes a model is caught by the suite rather than by production metrics, and a capability regression on a version bump blocks adoption exactly like a failed eval gate (FR-133, FR-078).
+- **SC-042**: With a model gateway in front of the providers, 100% of responses are attributable to the exact pinned snapshot the recorded routing decision named — a substituted or aliased model is a typed failure, never a silent success — and per-class token counts, cache-read rate, and cost reconcile to the same values the direct-adapter path produces, or the cache-read gate is explicitly not claimed on that path and the limitation appears in the release report (FR-132, FR-084, SC-003).
+- **SC-043**: With an external tracing backend configured, zero conversation content reaches it — the SC-033 injection sweep is re-run end-to-end through the real exporter — and no telemetry reaches any backend by a route other than the platform's OTLP export path; a build that links a vendor tracing SDK or auto-instrumentation agent fails CI (FR-134, FR-117).
 
 ## Assumptions
 
