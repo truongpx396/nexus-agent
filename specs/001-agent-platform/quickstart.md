@@ -146,6 +146,8 @@ FR-040, FR-043, FR-117–FR-124).
 ```bash
 make trace SESSION=<session_id>       # decision structure + per-turn cost/latency/token
 make verify-telemetry-content-free    # inject content at every call site; assert nothing exports
+make adapter-conformance ADAPTER=litellm   # capability matrix: supported / degraded / unsupported
+make verify-no-vendor-sdk             # exactly one telemetry write path (OTLP behind the allowlist)
 make verify-trace-join SESSION=<id>   # span → event range → span, both directions
 make content-access SESSION=<id> PURPOSE="incident 4821"   # request a scoped, expiring grant
 make evals                            # runs the ~20-case set with the LLM-as-judge
@@ -163,6 +165,15 @@ make evals                            # runs the ~20-case set with the LLM-as-ju
 - `content-access` fails without an authorizer distinct from the requester, and on
   success emits a chained receipt for the grant **and** for each read; the grant
   expires and cannot satisfy an approval (FR-118, SC-034).
+- `adapter-conformance` records a capability matrix per adapter; a gateway that
+  cannot report cache-read tokens separately, or cannot hold cache affinity for the
+  provider's real cache lifetime, is marked `degraded` and the cache-read gate is
+  **not claimed** on that path rather than estimated. A model substituted by a
+  gateway alias or auto-fallback is a typed failure, never a silent success
+  (FR-132, FR-133, SC-041, SC-042).
+- `verify-no-vendor-sdk` fails the build if any vendor tracing SDK,
+  auto-instrumentation agent, or framework callback hook is present — telemetry has
+  exactly one write path (FR-134, SC-043).
 - The eval gate passes only at **≥90% pass AND zero regressions** vs baseline; a
   prompt/model/tool/skill change that regresses any previously-passing case is
   blocked in CI (FR-043); held-out grader tests are not agent-editable. Production

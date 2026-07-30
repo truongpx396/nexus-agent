@@ -574,6 +574,67 @@ not measurable from the designed data.
   against production); compaction quality measured by compression ratio (rejected
   — indistinguishable ratios hide materially different information loss).
 
+## 27. Ecosystem integration: ports, optionality, and the authority boundary
+
+- **Decision**: Third-party frameworks attach through the ports that already
+  exist for the platform's own implementations, are selectable by configuration,
+  and are **optional** — the full suite passes with all of them disabled. Each is
+  bound by one authority boundary: an integration may supply transport, capacity,
+  storage, or presentation, and may never become the routing authority, the
+  cost-ceiling authority, the source of truth, the release gate, the audit
+  record, or a path to content (FR-131). A **model gateway** (LiteLLM,
+  OpenRouter, cloud gateways, self-hosted vLLM/Ollama) attaches as a `Provider`
+  adapter with gateway-side aliasing, substitution, and fallback disabled and one
+  pinned snapshot per request (FR-132). An **observability backend** (Langfuse,
+  Arize/Phoenix, Braintrust, Grafana/Tempo, Datadog) attaches **only** through the
+  platform's OTLP export so the FR-117 allowlist applies; vendor SDKs and
+  auto-instrumentation are prohibited (FR-134). **Eval/dataset platforms** may
+  host corpora and scores but never the gate (FR-135). **Durable-execution
+  engines** may implement the queue or plan-runner port with the log remaining
+  truth, approvals remaining digest-bound, and the write-ahead claim remaining the
+  exactly-once mechanism; **prompt-management tools** may author but never
+  hot-swap at runtime (FR-136). Every adapter is admitted by a **conformance
+  suite** producing a recorded per-adapter capability matrix (FR-133).
+- **Rationale**: The overlap is the hazard. A model gateway is adopted precisely
+  because it *also* does routing, fallbacks, budgets, and caching — the four
+  things this platform holds constitutionally (FR-037/FR-076, FR-048, FR-083,
+  FR-013). Handing any of them over does not merely duplicate a feature; it
+  relocates an audited, deterministic control into a component the platform does
+  not own and cannot attest to. The same reasoning applies asymmetrically to
+  observability: an LLM-tracing vendor's most valuable features (playground,
+  judge-over-traces, dataset-from-trace) all require content, and its access
+  control is its own — a read in its interface produces no FR-118 receipt — so
+  the integration is *deliberately* limited to the half that works without
+  content, and the content-bearing route is the governed FR-125 export instead.
+  Optionality matters for the same reason config-not-forks does: an integration
+  that becomes a prerequisite is a fork of the deployment story.
+- **Observed failure modes that shaped FR-132/FR-133** (these are not
+  hypotheticals — they are current, documented behaviors in a widely used
+  gateway): provider-native cache-read counts not normalized into the gateway's
+  usage report, which would silently make the >90% cache-read gate unmeasurable
+  while every dashboard still rendered; router cache affinity held for a fixed
+  short window while the provider's cache lives far longer, so a later turn with
+  the same prefix is re-routed to a cold backend and pays full input price; and a
+  gateway parameter mode that drops a provider's `thinking` parameter, changing
+  model behavior for that turn without an error. Each is invisible from the
+  platform's side unless conformance is *tested and recorded per adapter* — which
+  is why FR-133 records a capability matrix rather than a boolean, and why FR-132
+  withdraws the cache-read claim on a path that cannot measure it rather than
+  estimating around the gap.
+- **Alternatives considered**: Letting the gateway route (rejected — breaks
+  data-label routing, snapshot pinning, and price-book attribution at once, and
+  does so silently); relying on gateway-side budgets (rejected — a ceiling in a
+  component the platform does not own is not a ceiling, FR-083); vendor SDK
+  instrumentation for a richer backend experience (rejected — bypasses the
+  FR-117 allowlist, which is the single choke point that keeps telemetry inside
+  the erasure boundary); hosting the eval gate on an external platform (rejected
+  — reopens spec-gaming and makes a vendor outage a release decision); adopting a
+  durable-execution engine's history as the audit record (rejected — it journals
+  scheduling, not agent behavior, and cannot answer whether an external effect
+  occurred); a boolean "supported/unsupported" per adapter (rejected — real
+  adapters are *partially* conformant, and it is the undeclared partial support
+  that produces metrics nobody is measuring).
+
 ## Resolved unknowns summary
 
 | Technical Context item | Resolution |
@@ -604,5 +665,6 @@ not measurable from the designed data.
 | Sequencing | Evals foundational; explicit MVP cut line (§24) |
 | Catalog/token/reliability gap-closure | Descriptor injection scan; audience-bound tokens; eval-gated stuck detection; hybrid Gate-3 classifier (§25) |
 | Durable state artifacts | Condensation / Checkpoint / Snapshot separated; write-ahead idempotency claim; replay vs resume vs fork; harness digest; eval-gated compaction (§26) |
+| Ecosystem integration | Optional adapters behind existing ports; one authority boundary; gateway as transport not router; OTLP-only observability; conformance-recorded capability matrix (§27) |
 
 **No `NEEDS CLARIFICATION` remain.** Proceed to Phase 1.
