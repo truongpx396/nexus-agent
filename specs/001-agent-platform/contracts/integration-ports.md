@@ -46,6 +46,9 @@ responsibilities are never delegated:
 | Memory / retrieval (FR-019, FR-022) | File-first per-tenant memory | pgvector, Qdrant, Weaviate, a knowledge graph | A retrieval tier when scale justifies it | A trusted instruction channel — retrieved content stays untrusted (FR-087) |
 | Prompt / config source (FR-042) | Version control + review | Prompt-management tools | An authoring surface | A runtime source — versions pin into the harness digest at start (FR-136, FR-129) |
 | Vault / KMS | Deployment vault | HashiCorp Vault, cloud KMS/HSM | Secret custody | A component that can read the sign-only audit key (FR-081) |
+| `Surface` — frontend (FR-028, FR-155) | Platform SSE/WS event stream | **AG-UI** adapters, CopilotKit-style frontends, chat platform SDKs | Presentation and a wire format | The event log; a second progress source; a path around the capability descriptor (FR-155) |
+| `Surface` — agent ingress (FR-158) | *None enabled by default* | **A2A** endpoints, agent-gateway products | An authenticated caller under a subset scope | An oversight resolver; an unmetered principal; a trusted instruction source (FR-105, FR-098) |
+| Skill source (FR-152) | Version control + review | Skill registries and marketplaces | An authoring and distribution source | The admission gate — provenance, signature, pinned version, scan, and eval are the platform's (FR-151, FR-113) |
 
 ---
 
@@ -113,6 +116,36 @@ security) and whose reads leave **no FR-118 receipt**.
   redacted, governance-signed cases pushed as **datasets** — never trace mining.
 
 ---
+
+## Frontend and agent-ingress protocols (FR-155, FR-158)
+
+The 2026 stack is three protocols: MCP for tools, A2A between agents, AG-UI to
+frontends. The platform is already a thorough MCP *client*; the other two attach as
+surfaces, and each meets a rule that already exists here.
+
+- **AG-UI** is a presentation adapter. The platform's own `StreamEvents(v1)` is
+  structure-only with `Last-Event-ID` resume — a **stronger** durability guarantee
+  than a typed SSE stream with no sequence contract — so an AG-UI adapter renders
+  that stream rather than replacing it. It may not become a second progress source,
+  and it does not exempt a surface from declaring its capabilities (FR-155).
+- **A2A** is an ingress class, not a peer relationship. An external agent is an
+  **agent principal**, and FR-105 already forbids one from resolving an approval.
+  Admission therefore requires: a declared `principal_kind = agent` surface, a
+  delegated scope provably a subset of the authorizing tenant principal's (FR-098),
+  source taint as untrusted content (FR-087), a named payer (FR-017, FR-083), and
+  no ability to resolve an approval **or answer an input request** (FR-110) — a
+  question answered by the agent that raised the situation is not oversight.
+  Disabled by default; enabling it is a governance decision (FR-096).
+
+## Skill registries (FR-152)
+
+A registry may distribute; it may never admit. Provenance, signature verification
+over `bundle_digest`, version pinning, the FR-113 file-level scan, the per-skill
+suite (FR-143), and the trust tier are all platform-side, and an unsigned or
+unprovenanced import is refused rather than admitted at a reduced tier. The
+measured malicious population in public skill registries is why this port is
+listed as a *source*, on the same footing as a prompt-management tool: it may
+author, never authorize.
 
 ## Durable-execution engines (FR-136)
 

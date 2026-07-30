@@ -42,9 +42,12 @@ type Chunk =
 
 ```
 interface Tool {
-  name: string                                  // namespaced, e.g. "asana_search"
+  id: ToolRef                                   // {namespace}/{name}@{version} (FR-147)
   description: string                           // progressive-disclosure summary
   inputSchema: JSONSchema
+  outputSchema: JSONSchema?                     // validated on return; still UNTRUSTED (FR-150)
+  descriptorDigest: bytes                       // re-verified at step 1a (FR-150)
+  disclosure: "resident" | "deferred"           // FR-062, FR-148
   isConcurrencySafe(input): bool                // PER INVOCATION, default false
   taint: TaintDeclaration                       // REQUIRED — inputs to Rule of Two
   effectClass: "payment" | "delete" | "external_send"
@@ -64,6 +67,9 @@ type TaintDeclaration = {                       // FR-087; every field defaults 
 - **Fail-closed defaults**: serial unless proven safe, assume writes, permission
   denied unless explicitly granted, **all three taint legs assumed engaged** when
   the declaration is missing or unclassifiable.
+- **Identity is qualified, and a namespace has one owner** (FR-147): a colliding
+  descriptor is refused at admission, never resolved by registration order. The
+  alias map is governance-signed tenant config, never descriptor-supplied.
 - **Safety is per invocation on parsed input** (`Bash("ls")` ≠ `Bash("rm -rf")`).
 - **The Rule of Two reads declarations, not guesses** — the evaluator combines a
   session's accumulated `TaintState` with the pending invocation's declaration.
@@ -149,23 +155,146 @@ interface Workspace {
   acquire(tenant_id, session_id): SandboxHandle  // from warm pool
   exec(handle, command, ctx): ExecResult         // egress-controlled, allowlisted
   release(handle): void                          // reclamation; hard TTL enforced
+
+  // The ONLY route from sandbox code to a platform capability (FR-149).
+  // Re-enters checkPermissionsAndCallTool at step 1; the caller BLOCKS.
+  broker(handle, call: ToolCall, ctx): ToolResult
 }
 ```
 
 - Per-tenant isolation; caps enforced at acquire; reclaimed on terminal/stuck/TTL.
+- **`broker` or nothing** (FR-149). Programmatic tool calling — agent-written code
+  orchestrating tools so only final values enter context — is permitted only
+  through this seam, and a brokered call is indistinguishable from a model-
+  originated one in the log, the audit chain, and the taint state. A direct network
+  route from sandbox code to a connector or MCP endpoint is a prohibited egress
+  path (FR-037, FR-059), because the sandbox is the one place that could otherwise
+  reach a capability with no permission chain, no approval, no claim, and no
+  receipt.
+- **A brokered approval suspends the program, not just the loop**: the calling
+  process blocks on the same durable mechanism (FR-036) and the sandbox handle
+  rides on the checkpoint (FR-126), so a six-hour approval does not depend on a
+  sandbox surviving it.
 
-## `Channel` / `Surface` — thin adapter (FR-001, FR-028, FR-031)
+## `Channel` / `Surface` — thin adapter (FR-001, FR-028, FR-031, FR-155–FR-159)
+
+A surface translates and nothing else — but "thin" describes what it may *not* do,
+not what it must be *able* to do. Fifteen requirements route human decisions through
+here, so the adapter declares its capabilities and the platform routes on them.
 
 ```
 interface Surface {
+  capabilities(): SurfaceCapability          // declared, versioned, conformance-tested
   // Translates external input into a run submission; NO control-flow logic.
+  // MUST resolve the SUBMITTING principal per message (FR-156).
   toRequest(external_input): RunRequest
   // Streams or polls progress; never holds a blocked connection.
   emit(event: Event): void
+  // Outbound to a human. Enqueues through the delivery outbox; never sends inline.
+  deliver(msg: OutboundMessage) -> DeliveryId          // FR-157
+  // Resolves the surface's native thread identity into the session key (FR-159).
+  bindConversation(external_ref): SessionKey
+}
+
+type SurfaceCapability = {
+  principal_kind: "human" | "service" | "agent"   // undeclared => most restricted
+  can_render_approval_context: bool               // FR-104
+  max_render_bytes: int
+  supports_step_up_auth: bool                     // FR-105
+  supports_resolution_token: bool
+  supports_structured_input: bool                 // FR-110 schema-declared answers
+  supports_streaming: bool                        // FR-031
+  max_message_bytes: int
+  conformance_run_id: RunId                       // absent => not enablable
+}
+
+type OutboundMessage = {
+  session_id, seq                       // the event this carries — APPENDED FIRST
+  recipient_ref: string                 // idempotency: (session, seq, surface, recipient)
+  kind: "reply" | "approval_request" | "reminder" | "escalation"
+      | "input_request" | "completion"
+  audience_ref: string?                 // FR-156 — suppression, not truncation
 }
 ```
 
 - A new surface is a new adapter with **zero** kernel changes.
+- **Routing filters on capability** (FR-155). Approval and input-request delivery
+  (FR-108) select from the assignee/escalation chain by what each surface can
+  actually do, and an `ApprovalPolicy` naming an effect class no configured channel
+  can serve is refused **at configuration time**. Without this, the chain can route
+  an irreversible-class approval to a channel that can render neither the
+  blast-radius fields nor a step-up challenge — producing the rubber stamp SC-025
+  forbids, or a silent fail-closed expiry.
+- **Authority is per turn, never per conversation** (FR-156). `toRequest` resolves
+  the submitting principal from a verified `Surface Identity`; FR-035 scope,
+  FR-033 Rule of Two, and FR-093 attribution are evaluated against *that* principal
+  for *that* turn. `steer` and `cancel` authorize against the turn's submitter or a
+  declared channel-operator role — never against presence in the conversation.
+  Binding a thread to whoever opened it runs one participant's instructions under
+  another's authority and makes FR-105's separation-of-duties check unevaluable.
+- **`deliver` enqueues; it does not send** (FR-157). The event is appended before
+  the message leaves, delivery is at-least-once and idempotent on
+  `(session_id, seq, surface, recipient)`, and the outcome is typed. A
+  `failed_permanent` on an approval request MUST stay distinguishable from an
+  unanswered one — to a tenant they look identical and mean opposite things.
+- **Output adaptation happens after the egress sanitizer** (FR-068): chunking,
+  truncation, and attachment spilling reshape what was sanitized, never re-open it.
+- **`principal_kind = agent` is its own admission class** (FR-158): an external
+  agent is admitted only through a surface declared for it, under a provable subset
+  scope (FR-098), source-tainted as untrusted (FR-087), metered to a named payer,
+  and **incapable of resolving an approval or answering an input request** — the
+  caller is a party to the situation, not oversight of it.
+
+## `Skills` — the capability-narrowing seam (FR-020, FR-021, FR-151–FR-154)
+
+A skill is procedural knowledge, not a permission grant. It is admitted as a signed
+bundle and it may only *narrow* what the run can already do.
+
+```
+interface Skills {
+  // Tier 1 always resident (bounded); tier 2 on activation; tier 3 per file.
+  resident(tenant_id, ctx): SkillMetadata[]        // capped; relevance-selected
+  activate(skill_id, version, ctx): SkillBody      // emits `skill_activated`
+  reference(skill_id, path, ctx): FileContent      // tier 3, individually loaded
+
+  // Admission is one gate for EVERY origin (FR-152).
+  admit(bundle: SkillBundle, origin: SkillOrigin) -> AdmissionResult
+}
+
+type SkillBundle = {
+  manifest: { name, description, version, triggers }
+  body: text
+  files: { path, kind: "reference"|"asset"|"script", digest }[]
+  bundle_digest: bytes                  // content address over EVERY file
+  executable: bool                      // false + executable content => refused
+  declared_tool_ids: string[]           // INTERSECTED with the run's catalog
+  signature: bytes?                     // required for third_party_import
+  publisher_ref: string?                // required for third_party_import
+}
+
+type SkillOrigin = "first_party" | "tenant_authored"
+                 | "agent_proposed" | "third_party_import"
+```
+
+- **One gate, every origin** (FR-152). FR-021's propose → human/eval gate →
+  version → promote applies to all four. An import additionally requires
+  provenance, a verified signature over `bundle_digest`, and a pinned upstream
+  version on the FR-078 dependency footing. Gating only `agent_proposed` gates the
+  source least likely to be adversarial and leaves the supply chain open.
+- **Every file is scanned** (FR-113, FR-151). A skill body is read by the model
+  exactly like a tool description and is typically far larger.
+- **A script is a tool or the bundle is refused** (FR-151). `kind = "script"`
+  registers through `tool-contract.md` — three gates, per-invocation safety, taint
+  declaration, governance sign-off — or admission fails. Code that arrived as an
+  attachment to a document has no execution path.
+- **`declared_tool_ids` intersects, never unions** (FR-153). An entry the run does
+  not already hold is ignored and recorded as `skill_capability_ignored`. A skill
+  may never touch autonomy, approval policy, egress, data label, or region —
+  otherwise "load this skill" is the tool-widening lever FR-111's ratchet closes,
+  arriving through a different door.
+- **`harness_digest` pins what could load; events record what did** (FR-154), so a
+  fork or trajectory case attributes a behaviour to a skill version rather than to
+  a library.
 
 ## `RunControl` — lifecycle operations (FR-005, FR-004)
 

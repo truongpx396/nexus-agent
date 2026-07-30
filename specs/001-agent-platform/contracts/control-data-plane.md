@@ -22,7 +22,9 @@ older data plane during a rainbow rollout — FR-026).
 | Price book distribution (FR-084) | Memory read/write (FR-019) |
 | Eval / skill / MCP catalog (FR-042) | Event-log append, checkpoints (FR-024) |
 | Approval policy + approver identity/authz (FR-105, FR-109) | Approval **enforcement** at the tool boundary; digest re-verify (FR-103) |
-| Approval routing, reminder, escalation (FR-108) | Approval context rendering under `local` mode (FR-104) |
+| Approval routing, reminder, escalation — **filtered by surface capability** (FR-108, FR-155) | Approval context rendering under `local` mode (FR-104) |
+| Surface registry + capability descriptors, conformance runs (FR-155) | Outbound delivery through the durable outbox (FR-157) |
+| Skill admission: origin, provenance, signature, trust tier (FR-152) | Skill activation, capability narrowing, `skill_activated` events (FR-153) |
 | Audit sink + chain anchoring (FR-040, FR-081) | Emits audit receipts + cost records upstream |
 | Erasure/key-destruction orchestration (FR-080) | Holds content keys per tenant (FR-089) |
 | Content-access grant authorization (FR-118) | Enforces the grant at the decryption boundary; emits a receipt per read |
@@ -88,25 +90,43 @@ Request:
     session_key, data_label, route_model_id,         // routing decided upstream
     route_reason, region,                            // auditable + region-pinned (FR-091)
     execution_class: "interactive"|"batch", priority, // what load-shedding reads (FR-049)
+    surface_id, principal_kind,                      // which channel, and what kind of caller (FR-155, FR-158)
+    submitting_principal_id,                         // THIS turn's authority — not the thread's (FR-156)
+    audience_ref?,                                   // shared conversation: bounds delivery + memory (FR-156)
+    catalog_manifest_digest,                         // the resolvable tool universe (FR-148)
     input, budget: { per_task_usd }, autonomy_level }
 Response 202:
   { session_id, status: "queued" }
 Errors: 402 budget_exhausted | 429 at_capacity(Retry-After) | 403 rbac_denied
       | 409 region_conflict   // placement outside the tenant's pinned region (FR-091)
+      | 403 principal_kind_not_admitted   // agent ingress on a surface not declared for it (FR-158)
+      | 403 identity_unverified           // no verified Surface Identity for the submitter (FR-055, FR-156)
 ```
 
 - Routing (`route_model_id`) is decided in the control plane and passed as data;
   the data plane never re-decides by model discretion. `agent_version` is pinned
   here and held for the run's life so a concurrent deploy cannot shift behavior
   or bust the prompt prefix mid-run.
+- **`submitting_principal_id` is per turn, not per session** (FR-156). `SendInput`
+  carries its own, and the tool boundary evaluates FR-035 scope, the Rule of Two,
+  and cost attribution against *that* principal. A shared conversation has no
+  standing authority — inheriting it from whoever opened the thread runs one
+  participant's instructions under another's permissions.
+- **`catalog_manifest_digest` is a component of `harness_digest`** (FR-148,
+  FR-129): it names the tools the run *may* load, so deferred disclosure never
+  moves the digest mid-run.
 
 ### `SendInput(v1)` (FR-005)
 Deliver mid-run steering to a **running** session — not a new run.
 
 ```
 POST /v1/runs/{session_id}/input
-  { message, idempotency_key }
+  { message, idempotency_key,
+    submitting_principal_id }        // THIS turn's authority (FR-156)
 Response 202: { queued_at_seq }
+Errors: 403 identity_unverified      // no verified Surface Identity for the submitter
+      | 403 not_turn_principal       // steering another participant's run without the
+                                     //   channel-operator role (FR-156)
 ```
 
 - Delivered to the session's steering queue, drained at a turn boundary under the
@@ -267,7 +287,20 @@ Errors: 400 missing_input_digest        // an approval that binds no arguments i
       | 400 unenumerated_batch          // kind != single without member_digests
       | 403 context_mode_forbidden      // upstream refused by residency config (FR-091)
       | 422 policy_violation            // scope wider than the ApprovalPolicy allows
+      | 422 no_capable_channel          // no channel in the chain can render this class (FR-155)
 ```
+
+- **`assignee_ref` and `escalation_chain` are capability-filtered** (FR-155):
+  routing selects only surfaces whose descriptor can render the context package at
+  the required size, carry the single-use resolution token, and — where
+  `step_up_required` — challenge for re-authentication. `422 no_capable_channel`
+  is a *runtime* backstop; the primary defense is refusing the `ApprovalPolicy` at
+  configuration time, because discovering an unservable class at request time still
+  ends in a fail-closed expiry (SC-060).
+- **Delivery is enqueued, never inline** (FR-157): each notification, reminder, and
+  escalation hop becomes a `Delivery Record` appended before it is sent and resolved
+  to a typed outcome, so a permanently undelivered request is distinguishable in the
+  audit record from one a human simply never answered.
 - `context_package` is present only when `context_mode = upstream`; under `local`
   the data plane holds it and serves the approval UI in-boundary (FR-104).
 - `resolution_token` is single-use, bound to `approval_id` **and** the resolver's

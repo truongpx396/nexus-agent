@@ -113,6 +113,23 @@ are now resolved in the spec (FR-080–FR-097), data model, contracts, and resea
 - [x] Held-out protection mechanized *and* measured: grader store unreachable from the sandbox, verdicts computed by the runner, visible-vs-held-out gap reported, contamination bounded on both channels the platform creates (FR-146, SC-053)
 - [x] `EvalSuite` / `EvalCase` / `EvalTrial` / `EvalRun` / `EvalEnvironmentDigest` / `Judge` / `JudgeCalibration` exist as first-class entities — every `eval_run_id` in the data model now resolves (data-model.md)
 
+### Channels, tools & skills (design review 2026-07-31)
+
+- [x] Tool identity is `{namespace}/{name}@{version}` with one owning source per namespace; collision refused at admission, never resolved by registration order; the alias map is governance-signed config a descriptor can never write (FR-147, SC-054)
+- [x] Deferred disclosure reconciled with pinning: the harness digest covers the resolvable universe, loads land in the volatile zone as `tool_loaded` events, and the selector is eval-gated with measured selection accuracy (FR-148, SC-055)
+- [x] The sandbox is not a bypass: agent-written code reaches a capability only through a broker that re-enters the pipeline, and a direct path to a connector is a prohibited egress route (FR-149, SC-056)
+- [x] MCP listing caches are advisory with the descriptor digest re-verified at use; server-initiated user input is an input request that resolves no approval; structured results are validated but stay untrusted (FR-150, SC-057)
+- [x] A skill is a signed, content-addressed bundle whose every file passes the injection scan, and a bundled script registers as a `Tool` or the bundle is refused (FR-151, SC-058)
+- [x] One admission gate for every origin, with provenance, signature, and a pinned version required of third-party imports and a per-origin trust tier bounding what they may carry (FR-152, SC-058)
+- [x] Skills are capability-**narrowing** only — declared tools intersect the resolved catalog, never extend it — and activation is a typed event (FR-153, SC-059)
+- [x] Progressive disclosure is three-tiered, bounded, relevance-selected past the cap, and measured; the digest separates loadable from activated skills (FR-154)
+- [x] Surfaces publish conformance-tested capability descriptors, approval routing filters on them, and an unservable approval policy is refused at configuration time (FR-155, SC-060)
+- [x] Authority is the turn-submitting principal, never the conversation's opener; steer/cancel authorize per turn; a shared conversation carries an audience label bounding delivery and memory writes (FR-156, SC-061)
+- [x] Outbound delivery is a durable outbox with the log entry preceding the send; an undelivered approval request stays distinguishable from an unanswered one (FR-157, SC-062)
+- [x] `principal_kind` declared per surface; agent-principal ingress is its own admission class that resolves no approval and answers no input request (FR-158, SC-063)
+- [x] Each surface declares a conversation binding resolving its native thread identity into `session_key`; cross-surface continuation only for the same principal under an explicit binding (FR-159)
+- [x] `Catalog Manifest` / `Skill Bundle File` / `Surface` / `Delivery Record` exist as first-class entities, and `Tool`, `Skill`, `Surface Identity`, and `Session` carry the identity and attribution fields the above depend on (data-model.md)
+
 ## Notes
 
 - Items marked incomplete require spec updates before `/speckit.clarify` or `/speckit.plan`
