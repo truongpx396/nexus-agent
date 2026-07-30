@@ -251,7 +251,7 @@ backend-go/
 
 ml-python/                    # Python 3.12 helper service (off the paying loop)
 ├── src/
-│   ├── evals/                # ~20-case eval set, LLM-as-judge rubric, end-state checks, CI gate
+│   ├── evals/                # corpus + suite classes, trial statistics, environment digest, CI gate
 │   ├── condenser/            # structured compaction / summarizer on a cheaper helper model
 │   └── judge/                # rubric scoring + held-out grader protection
 └── tests/
@@ -518,6 +518,28 @@ long-running sessions (~5,000+ per single-org deployment).
   *foundational* phase, before the first behavior-bearing slice. Any change to a
   prompt, tool, model, or skill must clear **≥90% pass AND zero regressions** versus
   the current baseline before it can ship. No previously-passing case may regress.
+- 🎯 **…and the gate is a measurement, not a ceremony.** The suite calls live
+  models, so its verdict is **statistical**: k trials per case, per-case exact
+  intervals, a regression defined as interval separation rather than a flipped
+  trial, and a three-valued verdict where `inconclusive` is *never* resolved as
+  `pass`. Cases are split into **regression / capability / safety / negative**
+  classes with different thresholds — a safety case admits no threshold below
+  100%. Every run pins an **`eval_environment_digest`** (image, guaranteed *and*
+  hard-kill resource bands, concurrency, region) and refuses to compare across
+  digests, because resource configuration alone moves agentic scores by more than
+  most model changes; trials run on **cold** sandboxes, never the warm pool.
+- ⚖️ **The judge is an instrument** — pinned snapshot + rubric, drawn from a
+  different model family than the agent it grades, and calibrated against
+  human labels to a published agreement floor **before** it may block a change.
+- 📡 **Quality is measured in production too** — but not by shipping conversations
+  to a vendor. An **in-boundary online scorer** runs inside the erasure boundary
+  and emits only structure-free scores through the telemetry allowlist, feeding
+  drift alerts and a rollout guardrail that auto-rolls-back a bad change. A score
+  is a number; a number is not content.
+- 💰 **Efficiency is gated, not just reported** — a change that holds its quality
+  verdict while regressing tokens, turns, or tool calls beyond the declared band
+  is blocked. On a platform whose stop signal is cost, an ungated efficiency
+  regression is an incident that ships with a green check.
 
 ---
 

@@ -65,7 +65,20 @@ isolation test executed **through the PgBouncer tier** used in production; Pytho
 `pytest` for the eval harness; a versioned eval set (~20 real cases) with an
 LLM-as-judge rubric + end-state checks running in CI as the release gate,
 delivered in the Foundational phase; contract tests against the control-plane ↔
-data-plane API and the kernel ABI interfaces
+data-plane API and the kernel ABI interfaces.
+
+The eval suite is the one place determinism is unavailable — it calls live models
+— so it is governed by measurement discipline instead: **k trials per case** with
+per-case exact intervals and a three-valued verdict where `inconclusive` never
+resolves to `pass`; suite classes (regression / capability / safety / negative)
+with distinct thresholds; a pinned **`eval_environment_digest`** and cold
+per-trial sandboxes, because the warm pool is shared state and resource
+configuration is a measured confounder; a **pinned, calibrated, cross-family
+judge** that cannot block a change without a current passing calibration; and
+efficiency (tokens, turns, tool calls, active time) gated alongside quality.
+Quality in production is measured by an **in-boundary online scorer** emitting
+structure-free scores through the telemetry allowlist — the platform's answer to
+continuous evaluation without reopening the content-egress path
 
 **Target Platform**: Linux server (containerized, OCI images + Helm chart /
 Terraform module); code/shell execution defaults to E2B sandboxes with hard
@@ -100,7 +113,7 @@ named approver as a decision-ready package, resolvable only by an authorized hum
 classes), invalidated with the run it gates, and unanswered-after-escalation
 expiring as a denial (`approval_expired`)
 
-**Scale/Scope**: 136 functional requirements across 9 user stories (see the MVP cut
+**Scale/Scope**: 146 functional requirements across 9 user stories (see the MVP cut
 line below for what ships in Increment 1); single reusable
 kernel serving 8+ surfaces (CLI, chat, web, REST/gRPC, email, cron, Telegram, Zalo)
 plus per-user personal connectors (Gmail/Drive/Calendar); startup (5 people) →
@@ -125,7 +138,7 @@ the Security, Delivery/Scale, and Workflow constraint sections).
 | VI | Tenant First; Audit & Observability Day-One | Tenant is the first dimension of session key/row/workspace/cost/secret; DB row-level security with **transaction-local** scope that survives the transaction-pooling tier, proven by an isolation test run through that pooler; **hash-chained, externally anchored** audit log with sign-only key custody. Observability is specified as a mechanism rather than an intention: telemetry is a **content-free signal class** enforced by a deny-by-default attribute allowlist so it stays inside the crypto-shredding erasure boundary, spans are derived from the log and turn-scoped so long and killed runs still trace, events and spans carry a bidirectional join key, metric labels are fixed with per-run detail via exemplars, and reading decrypted content is an audited, expiring, receipt-emitting grant rather than an operator capability (FR-038, FR-039, FR-040, FR-081, FR-117–FR-125). | PASS |
 | VII | Model- and Provider-Agnostic by Abstraction | One provider abstraction + normalized stream contract; native tool-calling only; deterministic auditable routing by data label + difficulty; regulated payloads → self-hosted (FR-027, FR-037). Third-party frameworks (model gateways, tracing backends, eval platforms, workflow engines) attach as **optional** adapters behind existing ports and are bound by one authority boundary — transport, capacity, storage, or presentation only, never routing, ceilings, truth, the gate, the audit record, or content — each admitted by a conformance suite recording what it supports, degrades, and cannot do (FR-131–FR-136). | PASS |
 | VIII | Reliability: Classify, Resume, Never Silently Retry | Typed failure classification before retry; logged backoff+jitter; circuit-break at 3 identical failures; durable checkpoint/resume; stuck detection — itself eval-gated against a negative-case set and escalating from a logged `stuck_suspected` signal to a hard terminate only on a corroborating second trip, so an imprecise heuristic never silently discards partial work; rainbow deploy (FR-023, FR-024, FR-025, FR-026, FR-115). | PASS |
-| IX | Verify Against Acceptance Criteria; Govern Every Change | No self-declared success; verified against explicit criteria; prompts/tools/skills are versioned, reviewed, eval-gated (≥90% pass + zero regressions); skills promoted only via human/eval gate (FR-021, FR-042, FR-043, FR-044). Eval set + CI gate delivered in **Foundational**, before the first behavior-bearing slice; correctness suite runs on a deterministic provider harness (FR-097). | PASS |
+| IX | Verify Against Acceptance Criteria; Govern Every Change | No self-declared success; verified against explicit criteria; prompts/tools/skills are versioned, reviewed, eval-gated (≥90% pass + zero regressions); skills promoted only via human/eval gate (FR-021, FR-042, FR-043, FR-044). Eval set + CI gate delivered in **Foundational**, before the first behavior-bearing slice; correctness suite runs on a deterministic provider harness (FR-097). The constitution's "track pass rates over N runs" is now operational rather than implied: k trials with per-case intervals, a three-valued verdict that never resolves `inconclusive` to `pass`, a pinned eval-environment digest, suite classes, a calibrated cross-family judge, gated efficiency, and a measured held-out gap (FR-137–FR-146). | PASS |
 
 **Additional constraint sections**: Security & Trust Surface (secrets/identity/
 chained receipts/at-rest encryption/erasure/egress/HITL/webhook authenticity/
@@ -175,7 +188,11 @@ rather than implicitly assumed.
   ceilings (FR-016, FR-083, FR-084).
 - Audit: hash-chained receipts + verifier (FR-081); per-tenant envelope
   encryption with the erasure path in place (FR-080, FR-089).
-- The ~20-case eval set, judge, and CI gate — **before** the loop is tuned.
+- The ~20-case eval set, judge, and CI gate — **before** the loop is tuned — with
+  the measurement discipline that makes the gate mean something: trial statistics
+  and a three-valued verdict, a pinned eval-environment digest with cold trial
+  sandboxes, suite classes, and a judge calibrated against human labels *before*
+  it blocks its first change (FR-137, FR-138, FR-139, FR-141).
 - One surface (REST) and single-tenant SaaS topology.
 
 **Deliberately deferred (built when the stage demands it, not before):**
@@ -268,9 +285,10 @@ backend-go/
 
 ml-python/                    # Python 3.12 helper service (off the paying loop)
 ├── src/
-│   ├── evals/                # ~20-case eval set, LLM-as-judge rubric, end-state checks, CI gate
+│   ├── evals/                # corpus + suite classes, trial statistics, environment digest,
+│   │                         #   fork-based cases, efficiency budgets, integrity, CI gate
 │   ├── condenser/            # structured compaction / summarizer on a cheaper helper model
-│   └── judge/                # rubric scoring + held-out grader protection
+│   └── judge/                # rubric scoring, held-out grader protection, human-label calibration
 └── tests/
 
 frontend/                     # React 19 web surface (a thin surface adapter)

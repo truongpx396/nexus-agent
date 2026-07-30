@@ -191,7 +191,10 @@ Technical Context — so no `NEEDS CLARIFICATION` remains before Phase 1.
   end-state checks runs in CI and gates any prompt/tool/model/skill change; ship
   only at ≥90% pass AND zero regressions; held-out grader tests the agent cannot
   edit; production cases enter the corpus only through a consented, redacted,
-  governance-signed export (FR-125).
+  governance-signed export (FR-125). **What those two numbers mean statistically
+  — trials, metric, interval, verdict — and how quality is measured in production
+  rather than only in CI are settled separately in §28**; this section settles
+  the telemetry contract, not the measurement one.
 - **Rationale**: Four forces decide this shape. (1) **Erasure**: content is
   envelope-encrypted and erased by key destruction (§14), but telemetry leaves
   through an export path the key does not reach — a single prompt fragment on a
@@ -635,6 +638,113 @@ not measurable from the designed data.
   adapters are *partially* conformant, and it is the undeclared partial support
   that produces metrics nobody is measuring).
 
+## 28. Evaluation as measurement: trials, environment, and the production gap
+
+- **Decision**: The gate becomes a **statistical decision over repeated trials**
+  — k trials per case, `pass^k` for regression and safety classes and `pass@k`
+  only where one success is genuinely the requirement, a confidence interval per
+  case, a regression defined as downward interval separation rather than a
+  flipped trial, a three-valued verdict in which `inconclusive` never resolves as
+  `pass`, and a published minimum detectable effect (FR-137). The environment is
+  pinned as a second digest alongside the harness digest, comparison across
+  differing digests is refused, trials run on **cold** sandboxes from a declared
+  memory/skill baseline, and infra errors are excluded from the denominator
+  rather than scored as agent failures (FR-138). The corpus splits into
+  **regression / capability / safety / negative** classes with distinct
+  thresholds and blocking semantics, plus a graduation and retirement path
+  (FR-139). Quality is measured in production through an **in-boundary online
+  scorer** emitting structure-free scores through the FR-117 allowlist, feeding
+  drift alerting and a rollout guardrail (FR-140). The judge is a pinned,
+  calibrated, cross-family instrument (FR-141). Trajectory regressions are
+  reached through **fork-based cases** on FR-128 (FR-142). Every behavior-bearing
+  artifact carries its own suite, and the corpus re-runs on a schedule
+  independent of any change (FR-143). Graders follow an explicit selection rule
+  and cases meet an authoring bar (FR-144); efficiency joins the gate (FR-145);
+  and held-out protection is mechanized *and measured* (FR-146). `EvalSuite`,
+  `EvalCase`, `EvalRun`, `EvalEnvironmentDigest`, `Judge`, and `JudgeCalibration`
+  become first-class entities, because every `eval_run_id` in the data model
+  previously pointed at nothing.
+- **Rationale**: Four forces decide this shape. (1) **The noise floor exceeded
+  the gate's resolution.** Twenty binary cases scored once means one flip moves
+  the rate five points, while a controlled study of agentic coding evals measured
+  *infrastructure configuration alone* — container CPU/memory bands, concurrency,
+  egress — swinging scores about six points, with error rates moving 5.8% → 2.1%
+  purely from the ceiling chosen and pass rates drifting with provider load by
+  time of day. A gate that cannot resolve the regression it promises to catch
+  will block clean changes and pass real ones, and teams learn to route around
+  it. The constitution already said "track pass rates over N runs"; the
+  requirement had silently dropped N. (2) **One threshold cannot serve two
+  jobs.** Published practice separates capability evals (low pass rates by
+  design, measuring new ability) from regression evals (held near 100%,
+  protecting existing behavior), with saturated capability cases graduating into
+  the regression suite. A single ≥90% bar makes adding a genuinely hard case a
+  deploy-blocking act, which selects for easy cases — a gaming path opened by the
+  gate's own shape rather than by the agent. (3) **The platform had no quality
+  signal in production.** FR-095's golden signals are all system health; nothing
+  moved when answers got worse. The field's answer — a vendor judge over
+  production traces — is exactly what FR-117 and FR-134 close, and the design
+  said so without saying what replaces it. A judge *inside* the boundary emitting
+  only a score resolves the tension completely: a float is not content, so it
+  passes the allowlist untouched and the erasure attestation survives. (4)
+  **Harness and environment are independent confounders, each larger than the
+  change under test.** A controlled harness benchmark attributes ~29.4 points of
+  Pass@1 to model choice and ~27.4 points to harness choice under a fixed model,
+  with the same backbone spanning 19.1% → 73.4% between a minimal and a full
+  adapter. FR-129 already pinned configuration; nothing pinned substrate.
+- **Comparison set**: The *governance* of evaluation here was already ahead of
+  the set — the gate is Foundational (§24) where the reference implementations
+  added evals after shipping, held-out graders and spec-gaming detection are
+  designed in, behavior-bearing heuristics are gated like prompts (§25, §26), and
+  the production→eval path is consent-governed (FR-125). What the set does better
+  is *measurement*, and each borrowing is specific. **Anthropic's agent-eval
+  guidance** supplies the capability/regression split, `pass@k` vs `pass^k`, the
+  20–50-case starting size, per-trial environment isolation, balanced
+  positive/negative sets, the "0% means a broken task" reading, and the
+  Swiss-cheese layering (offline evals + production monitoring + A/B + manual
+  review) that exposed the missing production layer; its infrastructure-noise
+  study supplies the guaranteed-versus-ceiling resource split and empirical band
+  calibration. **Hermes** supplies two patterns adopted directly: per-skill YAML
+  suites gating each skill's own upgrade rather than one monolithic corpus, and a
+  scheduled re-run — and its probe-based compression eval is already the model
+  for FR-130. **SWE-agent** supplies replay-from-recorded-trajectory as the
+  precedent for FR-142's fork-based cases; the platform's version is cheaper,
+  because `fork` (FR-128) already branches from a durable log with effects
+  disabled. **OpenHands** supplies the multi-benchmark harness shape and the
+  observation that pass-to-pass regression results are executed but not surfaced
+  — the reason FR-139 gives regression its own class rather than folding it into
+  a headline rate. **The OpenClaw/GoClaw harness benchmarks** (Claw-SWE-Bench,
+  WildClawBench, ClawProBench) supply the fixed-adapter protocol and the
+  harness-versus-model attribution that motivates FR-138, plus deterministic
+  grading with repeated-trial reliability. **Claude Code's** telemetry discipline
+  was already adopted in §11; its eval history supplies the negative lesson that
+  a reasoning-effort change can pass internal evals and still degrade in the
+  field, which is FR-140's justification rather than a footnote.
+- **Alternatives considered**: Keeping the single-run gate and raising the
+  threshold (rejected — raises the false-block rate without improving resolution;
+  the problem is variance, not the bar); running k trials but reporting the mean
+  (rejected — hides the consistency question that `pass^k` exists to ask, and a
+  safety case that passes 8 of 10 has failed); defaulting `inconclusive` to
+  `pass` to keep CI moving (rejected — it converts an unmeasured change into a
+  shipped one, which is the exact failure the gate exists to prevent, and it is
+  the path of least resistance so it must be closed by construction); serving
+  eval trials from the warm pool for speed (rejected — pooled state produces
+  correlated failures and inflated scores, a documented failure mode, and the
+  latency it saves is spent on measurement nobody can trust); a vendor
+  observability platform's judge and dataset features for the production layer
+  (rejected — it is content leaving the boundary into a system whose reads leave
+  no FR-118 receipt, the same reasoning as §27, and the in-boundary scorer gets
+  the capability without the exception); hosting the corpus *and* the gate
+  externally (rejected in §27 and unchanged — the corpus may be hosted, the
+  decision may not); one global corpus for skills, tools, plans, and policies
+  (rejected — it measures the platform, not the artifact, and does not scale with
+  a catalog); grading trajectories against a required step sequence (rejected —
+  penalises valid alternative solutions, the brittleness that makes process
+  grading unpopular for good reason; an acceptable-action set keeps the signal
+  without the brittleness); judging with the same model family as the agent
+  (rejected — systematic self-flattery); and treating efficiency as a report-only
+  metric (rejected — on a platform whose stop signal is cost, an ungated
+  efficiency regression is an incident that ships with a green check).
+
 ## Resolved unknowns summary
 
 | Technical Context item | Resolution |
@@ -666,5 +776,6 @@ not measurable from the designed data.
 | Catalog/token/reliability gap-closure | Descriptor injection scan; audience-bound tokens; eval-gated stuck detection; hybrid Gate-3 classifier (§25) |
 | Durable state artifacts | Condensation / Checkpoint / Snapshot separated; write-ahead idempotency claim; replay vs resume vs fork; harness digest; eval-gated compaction (§26) |
 | Ecosystem integration | Optional adapters behind existing ports; one authority boundary; gateway as transport not router; OTLP-only observability; conformance-recorded capability matrix (§27) |
+| Evaluation measurement | k-trial statistical gate with `pass^k`/intervals and a three-valued verdict; environment digest + cold sandboxes; suite classes with graduation; in-boundary online scorer + rollout guardrail; pinned calibrated cross-family judge; fork-based trajectory cases; per-artifact suites + scheduled re-run; efficiency in the gate; measured held-out gap; eval entities made first-class (§28) |
 
 **No `NEEDS CLARIFICATION` remain.** Proceed to Phase 1.
