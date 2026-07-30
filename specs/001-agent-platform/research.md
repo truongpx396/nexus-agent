@@ -175,18 +175,66 @@ Technical Context — so no `NEEDS CLARIFICATION` remains before Phase 1.
 
 ## 11. Observability & evals-in-CI
 
-- **Decision**: OpenTelemetry spans over the append-only event log; per-turn
-  token/cost/latency spans; monitor decision structure without reading conversation
-  content, keeping prompts inspectable for authorized debugging. Eval set (~20 real
-  cases) with an LLM-as-judge rubric + end-state checks runs in CI and gates any
-  prompt/tool/model/skill change; ship only at ≥90% pass AND zero regressions;
-  held-out grader tests the agent cannot edit.
-- **Rationale**: You can't operate what you can't see; agents are non-deterministic
-  between runs. Governed, eval-gated config separates a demo from a safely-changeable
-  system (Constitution IX + Workflow section; FR-040, FR-042–FR-044).
+- **Decision**: Telemetry is a **content-free signal class** derived from the
+  append-only event log. Spans are emitted from durable events rather than held in
+  process memory; traces are **turn-scoped and linked** rather than one long root
+  span per run; events and spans carry a **bidirectional join key**
+  (`trace_id`/`span_id` on the event, `session.id`/`seq` range/`root_session_id`
+  on the span); attributes are **allowlisted by key** with bounded lengths and no
+  flag that admits content; the internal attribute model is versioned and mapped
+  to a pinned `gen_ai.*` convention at the exporter; metric label sets are fixed
+  with per-run detail reached through exemplars; W3C trace context propagates into
+  sandbox, connector/MCP, provider, and child sessions; duration is reported as
+  active vs suspended, and every latency SLI uses active time. Reading decrypted
+  content is a **scoped, expiring, receipt-emitting grant** (FR-118), not an
+  operator capability. Eval set (~20 real cases) with an LLM-as-judge rubric +
+  end-state checks runs in CI and gates any prompt/tool/model/skill change; ship
+  only at ≥90% pass AND zero regressions; held-out grader tests the agent cannot
+  edit; production cases enter the corpus only through a consented, redacted,
+  governance-signed export (FR-125).
+- **Rationale**: Four forces decide this shape. (1) **Erasure**: content is
+  envelope-encrypted and erased by key destruction (§14), but telemetry leaves
+  through an export path the key does not reach — a single prompt fragment on a
+  span is an unencrypted copy outside the shredding boundary that falsifies an
+  erasure attestation, so the only safe design is a signal class that structurally
+  cannot carry content. (2) **Long, suspendable, killable runs**: OpenTelemetry
+  exports a span only when it ends, and a run that suspends hours on an approval
+  or dies mid-turn is exactly the run an operator needs — turn-scoped traces
+  emitted from the log are the only variant that survives both, and they make
+  `telemetry_sink_mode = local` the same code path with a different sink. (3)
+  **Convention instability**: the GenAI semantic conventions moved to their own
+  repository in June 2026, remain pre-stable, and have already renamed
+  `gen_ai.system` and the token attributes — alerting defined directly in that
+  vocabulary inherits its churn, so the internal model is the source of truth and
+  the convention is a translation at the boundary, versioned like the event
+  envelope (§18). (4) **Cardinality**: at SC-008 concurrency, session/user/request
+  identifiers as metric labels take the monitoring system down before the
+  platform; they belong on spans, reachable from a metric via exemplars.
+  Separately, reading a customer's conversation was the platform's only privileged
+  operation with no receipt, in a system where every mutating action has one — an
+  asymmetry that a compliance reviewer finds immediately.
+- **Comparison set**: Claude Code ships the most concrete model of this — three
+  signals, ~15 named events, content **off by default** behind explicit flags with
+  a content-length cap, cardinality toggles, `prompt.id`/`message.uuid`/
+  `tool_use_id` correlation into the transcript, and W3C context propagation into
+  subprocesses. This platform adopts its correlation and cardinality discipline
+  and diverges deliberately on two points: content is not *default-off* but
+  *absent*, because a multi-tenant platform with a crypto-shredding erasure
+  guarantee cannot offer a flag whose use silently voids it; and spans are derived
+  from the log rather than emitted in-process, which a single-user CLI does not
+  need. OpenHands, OpenClaw, GoClaw, and Hermes bind a session id into logs or
+  JSONL transcripts without a span/attribute contract; none reconciles telemetry
+  with an erasure boundary.
 - **Alternatives considered**: Content-reading observability (rejected — privacy/
-  compliance); ship-on-green-only without regression check (rejected — allows
-  silent regressions, spec-gaming).
+  compliance, and it breaks erasure); content behind a debug flag as Claude Code
+  does (rejected for this platform — a flag that voids an erasure attestation is
+  not a safe default even when off, and the audited log read of FR-118 serves the
+  same need with a receipt); one long root span per run (rejected — exports late
+  or never, exactly for the runs that matter); emitting `gen_ai.*` directly as the
+  internal model (rejected — pre-stable vocabulary as a dashboard contract);
+  session/user as metric labels (rejected — unbounded cardinality); ship-on-
+  green-only without regression check (rejected — allows silent regressions,
+  spec-gaming).
 
 ## 12. Deployment topologies & packaging
 
@@ -470,6 +518,62 @@ not measurable from the designed data.
 
 ---
 
+## 26. Durable state: three artifacts, write-ahead effects, and replay vs fork
+
+- **Decision**: Separate the three durable artifacts the design had collapsed into
+  one — a **Condensation** (model-facing context compaction, FR-015), a
+  **Checkpoint** (machine-facing resume record carrying the in-flight claim, held
+  reservation, sandbox handle, pending approval digest, provider request id, open
+  delegations, and harness digest, FR-024/FR-126), and a **Snapshot** (disposable
+  projection cache that bounds hydration, FR-126). Commit the exactly-once
+  **idempotency claim write-ahead**, before a state-changing effect leaves the
+  process, and resolve an `in_flight` claim on resume by provider probe or human
+  decision, never by re-execution (FR-127). Define three named operations —
+  `replay` (pure), `resume` (same run), `fork` (new run from seq N with overrides
+  and effects disabled) — instead of one undifferentiated "replay" (FR-128). Pin a
+  single **harness digest** covering system prompt, tool catalog, skills, and
+  safety/approval policy versions, doubling as the cache-prefix identity (FR-129).
+  Treat compaction as eval-gated, chain-bounded, cache-ordered, and
+  latency-declared (FR-130).
+- **Rationale**: The durable-execution literature names the failure this closes as
+  "the dangerous middle": a checkpoint records *where a run was*, never *whether
+  the payment was taken* — so a dedup record written after a successful effect
+  protects against a retried call but not a crash during one, and neither a
+  compaction nor a checkpoint can answer the question. Version drift is the other
+  named replay failure: a step that depends on model version, prompt text, tool
+  schema, retrieval index, memory snapshot, sandbox image, and policy rules
+  diverges on replay if any one moves, which is why the harness digest pins the
+  four determinants FR-088 didn't. Compaction is lossy by construction and
+  repeated: published probe-based comparisons score every method 2.19–2.45/5.0 on
+  artifact tracking while all achieve 98–99% compression — so compression ratio is
+  not a quality measure — and a long run compacts 10–100 times, compounding
+  degradation that no single-compaction benchmark captures. Serving a
+  pre-compaction cached prefix into a post-compaction turn is a real, shipped bug
+  class (Claude Code v2.1.62), which is why the cache boundary at a `condensation`
+  is ordered and regression-tested rather than assumed.
+- **Comparison set**: SWE-agent's `.traj` is versioned and records
+  fully-qualified component names precisely so a replay reconstructs the same
+  harness — the same instinct as the harness digest, at file granularity.
+  OpenHands splits conversation metadata from the event store and paginates event
+  pages, the same hydration concern the Snapshot answers. OpenClaw explicitly
+  declines to replay on sequence gaps ("clients refresh state and continue"),
+  which is a defensible choice for a single-operator gateway and not available to
+  a platform whose audit and cost attribution derive from the log. None of the
+  comparison set separates a compaction artifact from a resume record, and none
+  commits an idempotency claim write-ahead — this platform's event-sourced base
+  makes both cheap, so the divergence is a strict improvement rather than a
+  trade-off.
+- **Alternatives considered**: One `Checkpoint` carrying `condensed_state` for
+  both purposes (rejected — the two have different consumers, retention, and
+  failure modes, and the conflation hides that a compaction cannot answer whether
+  an effect completed); dedup on success only (rejected — leaves an unresolvable
+  window across a crash mid-effect); re-executing an `in_flight` claim on resume
+  (rejected — duplicates payments and sends); discarding it (rejected — loses the
+  effect silently); a single "replay" verb (rejected — the incident runbook needs
+  a *fork* with effects disabled, and calling it replay invites a re-execution
+  against production); compaction quality measured by compression ratio (rejected
+  — indistinguishable ratios hide materially different information loss).
+
 ## Resolved unknowns summary
 
 | Technical Context item | Resolution |
@@ -484,7 +588,7 @@ not measurable from the designed data.
 | Memory/skills | File-first, per-tenant, gated promotion (§8) |
 | Reliability | Classify/resume/circuit-break/stuck/rainbow (§9) |
 | Security | Layered fail-closed, Rule of Two, vault, receipts (§10) |
-| Observability/evals | OTel structure-only + eval gate in CI (§11) |
+| Observability/evals | Content-free signal class derived from the log; turn-scoped linked traces; bidirectional trace↔event join; versioned attribute model mapped to pinned `gen_ai.*`; fixed metric labels + exemplars; audited content-access grants; eval gate in CI (§11) |
 | Deployment | Control/data-plane split, config-not-forks (§12) |
 | Isolation under pooling | Transaction-local scope; test through PgBouncer (§13) |
 | Erasure vs append-only | Crypto-shredding; never delete or rewrite events (§14) |
@@ -499,5 +603,6 @@ not measurable from the designed data.
 | Test determinism | Recorded/fake provider + property tests (§23) |
 | Sequencing | Evals foundational; explicit MVP cut line (§24) |
 | Catalog/token/reliability gap-closure | Descriptor injection scan; audience-bound tokens; eval-gated stuck detection; hybrid Gate-3 classifier (§25) |
+| Durable state artifacts | Condensation / Checkpoint / Snapshot separated; write-ahead idempotency claim; replay vs resume vs fork; harness digest; eval-gated compaction (§26) |
 
 **No `NEEDS CLARIFICATION` remain.** Proceed to Phase 1.

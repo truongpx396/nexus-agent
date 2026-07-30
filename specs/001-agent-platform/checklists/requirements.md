@@ -65,6 +65,30 @@ are now resolved in the spec (FR-080–FR-097), data model, contracts, and resea
 - [x] `autonomy_level` has normative semantics, ratchets one way, and sits in one published total resolution order where a deny is final and safety/Rule-of-Two are unconditional (FR-111)
 - [x] The authorization decision is chained and the gate is red-teamed, not asserted (FR-112, SC-005, SC-029)
 
+### Guardrails, catalog trust & classification (comparative audit 2026-07-29)
+
+- [x] Tool/connector/MCP descriptors scanned for injected instructions at admission and on version bump (FR-113, SC-030)
+- [x] Connector/MCP tokens audience-restricted; a non-restrictable provider is rejected, not worked around (FR-114, SC-031)
+- [x] Stuck detection eval-gated against negative cases; first trip signals, second terminates (FR-115, SC-032)
+- [x] Gate-3 safety classifier committed to a hybrid rule-then-model shape with a fail-closed timeout (FR-116, SC-032)
+
+### Observability & state management (design review 2026-07-30)
+
+- [x] Telemetry is a content-free signal class enforced by a deny-by-default attribute allowlist, so it stays inside the crypto-shredding erasure boundary (FR-117, SC-033)
+- [x] Reading decrypted content is a scoped, expiring, receipt-emitting grant — not an ambient operator capability (FR-118, SC-034)
+- [x] Trace and event log join in **both** directions; the join key ships as a foundational schema seam (FR-119, SC-035)
+- [x] Span model survives long, suspendable, and killed runs: turn-scoped, log-derived, active-time SLIs (FR-120, SC-035)
+- [x] Telemetry attribute schema versioned internally and mapped to a pinned `gen_ai.*` convention at the exporter (FR-121)
+- [x] Metric label sets fixed; per-run detail reached via exemplars, not high-cardinality labels (FR-122)
+- [x] W3C trace context propagates into sandbox, connector/MCP, provider, and child sessions (FR-123)
+- [x] Cost records are log projections shipped through a durable outbox — accounting is delayed by an outage, never lost (FR-124, SC-039)
+- [x] Production→eval corpus growth has a consented, redacted, governance-signed export path rather than trace reading (FR-125)
+- [x] Condensation / Checkpoint / Snapshot separated, with the resume set enumerated and hydration bounded (FR-126)
+- [x] Idempotency claims committed write-ahead and resolved on resume by probe or human, never by re-execution (FR-127, SC-036)
+- [x] `replay` / `resume` / `fork` defined as three operations with distinct guarantees (FR-128, SC-037)
+- [x] A single harness digest pins every behavior-determining artifact and doubles as the cache-prefix identity (FR-129)
+- [x] Compaction fidelity eval-gated, chain depth bounded, cache boundary ordered, execution mode declared (FR-130, SC-038)
+
 ## Notes
 
 - Items marked incomplete require spec updates before `/speckit.clarify` or `/speckit.plan`

@@ -49,7 +49,12 @@ erDiagram
     DELEGATION ||--o| SESSION : creates_child
     SESSION ||--o{ EVENT : appends
     SESSION ||--o{ COST_RECORD : meters
-    SESSION ||--o{ CHECKPOINT : snapshots
+    SESSION ||--o{ CHECKPOINT : resumes_from
+    SESSION ||--o{ SNAPSHOT : hydrates_from
+    SESSION ||--o{ IDEMPOTENCY_CLAIM : claims
+    SESSION ||--o| SESSION : forked_from
+    SESSION ||--o{ CONTENT_ACCESS_GRANT : read_under
+    CONTENT_ACCESS_GRANT ||--o{ AUDIT_RECEIPT : records
     SESSION ||--o{ APPROVAL : gates
     SESSION ||--o{ INPUT_REQUEST : asks
     TENANT ||--o{ APPROVAL_POLICY : governs
@@ -266,6 +271,10 @@ tenant, replayable and auditable (FR-006, FR-041).
 | `user_id` | UUID (FK) | Delegated identity |
 | `agent_id` | UUID (FK) | |
 | `agent_version` | int | **Pinned at run start and held for the run's life** so a concurrent deploy cannot shift behavior or bust the prompt prefix mid-run (FR-088, FR-013) |
+| `harness_digest` | bytea | Identity of *all* behavior-determining config in force: stable system-prompt version, resolved tool catalog, skill versions, safety/permission policy version, approval-policy version. Pinned at run start; also the cache-prefix identity (FR-129, FR-013) |
+| `forked_from_session_id` | UUID (nullable) | Source run when this session was produced by `fork` (FR-128); NULL for an original run |
+| `fork_seq` | bigint (nullable) | Sequence in the source run this fork branched at (FR-128) |
+| `fork_overrides` | jsonb (nullable) | Declared divergences from the source run (agent version, prompt, tool catalog, model) — what the fork is testing |
 | `data_label` | enum | `public` / `internal` / `regulated` — drives deterministic routing (FR-037) |
 | `route_model_id` | string | The routing decision actually taken (auditable, replayable) |
 | `route_reason` | jsonb | Why that model: data label, difficulty, capability floor (FR-076) |
@@ -281,6 +290,7 @@ tenant, replayable and auditable (FR-006, FR-041).
 | `status` | enum | `queued` / `running` / `suspended` / `terminal` — *projection* |
 | `autonomy_level` | enum | `read_only` / `supervised` / `full`, **pinned at run start** and ratcheting — tightenable mid-run, never widenable by any path (FR-111) |
 | `terminal_reason` | enum (nullable) | `completed` / `max_turns` / `cost_exhausted` / `error` / `aborted` / `prompt_too_long` / `hook_stopped` / `approval_expired` / `input_expired` (FR-004) — *projection* |
+| `active_ms` / `suspended_ms` | bigint | Duration split; **every latency SLI is measured on `active_ms`** so human decision latency does not consume the run's error budget (FR-120, FR-095) — *projections* |
 | `created_at` | timestamptz | |
 
 - **Concurrency**: per-session serial (lock on `session_key`), cross-session concurrent.
@@ -290,6 +300,8 @@ tenant, replayable and auditable (FR-006, FR-041).
 - **Suspension**: a session awaiting human approval, an input request, or a long external job sits in `suspended` at **zero ongoing token cost**, resumed by an event rather than polled (FR-036, FR-110).
 - **Autonomy ratchet**: `autonomy_level` is pinned at run start like `agent_version` and may only move toward *more* restrictive within the run. No model output, tool result, steering message, hook, or delegation parameter may widen it — a mid-run widening is a direct prompt-injection lever (FR-111).
 - **No approval outlives its run**: reaching any terminal state, being cancelled, being reaped, or breaching a ceiling invalidates every outstanding `Approval` and `Input Request` for the session *before* the terminal event is appended (FR-106).
+- **Harness digest is pinned like `agent_version`** and never changes mid-run: a change is by definition a new cache prefix, so a mid-run change would both bust the prefix (FR-013) and make the run unreproducible (FR-129).
+- **A fork is a new run, not an annotation**: it gets its own `session_id`, its own cost attribution and audit chain, inherits no approvals (FR-106), and runs with external effects disabled or sandbox-confined (FR-128). `forked_from_session_id` is written at creation and never updated.
 
 ### Event
 A typed, timestamped, attributable record appended to the log — the single source
@@ -310,6 +322,7 @@ of truth (FR-002, FR-003, FR-040).
 | `tool_id` | string (nullable) | For `tool_use` / `tool_result` |
 | `pair_ref` | UUID (nullable) | Links `tool_result` to its `tool_use` (invariant, FR-003) |
 | `model_id` | string (nullable) | For model-produced events |
+| `trace_id` / `span_id` | bytea (nullable) | The trace and span current when this event was appended — the join key that makes a span resolvable to an event range and back (FR-119). A **foundational** column: retrofitting it onto historical events is exactly the migration an append-only log exists to avoid |
 | `created_at` | timestamptz | |
 
 **Event taxonomy** (`type`) — must be complete enough to replay any run from the
@@ -318,15 +331,16 @@ log alone, and identical to the externally published event contract (FR-085):
 | Group | Types |
 |-------|-------|
 | Model output | `thought` · `content` · `tool_use` |
-| Tool | `tool_result` (incl. synthetic) · `tool_receipt_ref` |
-| Context | `condensation` · `checkpoint` |
+| Tool | `tool_result` (incl. synthetic) · `tool_receipt_ref` · `effect_claimed` · `effect_claim_resolved` (write-ahead idempotency claim and its outcome, FR-127) |
+| Context | `condensation` (model-facing compaction, FR-015/FR-130) · `checkpoint` (machine-facing resume record, FR-024/FR-126) — **distinct artifacts, never interchangeable** |
 | Human (push) | `user_message` (the mid-run steering input of FR-005) |
 | Human (pull) | `input_requested` · `input_answered` · `input_expired` · `input_invalidated` (FR-110) |
 | Approval | `approval_requested` · `approval_notified` · `approval_reminded` · `approval_escalated` · `approval_granted` · `approval_granted_modified` · `approval_denied` · `approval_expired` · `approval_invalidated` · `approval_resolution_refused` · `approval_mismatch` (FR-036, FR-103–FR-108) |
 | Safety | `taint_transition` · `sanitization_boundary` (FR-087) |
 | Delegation | `delegation_requested` · `delegation_refused` (bound/scope/admission) · `delegation_returned` · `delegation_reaped` (FR-098–FR-101) |
 | Orchestration | `plan_started` · `plan_step_entered` · `plan_transition` · `plan_step_exited` · `plan_completed` (FR-102) |
-| Lifecycle | `error` · `stuck_suspected` (first stuck-heuristic trip, non-terminal, FR-115) · `terminal` (carries the FR-004 typed reason) · `erasure` (FR-080) |
+| Observability | `content_access_granted` · `content_accessed` · `content_access_refused` (FR-118) |
+| Lifecycle | `error` · `stuck_suspected` (first stuck-heuristic trip, non-terminal, FR-115) · `forked` (recorded on the source run when a fork branches from it, FR-128) · `terminal` (carries the FR-004 typed reason) · `erasure` (FR-080) |
 
 - **Invariant**: every `tool_use` has a paired `tool_result` (synthetic on cancel/error) before the next model call — a **total** invariant over all histories, therefore property-tested (FR-097).
 - **Replay completeness**: a run whose steering, approval outcome, or termination cannot be reconstructed from these events alone violates FR-006.
@@ -382,7 +396,9 @@ evaluates at **zero model-token cost** (FR-102). See
 - **In-flight runs finish on the version they started with** (FR-026).
 
 ### Checkpoint
-Durable snapshot enabling resume-from-last-checkpoint rather than restart (FR-024).
+The **machine-facing** resume record: everything a fresh worker needs to continue
+a killed run correctly (FR-024, FR-126). Its failure mode is a duplicated or
+orphaned side effect — which is why it is not the same object as a compaction.
 
 | Field | Type | Notes |
 |-------|------|-------|
@@ -390,8 +406,79 @@ Durable snapshot enabling resume-from-last-checkpoint rather than restart (FR-02
 | `session_id` | UUID (FK) | |
 | `tenant_id` | UUID (FK) | RLS key |
 | `last_seq` | bigint | Event seq covered |
-| `condensed_state` | jsonb | Structured checkpoint (durable memory, exec summary, verbatim requirements) |
+| `harness_digest` | bytea | The config the run was executing under; a resume under a different digest is a divergence, not a resume (FR-129) |
+| `in_flight_claim_id` | UUID (nullable) | The `IdempotencyClaim` open at checkpoint time — the field that distinguishes "the effect happened" from "the effect may have happened" (FR-127) |
+| `reservation_id` | UUID (nullable) | Budget reservation held at checkpoint time, so a resume reconciles rather than double-reserves (FR-083) |
+| `sandbox_handle` | jsonb (nullable) | Sandbox/workspace identity and the durability status of its workspace (FR-047) |
+| `pending_oversight` | jsonb (nullable) | Outstanding approval / input request and the digest it binds (FR-103, FR-110) |
+| `provider_request_id` | string (nullable) | In-flight provider request, so a resume can reconcile a stream that may have completed upstream (FR-027, FR-066) |
+| `open_delegations` | jsonb (nullable) | Children outstanding at checkpoint time, each needing a paired result on resume or reap (FR-100) |
 | `created_at` | timestamptz | |
+
+- **A condensation is not a checkpoint**: the `condensation` event is model-facing context management (FR-015) and cannot answer whether an external effect completed. Conflating the two was the defect FR-126 closes.
+- **Written at effect boundaries**, not on a timer — a checkpoint whose boundaries do not align with the replay boundaries is a snapshot of the wrong thing.
+
+### Snapshot
+A **disposable projection cache** at a sequence, whose only job is to bound
+hydration cost (FR-126). Rebuildable by replay and safely discardable — never a
+source of truth (FR-086).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `snapshot_id` | UUID (PK) | |
+| `session_id` | UUID (FK) | |
+| `tenant_id` | UUID (FK) | RLS key |
+| `at_seq` | bigint | Sequence the projected state is valid as of |
+| `projection_version` | int | Version of the projection code that wrote it; a bump invalidates every snapshot rather than silently serving stale shape |
+| `state` | jsonb *(encrypted)* | Projected state; ciphertext under the tenant key like any other content (FR-089) |
+| `created_at` | timestamptz | |
+
+- **Deletable at will**: dropping every snapshot costs hydration time and nothing else. If dropping one changes behavior, it was being used as truth — a defect.
+- **Bounds hydration**: replay cost is bounded by `head_seq − at_seq`, not by run length, which is what makes worker pickup on a long-running session predictable (FR-126).
+
+### Idempotency Claim
+The **write-ahead** record of an intended external effect (FR-127, FR-071). It is
+committed *before* the effect leaves the process, which is the only ordering that
+survives a crash mid-effect.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `claim_id` | UUID (PK) | |
+| `tenant_id` | UUID (FK) | RLS key — dedup is tenant-scoped |
+| `session_id` | UUID (FK) | |
+| `idempotency_key` | string | Derived from the canonical digest of `tool_id` + resolved input — the same artifact the approval binds and step 9a re-verifies (FR-103) |
+| `pair_ref` | UUID | The `tool_use` this claim answers |
+| `state` | enum | `in_flight` / `completed` / `failed` / `abandoned` |
+| `resolution` | enum (nullable) | How an `in_flight` claim was closed on resume: `probe_confirmed` / `probe_absent` / `human_resolved` |
+| `result_ref` | UUID (nullable) | The `tool_result` event recording the outcome |
+| `attempts` | int | Bounded; exceeding the bound raises an operational signal rather than retrying (FR-095) |
+| `created_at` / `resolved_at` | timestamptz | |
+
+- **Uniqueness**: one row per `(tenant_id, idempotency_key)`; a second invocation with the same key does not execute, it reads.
+- **Resume rule**: an `in_flight` claim is resolved by provider probe or by human escalation — **never** by re-execution, and never discarded as if unattempted (FR-127).
+- **Unresolved is an alert, not a cleanup**: every stranded claim is a possible duplicated or lost external effect and is surfaced, not swept.
+
+### Content Access Grant
+The authorization transaction for reading decrypted conversation content — the
+platform's only other privileged operation that must be as provable as an approval
+(FR-118).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `grant_id` | UUID (PK) | |
+| `tenant_id` | UUID (FK) | RLS key — the tenant whose content may be read |
+| `scope` | jsonb | Session id or bounded session set; never "all sessions" |
+| `requester_user_id` | UUID | Who will read |
+| `authorizer_user_id` | UUID | Who authorized — MUST differ from the requester for another tenant's content |
+| `purpose` | text | Stated reason, recorded for the receipt |
+| `expires_at` | timestamptz | Bounded; expiry is denial |
+| `status` | enum | `active` / `expired` / `revoked` — *projection* of the grant events |
+| `read_count` | int | Reads performed under it — *projection* |
+| `created_at` | timestamptz | |
+
+- **Every read emits its own receipt**, not just the grant, so the audit answers *what was read*, not merely *that access was possible* (FR-081, FR-118).
+- **Never an authorization to act**: a content-access grant can never satisfy an approval gate (FR-036), and agent/service principals are refused outright.
+- **Refusals are recorded** and reported as a signal (FR-095) — repeated refused reads are an insider-risk indicator, not noise.
 
 ### Cost Record
 Per-task and per-tenant token/cost accounting with hard ceilings and an explicit
@@ -417,7 +504,11 @@ exhaustion reason (FR-016, FR-017).
 | `root_session_id` | UUID | Root of the delegation tree; the key ceilings, showback, and chargeback roll up to (FR-101, FR-093) |
 | `depth` | int | Position in the tree; 0 for a root run |
 | `model_id` | string | |
+| `harness_digest` | bytea | Config the turn ran under — makes cache-read attributable to a known prefix rather than an unlabeled one (FR-129, FR-013) |
+| `reservation_id` | UUID (FK) | The reservation this record reconciles (FR-083) |
+| `outbox_state` | enum | `pending` / `shipped` / `acked` — delivery to the control plane's accounting store, at-least-once and idempotent on `(session_id, turn_seq, reservation_id)` (FR-124) |
 
+- **Cost is a projection of the log, shipped through an outbox** — the record is appended in the same transaction as the turn and delivered separately (FR-124). A failed upstream call delays accounting; it never loses it. Outbox backlog is a reported signal (FR-095).
 - **Cache-read rate** = `input_tokens_cache_read / (uncached + cache_read + cache_write)`, computed from recorded measurements, never estimated (SC-017).
 - **Enforcement is pre-spend**: see `Budget Reservation` below. Post-hoc rolling sums reconcile; they do not gate.
 - **Tree roll-up**: a run's true cost is `SUM(cost_usd) WHERE root_session_id = :root`. Attributing only to `parent_session_id` cannot reconstruct a multi-hop delegation and understates a nested tree (FR-101, SC-022).
@@ -665,7 +756,22 @@ hard resource limits; the trust boundary for all code/shell execution
   without cross-record correlation (FR-101).
 - **Append-only**: `Event` is never updated or deleted; `seq` is monotonic per
   session and the ordering is the source of truth for replay. Every event carries
-  a `schema_version` and an upcasting path keeps old events replayable (FR-086).
+  a `schema_version` and an upcasting path keeps old events replayable (FR-086),
+  and a `trace_id`/`span_id` so a trace resolves to a replayable event range and
+  back (FR-119).
+- **Three artifacts, not one**: `condensation` (model-facing context, FR-015),
+  `Checkpoint` (machine-facing resume, FR-024), and `Snapshot` (disposable
+  projection cache, FR-126) are distinct. A compaction cannot answer whether an
+  external effect completed; a snapshot may be deleted with no behavioral change.
+- **Write-ahead before the effect**: an `IdempotencyClaim` is committed
+  `in_flight` *before* a state-changing invocation leaves the process and resolved
+  by probe or human decision on resume — never by re-execution (FR-127). A
+  checkpoint records where a run was; only the claim records what it may have
+  done.
+- **Replay, resume, fork are different operations**: `replay` reconstructs state
+  with no model call, tool execution, or external effect; `resume` continues the
+  same run from its `Checkpoint`; `fork` creates a new `Session` from a source run
+  at `fork_seq` with effects disabled (FR-128).
 - **Projections, not truth**: `Session.status` / `terminal_reason` / `taint_state`,
   `Approval.status`, `InputRequest.status`, `Sandbox.state`, and
   `ConnectorAuthorization.status` are derived from the event log and rebuildable
@@ -673,7 +779,10 @@ hard resource limits; the trust boundary for all code/shell execution
   grant, modification, or denial also emits a chained `Audit Receipt` (FR-112).
 - **Erasure**: content columns are envelope-encrypted per tenant/subject; erasure
   destroys the key (`Encryption Key.status = destroyed`) rather than deleting
-  rows, preserving replay structure and audit-chain verification (FR-080).
+  rows, preserving replay structure and audit-chain verification (FR-080). The
+  erasure boundary is only as wide as the set of places content exists: telemetry
+  is therefore defined content-free (FR-117), and reading decrypted content
+  requires a `Content Access Grant` that leaves its own receipts (FR-118).
 - **Migrations are expand/contract**: additive first, destructive cleanup a later
   release, verified in CI against the previous application version, so a rolling
   deploy never needs two schemas at once (FR-094).

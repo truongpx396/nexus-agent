@@ -178,6 +178,10 @@ interface RunControl {
   cancel(session_id, reason, drain: bool): void       // the ONLY producer of `aborted`
   resume(session_id, from_checkpoint_id?): void       // resume, never restart (FR-024)
   tightenAutonomy(session_id, level): void            // ratchet only — never widens (FR-111)
+
+  // Three distinct operations over the log — NOT one undifferentiated "replay" (FR-128)
+  replay(session_id, to_seq?): ProjectedState         // side-effect-free; no model call, no tool
+  fork(session_id, at_seq, overrides, actor): SessionId  // new run; external effects DISABLED
 }
 ```
 
@@ -197,6 +201,25 @@ interface RunControl {
 - `tightenAutonomy` is one-way. There is no widening operation on this interface,
   and no other seam exposes one: a mid-run autonomy widening would be a direct
   prompt-injection lever (FR-111).
+- `replay` is **pure**: it calls no model, executes no tool, emits no external
+  effect, and appends nothing. It is how projections are rebuilt and how the
+  FR-086 upcasting path is verified. A `replay` that can mutate anything is a
+  defect, not a feature.
+- `resume` continues **the same run** — same `session_id`, `agent_version`,
+  `harness_digest`, budget, and audit chain — from its last `Checkpoint` (FR-024).
+  It MUST resolve any `in_flight` idempotency claim by probe or human escalation
+  before the next turn, never by re-execution (FR-127).
+- `fork` creates a **new run** from `at_seq` with declared `overrides` (agent
+  version, prompt, tool catalog, model), recording `forked_from_session_id` and
+  `fork_seq`, and appends a `forked` event to the source run. External effects are
+  disabled or confined to a scratch sandbox; the fork inherits **no** approvals
+  (FR-106), draws its own budget, and writes its own audit chain — the source
+  run's cost attribution and receipts are untouched. This is the primitive the
+  behavioral-incident runbook needs (FR-096): reproduce a production failure
+  against a candidate fix without touching the run that failed. Forking another
+  tenant's run requires a content-access grant (FR-118), and a fork whose
+  `harness_digest` differs from the source reports the divergence rather than
+  presenting a different configuration's result as a reproduction (FR-129).
 
 ## `Oversight` — the human seam (FR-036, FR-103–FR-112)
 
@@ -261,7 +284,11 @@ type InvalidationReason = "run_cancelled" | "run_terminal" | "reaped"
   hook, or steering message can construct a grant, widen a scope, or mark an
   approval satisfied. Approval scopes do not descend into children (FR-098).
 - **Suspension is durable and free**: the run is checkpointed and evicted, not
-  parked on a held connection or a polling turn (FR-036, FR-046).
+  parked on a held connection or a polling turn (FR-036, FR-046). The checkpoint
+  carries the pending approval and its bound digest (FR-126), the suspended
+  interval is excluded from every latency SLI (FR-120), and rehydrate-to-next-call
+  latency on resolution is itself measured — it is user-visible wait on the
+  oversight path.
 - **Every outcome is paired** (FR-003): grant, denial, expiry, mismatch, and
   invalidation each produce exactly one `tool_result` before the next
   `Provider.stream`.
@@ -303,3 +330,80 @@ interface BudgetGate {
 
 - The worker additionally enforces a **local hard per-run budget synchronously**,
   so a ceiling never depends on a round trip to another plane completing.
+
+## `Persistence` — the three artifacts (FR-024, FR-126, FR-127)
+
+One log, three derived artifacts that are never interchangeable.
+
+```
+interface Persistence {
+  append(event: Event): Seq                     // the only write of truth (FR-006)
+  checkpoint(session_id): CheckpointId          // machine-facing resume record (FR-024)
+  snapshot(session_id, at_seq): SnapshotId      // disposable projection cache (FR-126)
+  hydrate(session_id): SessionState             // snapshot + replay of the tail
+
+  claim(idempotency_key, pair_ref): Claim       // write-ahead, BEFORE the effect (FR-127)
+  resolveClaim(claim_id, resolution): void      // probe_confirmed | probe_absent | human_resolved
+}
+```
+
+- **`checkpoint` ≠ `condensation`.** A checkpoint carries the covered `seq`, the
+  open `in_flight` claim, the held reservation, the sandbox handle, the pending
+  approval digest, the in-flight provider request id, open delegations, and the
+  `harness_digest`. A condensation is model-facing context (FR-015) and cannot
+  answer whether an external effect completed — the question a resume must answer.
+- **`snapshot` is disposable.** Deleting every snapshot costs hydration time and
+  changes nothing else. If dropping one changes behavior, it was being used as
+  truth (FR-086).
+- **`hydrate` is bounded** by `head_seq − snapshot.at_seq`, not by run length —
+  replaying an unbounded history on every worker pickup is not a recovery strategy.
+- **`claim` is committed before the effect leaves the process**, never after. A
+  claim written on success protects against a retried *call* but not a crash
+  *during* one. `resolveClaim` never re-executes (FR-127).
+
+## `Telemetry` — the content-free signal class (FR-117–FR-123)
+
+Telemetry is not a debugging back door. It is a separate signal class with a
+narrower contract than the log, because it leaves through an export path the
+per-tenant content key does not reach.
+
+```
+interface Telemetry {
+  // Attributes are ALLOWLISTED by key. An unlisted key is dropped, not truncated.
+  span(name, attrs: AllowlistedAttrs, links: SpanLink[]): Span
+  metric(name, value, labels: FixedLabelSet, exemplar?: TraceRef): void
+}
+```
+
+- **No content, no flag to add it** (FR-117). Prompt text, model output, tool
+  arguments and results, memory, retrieved documents, and approval context
+  packages never appear on a span, metric, or operational log. Free-text provider
+  errors are reduced to typed classes and digests before export. There is no
+  environment variable, debug mode, or support flag that changes this — because a
+  content-bearing span is an unencrypted copy of customer data outside the
+  crypto-shredding boundary (FR-080), and an erasure attestation that does not
+  cover it is false.
+- **Content is reachable only through the log**, under a `Content Access Grant`
+  that emits a chained receipt on grant and on every read under it (FR-118).
+- **Turn-scoped traces, emitted from the log** (FR-119, FR-120). A run is not one
+  long root span: a span exports only when it ends, so a six-hour approval
+  suspension or a killed worker would export late or never. Each turn (or plan
+  step) is its own trace, linked to its predecessor and carrying `session.id`,
+  `root_session_id`, `depth`, `tenant`, and the covered `seq` range; events carry
+  the reciprocal `trace_id`/`span_id`. Emission is driven from durable events, so
+  telemetry survives a worker kill and can be produced entirely in-boundary when
+  `telemetry_sink_mode = local`.
+- **Active time, not wall-clock** (FR-120). Duration is reported split; every
+  latency SLI is computed on active time, with durable suspension measured on the
+  human-oversight axis instead (FR-095).
+- **Fixed label sets and exemplars** (FR-122). Session, user, task, and request
+  identifiers are span/event dimensions, never metric labels; a metric reaches an
+  individual run through an exemplar.
+- **Context propagates outward** (FR-123): sandbox exec, connector/MCP calls, the
+  provider request, and child sessions all carry W3C trace context, so external
+  latency lands under the turn that caused it rather than as unattributed
+  wall-clock — carrying correlation identifiers only, never tenant identity or
+  content.
+- **The attribute schema is versioned** (FR-121): the internal attribute model is
+  the source of truth and is mapped to a pinned external convention
+  (`gen_ai.*`) at the exporter, with dual-emit across a convention rename.
