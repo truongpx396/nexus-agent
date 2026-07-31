@@ -206,9 +206,90 @@ paths:
                 message: { type: string }
       responses:
         '202': { description: Input queued for the running session }
-  /approvals/{approvalId}:
+  /approvals:
     post:
-      summary: Resolve a pending human approval for a high-impact action (FR-036)
+      summary: Raise an approval request for a high-impact invocation (FR-036, FR-103–FR-109)
+      description: >
+        Creates the approval **transaction**. The request MUST carry
+        `approved_input_digest` — the canonical digest over the tool identity plus
+        the fully resolved input as it will execute — because an approval
+        authorizes a specific resolved invocation, never an intent (FR-103). The
+        same digest keys the FR-071 exactly-once dedup record, so what was
+        approved, what executes, and what de-duplicates are provably one artifact.
+        A `batch` or `plan_preauth` request MUST enumerate its members by digest
+        (FR-109); neither may widen blast radius. Routing is filtered by each
+        candidate channel's declared, conformance-tested surface capability, and a
+        policy naming an effect class no configured channel can serve is refused
+        here rather than discovered at expiry (FR-155).
+      operationId: requestApproval
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalRequest'
+      responses:
+        '201':
+          description: Approval raised; the run suspends durably at zero token cost (FR-036)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Approval'
+        '400':
+          description: >
+            Typed refusal — `missing_input_digest` (FR-103), `unenumerated_batch`
+            (FR-109), `context_mode_forbidden` (residency forbids `upstream`
+            rendering, FR-104/FR-091), `policy_violation` (FR-109), or
+            `no_capable_channel` (no configured surface can render this effect
+            class or carry its step-up challenge, FR-155)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalError'
+  /approvals/{approvalId}:
+    get:
+      summary: Fetch a pending approval and its decision-ready context package (FR-104)
+      description: >
+        Returns the context package under the tenant's versioned redaction policy.
+        An approver is NEVER presented with identifiers alone — that is a defect,
+        not a conservative default, because it manufactures the automation bias
+        human oversight exists to prevent (FR-104, SC-025). Under
+        `approval_context_mode = local` the package is rendered and resolved
+        entirely inside the data plane and this endpoint returns only the decision
+        surface; only the decision, approver identity, and digests cross the
+        boundary (FR-091).
+      operationId: getApproval
+      parameters:
+        - name: approvalId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The approval and its context package
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Approval'
+        '404': { description: Not found or not visible to this tenant (FR-039) }
+  /approvals/{approvalId}/resolve:
+    post:
+      summary: Resolve a pending approval — grant, grant-with-modification, or deny (FR-105, FR-107)
+      description: >
+        Resolution is authorized in its own right, not merely authenticated. It is
+        accepted ONLY from a **human principal** holding the approve scope for that
+        effect class; agent, service, and delegated non-human principals resolve
+        nothing (FR-105, FR-158). Irreversible classes require a resolver distinct
+        from the run's initiating user, and tenant-designated high-value classes
+        require step-up re-authentication at resolution time. The request MUST
+        carry the single-use `resolution_token` bound to `(approval_id, resolver)`,
+        invalid after first use and after TTL — a consumer-messaging callback is an
+        untrusted inbound channel whose provider signature authenticates the
+        transport, never the decision (FR-082, FR-105). Every attempt, including
+        every refused one, is audited and emits its own hash-chained receipt
+        (FR-112). In `grant_modified` the approver's input becomes authoritative,
+        the digest is recomputed over it, and the agent is NOT told the request ran
+        unmodified (FR-107).
       operationId: resolveApproval
       parameters:
         - name: approvalId
@@ -220,31 +301,141 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              required: [decision]
-              properties:
-                decision: { type: string, enum: [grant, deny] }
-                scope:
-                  type: string
-                  enum: [once, session, standing]
-                  default: once
-                  description: >
-                    Scopes wider than `once` MUST name the tool and effect class they
-                    cover and MUST carry an expiry — no scope permanently ungates a
-                    class of high-impact action (FR-036).
-                scope_tool_id: { type: string }
-                scope_effect_class:
-                  type: string
-                  enum: [payment, delete, external_send, prod_change, other]
-                scope_expires_at: { type: string, format: date-time }
+              $ref: '#/components/schemas/ApprovalResolution'
       responses:
-        '200': { description: Approval resolved }
+        '200':
+          description: Approval resolved; a chained authorization receipt is emitted (FR-112)
+        '403':
+          description: >
+            Resolution refused and audited as `approval_resolution_refused` —
+            agent/service principal, requester acting on an irreversible class,
+            missing `approve:<effect_class>` scope, replayed or forged token, or a
+            missing step-up assertion (FR-105, SC-025)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalError'
+        '409':
+          description: >
+            Approval was invalidated before this decision arrived — the run was
+            cancelled, terminated, reaped, ceiling-breached, or steered. The
+            decision performs NOTHING and is recorded as a refused resolution: an
+            approval MUST NOT outlive the plan it authorized (FR-106, SC-026)
         '410':
           description: >
-            Approval already expired (TTL elapsed, fail-closed). The action did not
-            proceed; the denial was returned to the loop as a typed synthetic
-            tool_result so the agent could replan, and the run terminated with
-            approval_expired only if it could not proceed without it (FR-036)
+            Approval already expired (TTL elapsed after notification, reminder, and
+            escalation — fail-closed, FR-036/FR-108). The action did not proceed;
+            the denial was returned to the loop as a typed synthetic tool_result so
+            the agent could replan, and the run terminated with `approval_expired`
+            only if it could not proceed without it
+  /approvals/invalidate:
+    post:
+      summary: Invalidate every outstanding approval for a run (FR-106)
+      description: >
+        Invoked when the run state an approval was requested against goes away —
+        cancellation (FR-005), any terminal reason (FR-004), a delegation reap
+        (FR-100), a budget-ceiling breach, or mid-run steering that arrived while
+        the run was suspended on the approval (the human just changed the plan the
+        approval authorized). Invalidation appends a typed `approval_invalidated`
+        event **before** the run terminates and releases the paired-result
+        invariant correctly, delivering a synthetic `tool_result` for each gated
+        `tool_use` (FR-003). A durable authorization to mutate the world on behalf
+        of a task nobody is watching is a defect, not a race to reconcile.
+      operationId: invalidateApprovals
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_id, reason]
+              properties:
+                session_id: { type: string, format: uuid }
+                reason:
+                  type: string
+                  enum: [cancelled, terminal, reaped, ceiling_breach, steered]
+      responses:
+        '200':
+          description: All outstanding approvals and input requests for the run invalidated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invalidated_approval_ids:
+                    type: array
+                    items: { type: string, format: uuid }
+                  invalidated_input_request_ids:
+                    type: array
+                    items: { type: string, format: uuid }
+  /input-requests:
+    post:
+      summary: Raise a schema-declared question to a human (elicitation) (FR-110)
+      description: >
+        The agent→human **pull** channel, distinct from the approval gate and from
+        steering's push (FR-005). It reuses the durable-suspend machinery — zero
+        ongoing token cost, resumed by event, never polled — but carries NO
+        authorization: an input request can NEVER satisfy an FR-036 gate, and an
+        MCP server's own request for user input arrives here rather than as an
+        approval (FR-150). Expiry semantics are declared by the caller, because an
+        unanswered question is not a denied action: either resolve with a recorded
+        default assumption (auditable, so the answer's absence is not silently
+        invisible) or terminate the run with `input_expired`.
+      operationId: requestInput
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InputRequest'
+      responses:
+        '201':
+          description: Input request raised; the run suspends durably at zero token cost
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InputRequest'
+        '400':
+          description: >
+            `default_required` — `on_expiry = assume_default` was declared without a
+            `default_answer` to record (FR-110)
+  /input-requests/{inputRequestId}/resolve:
+    post:
+      summary: Answer a pending input request (FR-110)
+      description: >
+        The answer is validated against the request's declared `answer_schema` and
+        is untrusted-by-default content subject to the input guard (FR-069) — a
+        human's answer is screened like any other inbound content. An agent
+        principal cannot answer an input request, because a question answered by
+        the agent that raised the situation is not human oversight (FR-158).
+      operationId: resolveInputRequest
+      parameters:
+        - name: inputRequestId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [answer]
+              properties:
+                answer:
+                  description: Validated against the request's declared answer_schema
+      responses:
+        '200': { description: Answer accepted and appended as `input_answered` }
+        '403':
+          description: >
+            Refused — an agent or service principal may not answer an input request
+            (FR-158, FR-110)
+        '409': { description: Input request already invalidated with its run (FR-106) }
+        '410': { description: Input request already expired; resolved as the caller declared (FR-110) }
+        '422':
+          description: >
+            `schema_violation` — the answer does not validate against
+            `answer_schema` (FR-110)
   /connectors:
     get:
       summary: List the calling user's linked personal connectors (FR-052)
@@ -359,6 +550,14 @@ components:
         terminal_reason:
           type: string
           nullable: true
+          description: >
+            All NINE typed terminal reasons of FR-004, published so a caller can
+            handle them exhaustively. `approval_expired` and `input_expired` are
+            deliberately distinct: nobody *authorized* an action, versus nobody
+            *answered* a question (FR-036, FR-110). This enum MUST stay identical
+            to the kernel `TerminalReason` union (contracts/kernel-abi.md); a
+            reason the kernel can produce and this contract cannot express is a
+            contract defect (SC-020).
           enum:
             - completed
             - max_turns
@@ -368,6 +567,7 @@ components:
             - prompt_too_long
             - hook_stopped
             - approval_expired
+            - input_expired
         cost_usd: { type: number }
         price_book_version:
           type: string
@@ -377,7 +577,11 @@ components:
       description: >
         Structure-only progress span (no conversation content). The `type` values
         are exactly the internal event taxonomy (FR-085) — the external contract
-        and the event log MUST NOT diverge.
+        and the event log MUST NOT diverge, and a divergence is a contract defect
+        rather than a reporting convenience. The authoritative list is the Event
+        taxonomy table in data-model.md; reconstructing *who authorized what, on
+        what basis, and when* from these events alone is a first-class replay
+        obligation (FR-085, FR-006).
       properties:
         seq: { type: integer, format: int64 }
         schema_version:
@@ -386,21 +590,69 @@ components:
         type:
           type: string
           enum:
+            # Model output
             - thought
             - content
             - tool_use
+            # Tool + write-ahead effect claim (FR-127)
             - tool_result
             - tool_receipt_ref
+            - effect_claimed
+            - effect_claim_resolved
+            # Context — three distinct artifacts, never interchangeable (FR-126)
             - condensation
             - checkpoint
+            # Human (push) — mid-run steering (FR-005)
             - user_message
+            # Human (pull) — elicitation (FR-110)
+            - input_requested
+            - input_answered
+            - input_expired
+            - input_invalidated
+            # Approval lifecycle (FR-036, FR-103–FR-108)
             - approval_requested
+            - approval_notified
+            - approval_reminded
+            - approval_escalated
             - approval_granted
+            - approval_granted_modified
             - approval_denied
             - approval_expired
+            - approval_invalidated
+            - approval_resolution_refused
+            - approval_mismatch
+            # Catalog (FR-148)
+            - tool_loaded
+            # Skills (FR-153)
+            - skill_activated
+            - skill_capability_ignored
+            # Outbound delivery (FR-157)
+            - delivery_enqueued
+            - delivery_delivered
+            - delivery_failed
+            - delivery_suppressed
+            # Safety (FR-087)
             - taint_transition
             - sanitization_boundary
+            # Delegation (FR-098–FR-101)
+            - delegation_requested
+            - delegation_refused
+            - delegation_returned
+            - delegation_reaped
+            # Orchestration plans (FR-102)
+            - plan_started
+            - plan_step_entered
+            - plan_transition
+            - plan_step_exited
+            - plan_completed
+            # Observability / content access (FR-118)
+            - content_access_granted
+            - content_accessed
+            - content_access_refused
+            # Lifecycle
             - error
+            - stuck_suspected
+            - forked
             - terminal
             - erasure
         actor:
@@ -415,6 +667,209 @@ components:
         model_id: { type: string, nullable: true }
         terminal_reason: { type: string, nullable: true }
         ts: { type: string, format: date-time }
+    ApprovalRequest:
+      type: object
+      required: [session_id, tool_id, effect_class, approved_input_digest]
+      properties:
+        session_id: { type: string, format: uuid }
+        tool_id:
+          type: string
+          description: >
+            Fully-qualified `{namespace}/{name}@{version}` (FR-147). A bare name is
+            refused: an approval scope that binds a string a later admission can
+            re-point silently voids the guarantee FR-103 exists to provide
+        effect_class:
+          type: string
+          enum: [payment, delete, external_send, prod_change, other]
+        approved_input_digest:
+          type: string
+          description: >
+            Canonical digest over tool identity + the fully resolved input as it
+            will execute. Re-verified immediately before execution; any divergence
+            refuses with `approval_mismatch` rather than executing (FR-103). This
+            is the same artifact the FR-071 idempotency key derives from
+        kind:
+          type: string
+          enum: [single, batch, plan_preauth]
+          default: single
+          description: Batch and plan pre-authorization bound approval volume without widening blast radius (FR-109)
+        member_digests:
+          type: array
+          items: { type: string }
+          description: >
+            REQUIRED and non-empty when `kind` is `batch` or `plan_preauth` — the
+            enumerated member set. An invocation is admitted only on a digest match
+            against a member; an unenumerated batch is refused (FR-109)
+        context_mode:
+          type: string
+          enum: [local, upstream]
+          default: local
+          description: >
+            Where the FR-104 context package is rendered. `local` keeps rendering
+            entirely in-boundary and only the decision, approver identity, and
+            digests cross; `upstream` is selectable only where the tenant's
+            residency configuration permits it and is then an enumerated egress
+            class in the control-plane ↔ data-plane contract (FR-091)
+        assignee_ref:
+          type: string
+          description: >
+            Declared approver, group, or on-call rotation resolved from tenant
+            configuration — never an implicit broadcast (FR-108)
+        escalation_chain:
+          type: array
+          items: { type: string }
+          description: Fallback approvers tried on the configured offsets before the fail-closed expiry (FR-108)
+        required_approvals:
+          type: integer
+          default: 1
+          description: Multi-party approval for tenant-configured classes (FR-105)
+        separation_of_duties:
+          type: boolean
+          description: Resolver MUST differ from the run's initiating user; mandatory on irreversible classes (FR-105)
+        step_up_required:
+          type: boolean
+          description: Resolution demands fresh re-authentication rather than resting on an existing session (FR-105)
+        scope:
+          type: string
+          enum: [once, session, standing]
+          default: once
+          description: >
+            Scopes wider than `once` MUST name the tool and effect class they cover
+            and MUST carry an expiry — no scope permanently ungates a class of
+            high-impact action, and no standing scope may short-circuit the
+            per-invocation safety check or the Rule of Two (FR-036, FR-111)
+        scope_expires_at: { type: string, format: date-time }
+        expires_at:
+          type: string
+          format: date-time
+          description: Fail-closed TTL; expiry denies **the action**, not necessarily the run (FR-036)
+    Approval:
+      type: object
+      description: >
+        The authorization transaction for one high-impact invocation or one
+        enumerated batch. Its decision emits its own hash-chained receipt (FR-112).
+      properties:
+        approval_id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [pending, granted, granted_modified, denied, expired, invalidated]
+        tool_id: { type: string }
+        effect_class: { type: string }
+        approved_input_digest: { type: string }
+        kind: { type: string, enum: [single, batch, plan_preauth] }
+        context_mode: { type: string, enum: [local, upstream] }
+        context_package:
+          $ref: '#/components/schemas/ApprovalContextPackage'
+        policy_version: { type: string, description: Approval policy that produced this decision requirement (FR-109) }
+        expires_at: { type: string, format: date-time }
+    ApprovalContextPackage:
+      type: object
+      description: >
+        The decision-ready package rendered under a declared, versioned redaction
+        policy (FR-104). Omitted entirely under `context_mode = local` when the
+        caller is outside the data plane. Presenting an approver with identifiers
+        alone is a defect (SC-025, SC-060).
+      properties:
+        action_summary: { type: string, description: Human-readable statement of what will happen }
+        blast_radius_fields:
+          type: object
+          description: >
+            The specific parameters that determine blast radius — recipient,
+            amount, target resource, record count (FR-104)
+        taint_legs_engaged:
+          type: array
+          items: { type: string, enum: [untrusted_input, private_data, external_effect] }
+        cost_so_far_usd: { type: number }
+        delegation_chain:
+          type: array
+          items: { type: string, format: uuid }
+          description: Root → parent → this session, so the approver sees which chain of agents reached them (FR-101)
+        requesting_user_id: { type: string, format: uuid }
+        requesting_agent_id: { type: string, format: uuid }
+        redaction_policy_version: { type: string }
+    ApprovalResolution:
+      type: object
+      required: [decision, resolution_token]
+      properties:
+        decision:
+          type: string
+          enum: [grant, grant_modified, deny]
+          description: >
+            The human decision is NOT limited to yes/no (FR-107). A denial without
+            a rationale gives the loop no gradient and its most likely next action
+            is to re-propose the same invocation, converting the gate into a retry
+            loop against a human
+        resolution_token:
+          type: string
+          description: >
+            Single-use, unguessable token bound to `(approval_id, resolver)`,
+            invalid after first use and after TTL (FR-105)
+        step_up_assertion:
+          type: string
+          description: Fresh re-authentication assertion; REQUIRED when the approval declares `step_up_required` (FR-105)
+        modified_input:
+          description: >
+            REQUIRED for `grant_modified`. The approver's input becomes the
+            authoritative input, is what the recomputed digest binds, and is what
+            executes; the modification is recorded as an event and the agent is NOT
+            told the request ran unmodified (FR-107)
+        rationale:
+          type: string
+          description: >
+            REQUIRED for `deny`. Structured rationale returned to the loop in the
+            synthetic `tool_result`. Originates outside the model's control and is
+            treated as trusted instruction input from the delegated human — while
+            anything the approver pastes in from elsewhere is NOT (FR-107)
+    ApprovalError:
+      type: object
+      properties:
+        error:
+          type: string
+          enum:
+            - missing_input_digest
+            - unenumerated_batch
+            - context_mode_forbidden
+            - policy_violation
+            - no_capable_channel
+            - not_human_principal
+            - insufficient_scope
+            - separation_of_duties_violation
+            - step_up_required
+            - invalid_or_replayed_token
+        detail: { type: string }
+    InputRequest:
+      type: object
+      required: [session_id, question, answer_schema, on_expiry]
+      properties:
+        input_request_id: { type: string, format: uuid, readOnly: true }
+        session_id: { type: string, format: uuid }
+        question: { type: string }
+        answer_schema:
+          type: object
+          description: JSON Schema the answer is validated against (FR-110)
+        on_expiry:
+          type: string
+          enum: [assume_default, terminate]
+          description: >
+            Caller-declared, because an unanswered question is not a denied action.
+            `assume_default` resolves with a recorded assumption; `terminate` ends
+            the run with the typed `input_expired` reason of FR-004, still
+            returning its best partial artifact (FR-067)
+        default_answer:
+          description: REQUIRED when `on_expiry = assume_default`, so the assumption is auditable rather than silently invisible
+        expires_at: { type: string, format: date-time }
+        requested_by_server:
+          type: string
+          nullable: true
+          description: >
+            Set when an MCP server initiated the request; it is attributed to that
+            server, rate-limited per server, and can never be presented as or
+            satisfy an approval (FR-150, FR-036)
+        status:
+          type: string
+          readOnly: true
+          enum: [pending, answered, expired, invalidated]
     ConnectorLink:
       type: object
       description: A per-user personal-connector link (tokens are vaulted, never returned)

@@ -97,6 +97,20 @@ erDiagram
     EVAL_RUN ||--o| SKILL : clears
 ```
 
+### Key Entities that are fields, not tables
+
+Four entities named in spec.md's Key Entities list have no table of their own,
+because each is a **property of a row or an event** rather than an independently
+addressable record. They are listed here so the spec's entity list resolves
+completely and nobody goes looking for a missing migration:
+
+| Spec entity | Where it actually lives | Why not a table |
+|-------------|-------------------------|-----------------|
+| **Condensation** (FR-015, FR-130) | the `condensation` event in the Event taxonomy, versioned by the condenser config that produced it | It is a point in the log, not a mutable record — and giving it a table invites treating it as a resume artifact, which is precisely the conflation FR-126 closes |
+| **Harness Digest** (FR-129) | `Session.harness_digest`, copied onto `Checkpoint`, `CostRecord`, `EvalRun`, and every span | A digest of configuration in force, pinned at run start; a separate table would imply it can change during a run, and a mid-run change is a defect (FR-088) |
+| **Taint State** (FR-087) | `Session.taint_state` (a **projection**), with `taint_transition` / `sanitization_boundary` events as the truth | Derived state rebuildable by replay; a table would become a second source of truth for which legs are engaged |
+| **Surface Capability** (FR-155) | `Surface.capabilities` + `Surface.principal_kind` + `Surface.conversation_binding` | A declared, conformance-tested descriptor versioned with the surface row it belongs to |
+
 ---
 
 ## Immutable configuration entities
