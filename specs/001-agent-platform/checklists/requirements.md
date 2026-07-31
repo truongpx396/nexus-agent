@@ -130,6 +130,27 @@ are now resolved in the spec (FR-080–FR-097), data model, contracts, and resea
 - [x] Each surface declares a conversation binding resolving its native thread identity into `session_key`; cross-surface continuation only for the same principal under an explicit binding (FR-159)
 - [x] `Catalog Manifest` / `Skill Bundle File` / `Surface` / `Delivery Record` exist as first-class entities, and `Tool`, `Skill`, `Surface Identity`, and `Session` carry the identity and attribution fields the above depend on (data-model.md)
 
+### Cross-artifact consistency pass (`/speckit.analyze`, 2026-07-31)
+
+A read-only consistency analysis across spec / plan / tasks / contracts found **no
+CRITICAL issues and 100% FR coverage** (159/159 requirements mapped to tasks), but
+12 real defects — concentrated where a document was correct when written and was
+not revisited after a later design review landed. All are now closed.
+
+- [x] `run-api.openapi.yaml` published **8** terminal reasons; FR-004, the kernel ABI, and T014 all specify **9**. `input_expired` added — a reason the kernel can produce and the external contract cannot express is a contract defect (FR-004, SC-020)
+- [x] The external API predated FR-103–FR-110: one approval path, `decision: [grant, deny]`, no argument digest, no input requests. Rebuilt — `POST /approvals` (digest-bound, batch-enumerating, capability-routed), `GET`, `/resolve` (human-only, single-use token, step-up, `grant_modified`), `/invalidate`, and the two `/input-requests` paths, with typed refusal sets (FR-103–FR-110, FR-155)
+- [x] `RunEvent.type` carried 17 of the taxonomy's 51 types while the contract itself promised the log and the external contract "MUST NOT diverge". Synced and verified equal to data-model.md (FR-085)
+- [x] The Constitution Check recorded **v1.1.0** against a **v1.2.0** constitution. Re-run and re-recorded, with v1.2.0's two expanded Workflow rules mapped explicitly rather than assumed covered (FR-117/FR-118, FR-126–FR-130)
+- [x] Three conflicting FR counts in plan.md (146, 136, 136) against an actual 159; surface count restated as 9 classes including agent-to-agent ingress (FR-158)
+- [x] The MVP cut line was stale from the 2026-07-31 review — FR-147–FR-159 appeared in neither the Increment-1 list nor the deferred table while T011c called their seams foundational. Catalog/skill/surface identity seams added to Increment 1; deferred disclosure, the in-sandbox broker, skill import, and A2A ingress added as explicit deferrals with their trigger conditions
+- [x] `integration-ports.md` was referenced by no task and `tool-contract.md` by no test, though both are load-bearing. Contract tests added (T027a asserts the total permission resolution order and its two invariants; T029h asserts the six withheld authorities), and both contracts are now cited from the tasks that implement them
+- [x] SC-029 (every approval decision provable, authorization history reconstructable from the log alone) had an implementation task but **no verification task** — the only approval SC without one. T061g added
+- [x] 11 success criteria were behaviourally covered but carried no `SC-` tag, defeating the automated coverage check the other 52 enable. All 63 now tagged
+- [x] T147's make-target enumeration had drifted 4 targets behind quickstart.md while carrying a completeness clause; backfilled and replaced with a CI check that extracts targets from quickstart rather than restating them
+- [x] plan.md's documentation tree listed 4 of 6 contracts; `orchestration-plane.md` and `integration-ports.md` added
+- [x] Principle V's Status cell held a narrative paragraph after the verdict; moved to the compliance column so every row's status is a bare verdict
+- [x] The 4 spec Key Entities that are fields rather than tables (`Condensation`, `Harness Digest`, `Taint State`, `Surface Capability`) are now enumerated in data-model.md with where each lives and why a table would be wrong
+
 ## Notes
 
 - Items marked incomplete require spec updates before `/speckit.clarify` or `/speckit.plan`
