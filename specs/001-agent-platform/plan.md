@@ -130,11 +130,11 @@ the Security, Delivery/Scale, and Workflow constraint sections).
 
 | # | Principle | How this plan complies | Status |
 |---|-----------|------------------------|--------|
-| I | One Loop, Many Surfaces | Single kernel async generator with typed terminal states; surfaces are thin adapters that only translate I/O (FR-001, FR-028). No per-surface control-flow fork. | PASS |
+| I | One Loop, Many Surfaces | Single kernel async generator with typed terminal states; surfaces are thin adapters that only translate I/O (FR-001, FR-028). No per-surface control-flow fork. "Thin" bounds what an adapter may *do*, not what it must be *able* to do: each surface publishes a conformance-tested capability descriptor that approval and input-request routing filter on, declares a `principal_kind` (agent ingress being its own admission class), resolves the **turn-submitting** principal rather than inheriting authority from a conversation, binds its native thread identity into `session_key` by declaration, and delivers outbound through a durable outbox (FR-155–FR-159). | PASS |
 | II | Immutable Models, Append-Only State | Agent/Tool/Model/config immutable; only mutable state is the append-only event log; every `tool_use` paired with a `tool_result` (synthetic on cancel/error) (FR-003, FR-006). | PASS |
 | III | Cache-Stable Context Is Architecture | Byte-stable prefix + volatile tail; per-turn content banned from the prefix; >90% cache-read target; structured off-loop compaction (FR-013, FR-014, FR-015). | PASS |
 | IV | Stop on Cost, Not Vibes | Per-turn token metering attributed to task+tenant; hard per-task/per-tenant ceilings → `cost_exhausted`; iteration/wall-clock are backstops; η$ and CPM in the release gate (FR-016, FR-017, FR-018). | PASS |
-| V | Safety Is Per-Invocation and Fails Closed | Per-invocation safety on parsed input via a hybrid deterministic-rule + fail-closed-timeout model classifier; fail-closed tool defaults; layered defense; Rule of Two; untrusted tool/retrieved content (FR-008, FR-009, FR-032, FR-033, FR-116). Human oversight is specified as a transaction rather than a flag — approval binds the digest of the exact resolved call, carries a decision-ready context package, is resolvable only by an authorized human, is invalidated with the run it gates, and sits in one published total resolution order in which a deny is final and neither the per-invocation safety check nor the Rule of Two can be short-circuited by any scope, batch, or autonomy level (FR-103–FR-112). The tool/connector/MCP catalog itself is a trust boundary: every descriptor is scanned for injected instructions at admission and on version bump, and every connector/MCP token is minted audience-restricted to its own server (FR-113, FR-114). | PASS |
+| V | Safety Is Per-Invocation and Fails Closed | Per-invocation safety on parsed input via a hybrid deterministic-rule + fail-closed-timeout model classifier; fail-closed tool defaults; layered defense; Rule of Two; untrusted tool/retrieved content (FR-008, FR-009, FR-032, FR-033, FR-116). Human oversight is specified as a transaction rather than a flag — approval binds the digest of the exact resolved call, carries a decision-ready context package, is resolvable only by an authorized human, is invalidated with the run it gates, and sits in one published total resolution order in which a deny is final and neither the per-invocation safety check nor the Rule of Two can be short-circuited by any scope, batch, or autonomy level (FR-103–FR-112). The tool/connector/MCP catalog itself is a trust boundary: every descriptor is scanned for injected instructions at admission and on version bump, and every connector/MCP token is minted audience-restricted to its own server (FR-113, FR-114). | PASS The catalog itself is now identity-bearing and bypass-free: tools are `{namespace}/{name}@{version}` with one owning source per namespace and collision refused at admission, descriptors are re-verified against the admitted digest at use, skills are signed content-addressed bundles that may only *narrow* capability, and sandbox-originated calls re-enter the same pipeline through a broker or have no route at all (FR-147, FR-149, FR-150, FR-151, FR-153). |
 | VI | Tenant First; Audit & Observability Day-One | Tenant is the first dimension of session key/row/workspace/cost/secret; DB row-level security with **transaction-local** scope that survives the transaction-pooling tier, proven by an isolation test run through that pooler; **hash-chained, externally anchored** audit log with sign-only key custody. Observability is specified as a mechanism rather than an intention: telemetry is a **content-free signal class** enforced by a deny-by-default attribute allowlist so it stays inside the crypto-shredding erasure boundary, spans are derived from the log and turn-scoped so long and killed runs still trace, events and spans carry a bidirectional join key, metric labels are fixed with per-run detail via exemplars, and reading decrypted content is an audited, expiring, receipt-emitting grant rather than an operator capability (FR-038, FR-039, FR-040, FR-081, FR-117–FR-125). | PASS |
 | VII | Model- and Provider-Agnostic by Abstraction | One provider abstraction + normalized stream contract; native tool-calling only; deterministic auditable routing by data label + difficulty; regulated payloads → self-hosted (FR-027, FR-037). Third-party frameworks (model gateways, tracing backends, eval platforms, workflow engines) attach as **optional** adapters behind existing ports and are bound by one authority boundary — transport, capacity, storage, or presentation only, never routing, ceilings, truth, the gate, the audit record, or content — each admitted by a conformance suite recording what it supports, degrades, and cannot do (FR-131–FR-136). | PASS |
 | VIII | Reliability: Classify, Resume, Never Silently Retry | Typed failure classification before retry; logged backoff+jitter; circuit-break at 3 identical failures; durable checkpoint/resume; stuck detection — itself eval-gated against a negative-case set and escalating from a logged `stuck_suspected` signal to a hard terminate only on a corroborating second trip, so an imprecise heuristic never silently discards partial work; rainbow deploy (FR-023, FR-024, FR-025, FR-026, FR-115). | PASS |
@@ -256,12 +256,16 @@ backend-go/
 ├── internal/
 │   ├── provider/             # provider abstraction + normalized stream contract + adapters
 │   ├── tools/                # registry (self-registering), buildTool factory, exec pipeline;
+│   │                         #   qualified identity + namespace ownership, catalog manifest,
+│   │                         #   deferred disclosure + gated selector, descriptor re-verification;
 │   │                         #   builtin/ = filesystem, sandboxed shell, web search/fetch tools
 │   ├── connectors/           # per-user OAuth (auth-code+PKCE), token vault/refresh/revoke,
 │   │                         #   reference connectors (gmail, gdrive, gcalendar)
 │   ├── context/              # two-zone prompt, cache discipline, structured compaction
 │   ├── memory/               # file-first memory, per-tenant, injection screening, retention
-│   ├── skills/               # progressive disclosure + propose→gate→version→promote
+│   ├── skills/               # signed content-addressed bundles, three-tier disclosure,
+│   │                         #   one admission gate per origin, capability narrowing,
+│   │                         #   propose→gate→version→promote
 │   ├── cost/                 # per-turn token/cost meter, per-task/per-tenant ceilings
 │   ├── reliability/          # failure classifier, circuit breaker, stuck detection,
 │   │                         #   checkpoint/snapshot/hydrate, write-ahead effect claims, resume
@@ -271,8 +275,12 @@ backend-go/
 │   ├── queue/                # durable job queue (NATS JetStream default adapter,
 │   │                         #   swappable port), session-key routing, admission control
 │   ├── sandbox/              # warm pool, TTL/reclamation, per-tenant caps, resource limits
-│   │                         #   (CPU/mem/PID/wall-clock) + network default-deny; E2B default backend
-│   ├── surfaces/             # per-surface adapter translators (cli, api, chat, email, cron, telegram, zalo)
+│   │                         #   (CPU/mem/PID/wall-clock) + network default-deny; E2B default backend;
+│   │                         #   broker = the only route from sandbox code into the tool pipeline
+│   ├── surfaces/             # per-surface adapter translators (cli, api, chat, email, cron,
+│   │                         #   telegram, zalo, agent-ingress); capability descriptors,
+│   │                         #   per-turn principal resolution, conversation binding,
+│   │                         #   outbound delivery outbox
 │   └── observability/        # log-derived turn-scoped spans, content-free attribute allowlist,
 │                             #   versioned attribute model, fixed metric labels + exemplars,
 │                             #   trace-context propagation, cost/latency/token spans

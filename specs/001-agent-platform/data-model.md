@@ -69,6 +69,17 @@ erDiagram
     TENANT ||--o{ ENCRYPTION_KEY : owns
     TOOL ||--o{ EVENT : invoked_in
     CONNECTOR ||--|| TOOL : exposes
+    CATALOG_MANIFEST ||--o{ TOOL : resolves
+    SESSION ||--|| CATALOG_MANIFEST : pinned_to
+    SKILL ||--o{ SKILL_BUNDLE_FILE : contains
+    SKILL_BUNDLE_FILE ||--o| TOOL : registers_script_as
+    SKILL ||--o{ EVENT : activated_in
+    TENANT ||--o{ SURFACE : enables
+    SURFACE ||--o{ SURFACE_IDENTITY : authenticates
+    SURFACE ||--o{ SESSION : submits_through
+    SURFACE ||--o{ DELIVERY_RECORD : delivers_over
+    SESSION ||--o{ DELIVERY_RECORD : emits
+    APPROVAL ||--o{ DELIVERY_RECORD : notified_by
     SESSION ||--|| SANDBOX : bound_to
     MODEL ||--o{ EVENT : produced_by
     INTEGRATION_ADAPTER ||--o{ MODEL : fronted_by
@@ -143,10 +154,17 @@ or a per-tenant permission-scoped connector (FR-007, FR-011).
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `tool_id` | string (PK) | Namespaced (e.g. `asana_search`) |
+| `tool_id` | string (PK) | The **fully-qualified identity** `{namespace}/{name}@{version}` — what an approval scope, an audit receipt, and the harness digest bind (FR-147) |
+| `namespace` | string | Owned by exactly one source per tenant (built-ins, one connector, or one MCP server); a descriptor claiming a name in another source's namespace is **refused at admission**, never resolved by registration order (FR-147) |
+| `name` | string | Unique within `(tenant_id, namespace)` |
+| `tool_version` | string | SemVer; pinned into the harness digest and treated as a production dependency — a bump is an eval-gated, revertible deploy (FR-147, FR-078, FR-129) |
+| `source_ref` | string | The admitting source (`builtin` / `connector:{id}` / `mcp:{server_id}`) — the namespace's owner of record |
+| `descriptor_digest` | bytea | Hash of the exact descriptor admitted; re-verified at use so a protocol-level listing cache cannot serve an unadmitted descriptor (FR-150, FR-113) |
 | `tenant_id` | UUID (FK, nullable) | **RLS key.** NULL only for genuinely global built-in definitions; any tool exposed by a per-tenant connector MUST carry its tenant (FR-011) |
 | `description` | text | Progressive-disclosure summary |
 | `input_schema` | jsonb | Validated per invocation |
+| `output_schema` | jsonb (nullable) | Declared structured result shape where the source provides one; validated on return and used for result budgeting. A schema-conformant result is still untrusted — validation proves shape, never intent (FR-150, FR-033) |
+| `disclosure` | enum | `resident` (in the cache-stable prefix) / `deferred` (name + description only until loaded, FR-062, FR-148) |
 | `capability` | enum | `read_only` / `mutating` |
 | `concurrency_safe` | enum | `read_only` / `concurrency_safe` / `exclusive`; default `exclusive` (fail-closed, FR-008, FR-061) |
 | `returns_untrusted` | bool | Taint leg A — output is untrusted content. Default **true** (fail-closed, FR-087) |
@@ -163,6 +181,25 @@ or a per-tenant permission-scoped connector (FR-007, FR-011).
 - **RLS**: policy applies where `tenant_id IS NOT NULL`; a tenant can neither enumerate nor invoke another tenant's catalog entries (FR-011, FR-039).
 - **Built-ins**: the platform ships built-in tools — workspace-restricted filesystem (`file_read`/`file_write`/`file_search`/…), a sandboxed shell/code-execution tool, and web search/fetch (egress-allowlisted, untrusted results) — governed by the same three gates and per-invocation safety (FR-056–FR-058).
 - **Catalog admission**: `catalog_scan_status` transitions `pending → clean` (admitted) or `pending → flagged/rejected` (refused, fail-closed) before a descriptor is ever added to the tenant's tool catalog or re-admitted on a version bump; the transition is recorded as part of the tool's FR-096 governance sign-off, not as a silent background job (FR-113).
+- **One owner per namespace** (FR-147): uniqueness is `(tenant_id, namespace, name, tool_version)`, and a second source attempting to register into a namespace it does not own fails admission. Registration order is never a resolution policy — a hostile source shadowing a legitimate tool would silently re-point every approval scope and audit receipt naming that string.
+- **The alias map is tenant configuration** (FR-147): pipeline step 1 resolves aliases from a governance-signed tenant table, never from descriptor contents. An alias a catalog source can write is a rename primitive handed to the party the catalog exists to distrust.
+
+### Catalog Manifest
+The **resolvable universe** of tools for a run — what the harness digest pins so that
+deferred disclosure (FR-062) does not mutate a run's configuration mid-flight (FR-148).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `manifest_digest` | bytea (PK) | Hash over the sorted set of `(tool_id, descriptor_digest)` — a component of `Session.harness_digest` (FR-129) |
+| `tenant_id` | UUID (FK) | RLS key |
+| `resident_tool_ids` | string[] | Materialized into the cache-stable prefix in the FR-013 canonical order |
+| `deferred_tool_ids` | string[] | Name + description advertised; full schema loaded on demand into the **volatile** zone |
+| `resident_token_budget` | int | Cap on the resident tier; exceeded ⇒ relevance selection, never arbitrary truncation |
+| `max_loadable_per_run` | int | Ceiling on mid-run loads (FR-148) |
+| `selector_version` | string (FK) | The eval-gated selector config in force; behaviour-bearing config under FR-143 |
+
+- **The manifest is fixed for the run; the materialized subset is not.** Each load appends a `tool_loaded` event, so a replay reconstructs the visible catalog turn by turn while `harness_digest` never moves (FR-148, FR-088).
+- **Selection is measured**: tool-selection accuracy, wrong-tool rate, and no-tool-found rate are reported per agent version and harness digest (FR-095).
 
 ### Model / Provider
 A pluggable backend accessed only through one abstraction with a normalized stream
@@ -224,16 +261,41 @@ a human/eval promotion gate (FR-020, FR-021).
 | `skill_id` | UUID (PK) | |
 | `tenant_id` | UUID (FK) | RLS key |
 | `name` | string | |
-| `description` | text | Always visible (progressive disclosure) |
-| `body` | text | Loaded on demand |
+| `description` | text | Always visible — tier 1 of three (FR-154) |
+| `body` | text | Tier 2; loaded on activation |
 | `version` | int | Immutable per version |
+| `bundle_digest` | bytea | Content address over **every** file in the bundle; what the harness digest pins and a signature covers (FR-151, FR-129) |
+| `origin` | enum | `first_party` / `tenant_authored` / `agent_proposed` / `third_party_import` — immutable per version; **all four clear the same gate** (FR-152) |
+| `executable` | bool | Declared posture. `false` + executable content in the bundle ⇒ refused admission, never sanitized (FR-151) |
+| `publisher_ref` | string (nullable) | Required for `third_party_import`: the authenticated publisher and source |
+| `signature` | bytea (nullable) | Required for `third_party_import`: verified over `bundle_digest` at admission (FR-152) |
+| `pinned_upstream_version` | string (nullable) | Required for `third_party_import`; an upstream bump is an eval-gated, revertible dependency deploy (FR-078) |
+| `trust_tier` | enum | Tenant-declared bound on what a skill of this origin may carry — executability, reachable effect classes, whether enablement needs per-tenant sign-off (FR-152) |
+| `declared_tool_ids` | string[] | **Intersected** with the run's resolved catalog, never unioned into it; an entry the run does not hold is ignored and recorded (FR-153) |
 | `status` | enum | `proposed` / `approved` / `promoted` — never auto-promoted |
 | `suite_id` | string (FK) | The skill's **own** case set; a proposal without one is refused at the gate (FR-143) |
 | `eval_run_id` | UUID (nullable) | The run that cleared it; required to reach `promoted` (FR-021, FR-043) |
+| `catalog_scan_status` | enum | `pending` / `clean` / `flagged` / `rejected` — the FR-113 injection scan applied to **every file**, at admission and on every version bump (FR-151) |
 | `created_at` | timestamptz | |
 
-- **State transitions**: `proposed → approved (human+eval gate) → promoted`. No edge skips the gate.
+### Skill Bundle File
+Tier 3 of progressive disclosure and the unit the injection scan operates on
+(FR-151, FR-154).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `file_id` | UUID (PK) | |
+| `skill_id` | UUID (FK) | |
+| `path` | string | Relative path within the bundle |
+| `kind` | enum | `manifest` / `body` / `reference` / `asset` / `script` |
+| `content_digest` | bytea | Component of `bundle_digest` |
+| `scan_status` | enum | Per file; a high-severity match fails the whole bundle closed (FR-113) |
+| `registered_tool_id` | string (FK, nullable) | Set for `kind = script`: the `Tool` row it was admitted as. NULL for a script ⇒ the bundle is refused (FR-151) |
+
+- **State transitions**: `proposed → approved (human+eval gate) → promoted`. No edge skips the gate, **and no origin skips the gate** — FR-021 previously covered only `agent_proposed`, which is the source least likely to be adversarial (FR-152).
 - **The gate is the skill's own suite plus the platform corpus** (FR-143): the global corpus measures the platform, not this skill, so promotion on the strength of cases the skill never exercises measures nothing about it.
+- **A script is a tool or the bundle is refused** (FR-151): a `kind = script` file with no `registered_tool_id` means executable code that skipped the three gates, per-invocation safety, taint declaration, and governance sign-off while running in the sandbox under the run's identity.
+- **Activation is an event, not a state** (FR-153): which skills a run *could* load is pinned by `harness_digest`; which it *did* load is reconstructed from `skill_activated` events, so a fork or trajectory case can attribute a behaviour to a skill version rather than to a library.
 
 ### Connector
 An external system-of-record integration attached only through the vetted,
@@ -274,8 +336,32 @@ personal connectors (`auth_kind = per_user_oauth`, e.g. Gmail/Drive/Calendar).
 - **Lifecycle**: `active → expired (auto-refresh) → active`; user revoke → `revoked` (blocks use, fail-closed).
 - **Secret rule**: only `token_handle` is stored; raw tokens live in the vault and never enter a prompt, transcript, or log.
 
+### Surface
+A registered channel the agent is reachable through, carrying the declared,
+conformance-tested capability descriptor that routing filters on (FR-028, FR-155).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `surface_id` | string (PK) | e.g. `web`, `cli`, `slack`, `telegram`, `email`, `cron`, `a2a` |
+| `tenant_id` | UUID (FK, nullable) | NULL for platform-wide surface definitions |
+| `principal_kind` | enum | `human` / `service` / `agent`. Undeclared ⇒ most restricted treatment (FR-158) |
+| `can_render_approval_context` | bool | Whether an FR-104 decision-ready package is presentable at all |
+| `max_render_bytes` | int | Ceiling on what an approver can actually be shown |
+| `supports_step_up_auth` | bool | Whether FR-105 re-authentication is possible on this channel |
+| `supports_resolution_token` | bool | Whether the single-use approval token can be carried |
+| `supports_structured_input` | bool | Whether a schema-declared FR-110 answer can be collected |
+| `supports_streaming` | bool | FR-031 progress without a blocked connection |
+| `max_message_bytes` | int | Drives post-sanitizer chunking (never pre-sanitizer, FR-068) |
+| `conversation_binding` | jsonb | How the surface's native thread identity resolves into `session_key` (FR-159) |
+| `conformance_run_id` | UUID | The suite run that produced these values; absent ⇒ not enablable |
+| `enabled_for_tenants` | UUID[] | Per-tenant enablement |
+
+- **Capabilities are declared and *tested*, not assumed** (FR-155). Approval and input-request routing filter the assignee and escalation chain by them, and an `ApprovalPolicy` mapping an effect class to a channel set with no capable member is **refused at configuration time** (SC-060).
+- **`principal_kind = agent` is a distinct admission class** (FR-158): subset-scope binding, source taint, a named payer, and no ability to resolve an approval or answer an input request.
+- **Output adaptation happens after the egress sanitizer** (FR-068): chunking and truncation may reshape what was sanitized, never re-open it.
+
 ### Surface Identity
-A verified binding from an external consumer-surface identity (e.g. Telegram/Zalo
+A verified binding from an external surface identity (e.g. Telegram/Zalo/Slack
 user id) to a platform `User` within a tenant; required before any action runs
 from that surface (FR-055).
 
@@ -284,13 +370,37 @@ from that surface (FR-055).
 | `surface_identity_id` | UUID (PK) | |
 | `tenant_id` | UUID (FK) | RLS key |
 | `user_id` | UUID (FK) | The bound platform user (delegated identity) |
-| `surface` | enum | `telegram` / `zalo` |
-| `external_id` | string | The surface-native user/chat id |
+| `surface` | string (FK) | `Surface.surface_id` |
+| `external_id` | string | The surface-native user id |
+| `channel_operator` | bool | May steer or cancel turns they did not submit, in conversations they operate (FR-156) |
 | `verified` | bool | Linking step passed; unverified → denied (fail-closed) |
 | `created_at` | timestamptz | |
 
 - **Uniqueness**: one row per `(tenant_id, surface, external_id)`.
 - **Rule**: an unverified or unlinked external identity performs zero actions (FR-055).
+- **Every turn resolves its own identity** (FR-156): on a multi-principal surface the row is looked up per inbound message, and that principal's scope is what FR-035, FR-033, and FR-093 evaluate for that turn. Authority is never inherited from whoever opened the conversation.
+
+### Delivery Record
+The durable outbox entry for one outbound message on one channel — the artifact
+that distinguishes "the approver did not answer" from "the approver was never
+told" (FR-157).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `delivery_id` | UUID (PK) | |
+| `tenant_id` | UUID (FK) | RLS key |
+| `session_id` | UUID (FK) | |
+| `seq` | bigint | The event this delivery carries; **appended before the send** |
+| `surface_id` | string (FK) | |
+| `recipient_ref` | string | Idempotency is keyed `(session_id, seq, surface_id, recipient_ref)` |
+| `kind` | enum | `reply` / `approval_request` / `reminder` / `escalation` / `input_request` / `completion` |
+| `state` | enum | `pending` / `delivered` / `failed_retryable` / `failed_permanent` / `suppressed_by_audience` |
+| `attempts` | int | Backoff-bounded |
+| `approval_id` | UUID (FK, nullable) | Set for oversight kinds, so an undelivered request is separable from an unanswered one |
+
+- **The log entry precedes the send** — the same write-ahead ordering FR-127 requires of tool effects, for the same reason: a message sent before it was recorded can be sent twice.
+- **`failed_permanent` is a signal, not a cleanup** (FR-095). On an approval or input request it MUST NOT be silently absorbed into the FR-036 expiry, because to a tenant those look identical and mean opposite things.
+- **`suppressed_by_audience`** records an FR-156 refusal: the content's redaction policy was resolved for a principal the conversation's audience does not cover.
 
 ---
 
@@ -303,9 +413,11 @@ tenant, replayable and auditable (FR-006, FR-041).
 | Field | Type | Notes |
 |-------|------|-------|
 | `session_id` | UUID (PK) | |
-| `session_key` | string | `{tenant_id}:{...}` — routing + serial lock key |
+| `session_key` | string | `{tenant_id}:{...}` — routing + serial lock key, resolved from the surface's declared `conversation_binding` rather than by adapter-specific behaviour (FR-159) |
 | `tenant_id` | UUID (FK) | First dimension, RLS key |
-| `user_id` | UUID (FK) | Delegated identity |
+| `surface_id` | string (FK) | The surface this conversation lives on (FR-155) |
+| `user_id` | UUID (FK) | The **opening** principal — an attribution record, **not** the run's standing authority. Each turn's authority is its own submitting principal, resolved per turn from `Surface Identity` (FR-156) |
+| `audience_ref` | string (nullable) | Set for multi-principal conversations; bounds what may be delivered into the conversation and what may be written to durable memory from it (FR-156, FR-019) |
 | `agent_id` | UUID (FK) | |
 | `agent_version` | int | **Pinned at run start and held for the run's life** so a concurrent deploy cannot shift behavior or bust the prompt prefix mid-run (FR-088, FR-013) |
 | `harness_digest` | bytea | Identity of *all* behavior-determining config in force: stable system-prompt version, resolved tool catalog, skill versions, safety/permission policy version, approval-policy version. Pinned at run start; also the cache-prefix identity (FR-129, FR-013) |
@@ -373,6 +485,9 @@ log alone, and identical to the externally published event contract (FR-085):
 | Human (push) | `user_message` (the mid-run steering input of FR-005) |
 | Human (pull) | `input_requested` · `input_answered` · `input_expired` · `input_invalidated` (FR-110) |
 | Approval | `approval_requested` · `approval_notified` · `approval_reminded` · `approval_escalated` · `approval_granted` · `approval_granted_modified` · `approval_denied` · `approval_expired` · `approval_invalidated` · `approval_resolution_refused` · `approval_mismatch` (FR-036, FR-103–FR-108) |
+| Catalog | `tool_loaded` (a deferred schema materialized into the volatile zone — what lets a replay reconstruct the visible catalog turn by turn while `harness_digest` stays fixed, FR-148) |
+| Skills | `skill_activated` (identity, version, `bundle_digest`, and whether the trigger was a match, an explicit request, or configuration) · `skill_capability_ignored` (a declared tool the run does not hold — recorded, never honoured, FR-153) |
+| Delivery | `delivery_enqueued` · `delivery_delivered` · `delivery_failed` · `delivery_suppressed` (FR-157) — the enqueue precedes the send, so a permanently undelivered approval request is separable from an unanswered one |
 | Safety | `taint_transition` · `sanitization_boundary` (FR-087) |
 | Delegation | `delegation_requested` · `delegation_refused` (bound/scope/admission) · `delegation_returned` · `delegation_reaped` (FR-098–FR-101) |
 | Orchestration | `plan_started` · `plan_step_entered` · `plan_transition` · `plan_step_exited` · `plan_completed` (FR-102) |
@@ -928,9 +1043,17 @@ trusted and re-measured on a schedule (FR-141).
   reassigns connections between tenants (FR-039). Isolation tests run through
   that pooler (SC-013).
 - **Immutability**: `Agent`, `Tool`, `Model`, `Price Book`, `Skill` (per version),
-  `Orchestration Plan` (per version), `Approval Policy` (per version), `Event`,
-  `Audit Receipt`, `Audit Anchor` are write-once. Config changes create new
-  versioned rows.
+  `Skill Bundle File`, `Catalog Manifest`, `Orchestration Plan` (per version),
+  `Approval Policy` (per version), `Event`, `Audit Receipt`, `Audit Anchor` are
+  write-once. Config changes create new versioned rows.
+- **Identity binds, names do not**: an approval scope, an audit receipt, and the
+  harness digest all bind `Tool.tool_id` in its fully-qualified
+  `{namespace}/{name}@{version}` form and `Skill.bundle_digest` — never a bare
+  name, which a later admission could re-point (FR-147, FR-151).
+- **Authority is per turn, not per conversation**: `Session.user_id` records who
+  opened the run; the scope every tool invocation is checked against is the
+  submitting principal of *that turn*, resolved from `Surface Identity`
+  (FR-156, FR-035).
 - **Approval is a transaction, not a flag**: a grant authorizes
   `Approval.approved_input_digest` — the exact resolved invocation — and execution
   re-verifies it, so a retry, resume, redelivery, or substituted argument cannot

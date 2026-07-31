@@ -9,6 +9,42 @@ gates (FR-011). Safety is judged per invocation on parsed input (FR-009).
 
 ---
 
+## Identity (FR-147)
+
+A tool is `{namespace}/{name}@{version}`, and that string — never a bare name — is
+what an invocation resolves, an approval scope binds (`scope_tool_id`), an audit
+receipt records, and the harness digest pins.
+
+- **One owner per namespace per tenant**: a namespace belongs to exactly one source
+  (the built-in set, one connector, or one MCP server). A descriptor claiming a name
+  inside a namespace it does not own is **refused at admission**.
+- **Collision is never resolved by order**: not last-writer-wins, not
+  first-registered-wins, not silent shadowing. A hostile source shadowing a
+  legitimate tool re-points every prior approval scope and receipt that named it,
+  and any policy keyed on registration order is decided by connection timing.
+- **The alias map at step 1 is tenant configuration** under governance sign-off
+  (FR-096) and is **never** populated from descriptor contents. An alias a catalog
+  source can write is a rename primitive handed to the party the catalog exists to
+  distrust.
+- **Version is a pinned dependency** (FR-078): a bump is an eval-gated, revertible
+  deploy, re-scanned under FR-113, and it changes the harness digest.
+
+## Disclosure (FR-062, FR-148)
+
+The catalog splits into a **resident** tier materialized into the byte-stable
+prefix and a **deferred** tier advertised as name + description until loaded.
+
+- **The digest pins the resolvable universe, not the materialized set.** The run's
+  `harness_digest` covers a `Catalog Manifest` — the sorted `(tool_id,
+  descriptor_digest)` set the run *may* load. Loading a schema mid-run appends it
+  to the **volatile** zone and emits a `tool_loaded` event; `harness_digest` does
+  not move, so FR-088 is satisfied and FR-013's prefix stays byte-stable.
+- **The selector is behaviour-bearing config**, gated and measured exactly like the
+  stuck heuristic (FR-115) and the condenser (FR-130): a declared engagement
+  threshold, a resident token budget, a per-run load ceiling, its own case set
+  (FR-143), and reported tool-selection accuracy / wrong-tool / no-tool-found rates
+  (FR-095). An unmeasured selector fails as capability loss, not as an error.
+
 ## Registration
 
 - Tools self-register at import time into the registry.
@@ -18,8 +54,10 @@ gates (FR-011). Safety is judged per invocation on parsed input (FR-009).
   and web search/fetch (egress-allowlisted, untrusted results; crawl4ai backend
   returning clean chunked markdown) — governed by the
   three gates below and per-invocation safety (FR-056–FR-059).
-- Cache-aware ordering: `sort(builtins) ++ sort(mcpTools)` so the tool-schema
-  catalog in the prompt prefix stays byte-stable (Constitution III).
+- Cache-aware ordering: `sort(builtins) ++ sort(mcpTools)` over the **resident**
+  tier so the tool-schema catalog in the prompt prefix stays byte-stable
+  (Constitution III). Deferred tools contribute name + description only, and a
+  loaded schema lands in the volatile zone — never re-ordering the prefix (FR-148).
 - External connectors register only through the vetted, per-tenant, RBAC-scoped
   MCP catalog (FR-012).
 - **Catalog admission scan (FR-113)**: before any descriptor (built-in, connector,
@@ -101,13 +139,50 @@ Two invariants make this order load-bearing rather than decorative:
   not permission to stop asking it.
 - **Autonomy ratchets** (FR-111): pinned at run start, tightenable mid-run by an
   operator, and widenable by nothing — not model output, not a tool result, not a
-  steering message, not a hook, not a delegation parameter.
+  steering message, not a hook, not a delegation parameter, **not a skill**.
+
+**Skills sit below this table, not inside it** (FR-153). An activated skill's
+declared tool set is applied as an **intersection** over the catalog resolved at
+run start — a pre-filter that can only remove candidates before the chain runs. It
+is not a layer, because a layer could resolve to `ALLOW`: a skill declaring a
+capability the run does not hold has that declaration ignored and recorded
+(`skill_capability_ignored`), and no skill may touch autonomy, approval policy,
+egress, data label, or region. Ecosystem skill formats carry tool-permission
+declarations that *grant*; adopting that semantics here would make "load this
+skill" a widening primitive reachable from injected content — the same lever the
+autonomy ratchet closes, arriving through a different door.
+
+## Callers of the pipeline (FR-149)
+
+The pipeline is model-facing by construction, which makes any capability reachable
+*without* it a complete bypass of every control in this document. There are exactly
+two callers, and they are indistinguishable downstream of step 1:
+
+| Caller | Origin | Notes |
+|---|---|---|
+| The loop | A `tool_use` chunk from `Provider.stream` | The ordinary path |
+| The **in-sandbox broker** | Agent-written code calling a platform capability (the "code execution" / programmatic tool-calling pattern) | Authenticated to the run's identity; the calling program **blocks** on the same durable suspension an approval raises, with the sandbox handle carried on the checkpoint (FR-126) |
+
+- **There is no third caller.** A direct network path from sandbox code to a
+  connector or MCP endpoint is a **prohibited egress route** under FR-037/FR-059,
+  not a permitted shortcut — the token savings the pattern offers are not a reason
+  to accept a path with no permission chain, no safety check, no approval, no
+  claim, no receipt, and no taint transition.
+- **Brokered calls are indistinguishable in the record**: same events, same
+  receipts, same taint folding, same result budgeting (FR-010) per call — even
+  though only a final value returns to the model.
 
 ## The single execution pipeline (`checkPermissionsAndCallTool`)
 
 Ordered steps applied to every call (FR-007, FR-010):
 
-1. **Lookup** (alias map → canonical tool)
+1. **Lookup** — resolve `{namespace}/{name}@{version}` through the
+   governance-signed alias map (FR-147); a deferred tool not yet loaded resolves
+   only after its `tool_loaded` event (FR-148)
+1a. **Descriptor re-verification** — compare the source's current descriptor digest
+   against the one admitted under FR-113. A mismatch fails closed as an
+   **unadmitted descriptor** rather than executing, because a protocol-level
+   listing cache lets a server change what it advertises after the scan (FR-150)
 2. **Abort check** (cancellation / stop hook)
 3. **Schema validation** (`inputSchema`) — instructive error on failure
 4. **Semantic validation** (`validateInput`)
@@ -218,13 +293,30 @@ Ordered steps applied to every call (FR-007, FR-010):
   at-least-once redelivery, or resume-from-checkpoint executes its external effect
   once, deduplicated on a durable tenant-scoped idempotency key (FR-071) derived
   from the same canonical digest the approval bound.
+- **No path around the pipeline** (FR-149): the loop and the in-sandbox broker are
+  the only callers. A capability reachable from a shell the agent controls without
+  traversing steps 1–16 is not a performance optimization, it is the absence of the
+  control surface — so the broker exists or the path does not.
+- **Names are not identity** (FR-147): resolution, approval scopes, receipts, and
+  the harness digest bind `{namespace}/{name}@{version}`. A namespace has one owner
+  per tenant and a colliding descriptor is refused at admission, never resolved by
+  registration order.
+- **An admitted descriptor stays the admitted descriptor** (FR-150): step 1a
+  re-verifies the descriptor digest, so a listing cache or a server-side refresh
+  cannot widen what the model was told a tool does after the scan cleared it.
+- **A skill's script is a tool** (FR-151): executable content shipped in a skill
+  bundle enters through this same registration path and these same gates, or the
+  bundle is refused. There is no execution path for code that arrived as an
+  attachment to a document.
 
 ## Example tool descriptor
 
 ```json
 {
-  "name": "asana_search",
+  "id": "asana/search@1.2.0",
   "description": "Search Asana tasks by query; returns high-signal fields only.",
+  "source_ref": "connector:asana",
+  "disclosure": "deferred",
   "inputSchema": { "type": "object", "properties": { "query": {"type":"string"} }, "required": ["query"] },
   "capability": "read_only",
   "concurrency": "concurrency_safe",
@@ -243,7 +335,9 @@ is what an approval scope binds to and what dedup keys off:
 
 ```json
 {
-  "name": "gmail_send",
+  "id": "gmail/send@2.0.1",
+  "source_ref": "connector:gmail",
+  "disclosure": "resident",
   "capability": "mutating",
   "concurrency": "exclusive",
   "taint": {

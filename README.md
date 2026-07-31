@@ -177,8 +177,29 @@ principles). Every design decision maps back to one of them:
   checkpoint — this is where parallelism lives, in reviewed configuration rather
   than a model's runtime discretion.
 - 🧠 **Memory & skills** — file-first per-tenant memory injected at session start
-  (retention-bounded, injection-screened), and reusable skills loaded on demand;
-  agent-proposed skills are promoted only through a human/eval gate.
+  (retention-bounded, injection-screened), and reusable skills loaded on demand
+  through three bounded disclosure tiers. A skill is a **signed, content-addressed
+  bundle**, not a text field: every file in it clears the injection scan, a bundled
+  script registers as a real tool through the ordinary gates or the bundle is
+  refused, and **every origin clears the same gate** — an import from a registry
+  needs publisher provenance, a verified signature, and a pinned version, because
+  gating only the agent's own proposals gates the one source least likely to be
+  hostile. A skill can only *narrow* what a run may do: its declared tools
+  intersect the resolved catalog and never extend it, so "load this skill" is not a
+  permission-widening lever reachable from injected content.
+- 🧰 **A catalog with an identity model** — tools are `{namespace}/{name}@{version}`
+  with one owning source per namespace, so a second server cannot shadow an
+  approved tool and silently re-point every approval scope and audit receipt that
+  named it. Large catalogs load on demand while the run's harness digest pins the
+  *resolvable universe* rather than the materialized set — deferred disclosure
+  without sacrificing reproducibility — and the selector that decides what the
+  model can see is eval-gated and measured like any other behaviour.
+- 🧱 **The sandbox is not a bypass** — agent-written code can orchestrate tools
+  (the code-execution pattern that trades context tokens for in-sandbox work), but
+  only through a **broker** that re-enters the same execution pipeline: same
+  permission chain, same approval gate, same idempotency claim, same receipt, same
+  taint. A direct network path from sandbox code to a connector is a prohibited
+  egress route, not an optimization.
 - 🔌 **Optional ecosystem adapters, one authority boundary** — model gateways
   (LiteLLM, OpenRouter, vLLM/Ollama), LLM-observability backends (Langfuse,
   Arize/Phoenix, Braintrust, Grafana, Datadog), eval/dataset platforms, and
@@ -339,7 +360,22 @@ Response codes of note: `402` budget exhausted (per-task/per-tenant ceiling),
 
 - **Surfaces**: CLI, REST/gRPC API, chat (Slack/Teams), web app, email, cron, and
   consumer messaging (**Telegram**, **Zalo**). Adding a surface is a thin adapter —
-  no kernel change.
+  no kernel change. Each surface publishes a **conformance-tested capability
+  descriptor** (can it render an approval package? carry a step-up challenge?
+  accept a schema-declared answer? stream?), and approval routing filters on it —
+  so an approval policy naming an effect class no configured channel can serve is
+  refused *when it is configured*, not when it expires unanswered.
+- **Multi-principal channels**: in a shared conversation, authority is the
+  **turn-submitting principal** — resolved per turn, never inherited from whoever
+  opened the thread. Steering and cancellation authorize per turn, and an audience
+  label bounds what may be delivered into the conversation and written to memory.
+- **Outbound delivery** rides a durable outbox with the event appended before the
+  send, so a crash never duplicates a reply and a *never-delivered* approval
+  request stays distinguishable from an *unanswered* one.
+- **Agent callers** (agent-to-agent ingress) are their own admission class:
+  disabled by default, subset-scoped, source-tainted as untrusted, metered to a
+  named payer, and incapable of resolving an approval or answering the agent's own
+  question.
 - **Per-user personal connectors**: **Gmail**, **Google Drive**, **Google
   Calendar** (and MCP-based systems of record) via a one-time per-user OAuth 2.0
   authorization-code + PKCE consent. Tokens are vaulted per `(tenant, user,

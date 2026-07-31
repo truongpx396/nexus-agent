@@ -84,6 +84,25 @@ curl -sX POST localhost:8080/v1/runs -d '{...}'      # API surface
 **Expected**: all three produce equivalent control flow and terminal reasons; no
 surface-specific fork of agent logic; long runs stream/poll (no blocked connection).
 
+```bash
+make surface-conformance SURFACE=telegram   # produce the capability descriptor
+make verify-approval-routing                # a class no channel can serve is refused AT CONFIG TIME
+make verify-multi-principal                 # each turn runs under its own submitter's scope
+make verify-delivery-once                   # crash mid-send => exactly one user-visible message
+make verify-agent-ingress                   # an agent principal resolves nothing
+```
+
+**Expected**: a surface without a conformance run is not enablable; an
+`ApprovalPolicy` routing an irreversible class to channels that can render neither
+blast-radius fields nor a step-up challenge is **rejected when configured**, not
+when it expires; in a shared channel every turn is authorized against the principal
+who submitted it and a non-submitting, non-operator steer is refused and audited; a
+worker killed mid-send produces no duplicate reply and a permanently undelivered
+approval request is distinguishable in the audit record from an unanswered one; and
+an agent-principal caller runs under a subset scope, is source-tainted, is metered
+to a named payer, and is refused as both an approval resolver and an input answerer
+(FR-155–FR-159).
+
 ## Scenario 3 — Enterprise trust & isolation (User Story 3, P2)
 
 **Goal**: tenant isolation at the data layer, attributable audit, secret handling,
@@ -217,6 +236,21 @@ make verify-skill-promotion            # an agent-proposed skill is NOT auto-pro
 **Expected**: memory is injected at session start (not mid-session), scoped to the
 tenant, screened for injection first; only a skill's brief description is always
 visible; an agent-proposed skill requires human + eval approval before promotion.
+
+```bash
+make import-skill SRC=<registry-url> TENANT=acme   # third-party import path
+make verify-skill-admission                         # unsigned/unpinned import => refused
+make verify-skill-narrowing                         # a skill cannot grant itself a tool
+```
+
+**Expected**: an import is refused without publisher provenance, a valid signature
+over `bundle_digest`, and a pinned upstream version — never admitted at a reduced
+trust tier; every file in the bundle clears the injection scan and a bundle
+declaring `executable = false` that carries executable content is refused rather
+than sanitized; a bundled script is registered as a `Tool` through the ordinary
+three gates or the bundle fails; and a skill declaring a tool the run does not hold
+has the declaration **ignored and recorded** rather than honoured, with every
+activation reconstructable from the log by `bundle_digest` (FR-151–FR-154).
 
 ## Scenario 5b — Bounded delegation (User Story 5, P3)
 

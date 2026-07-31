@@ -745,6 +745,90 @@ not measurable from the designed data.
   metric (rejected — on a platform whose stop signal is cost, an ungated
   efficiency regression is an incident that ships with a green check).
 
+## 29. Channels, tools, and skills
+
+- **Decision**: Tools get fully-qualified identity (`{namespace}/{name}@{version}`)
+  with one owning source per namespace, collision refused at admission, and a
+  governance-signed alias map; deferred disclosure is reconciled with the harness
+  digest by pinning a **catalog manifest** (the resolvable universe) rather than
+  the materialized descriptor set, with each load a `tool_loaded` event and the
+  selector eval-gated and measured; sandbox-originated tool calls are permitted
+  **only** through an in-sandbox broker that re-enters the pipeline at step 1, and
+  a direct network path from sandbox code to a connector is a prohibited egress
+  route; MCP listing caches are advisory with the descriptor digest re-verified at
+  use, and server-initiated user input is an FR-110 input request. Skills become
+  signed, content-addressed **bundles** whose every file passes the FR-113 scan,
+  whose scripts register as tools or the bundle is refused, admitted through one
+  gate for all four origins with provenance/signature/pinned version for imports,
+  capability-**narrowing** only, and disclosed in three bounded tiers. Surfaces
+  publish a conformance-tested **capability descriptor** that approval routing
+  filters on; authority is the turn-submitting principal rather than the
+  conversation's opener; outbound delivery ships through a durable outbox; and
+  agent-principal ingress is its own admission class (FR-147–FR-159).
+- **Rationale**: The review found the strong gates pointed at the safest sources.
+  FR-021 gated *agent-proposed* skills — the platform's own agent — while a
+  marketplace import entered as configuration, against a supply chain where a
+  42,447-skill study found 26.1% carrying at least one vulnerability (13.3% data
+  exfiltration, 11.8% privilege escalation) and 157 confirmed malicious, a
+  separate study found injection in 36% of skills and 1,467 malicious payloads,
+  and a February 2026 campaign distributed 30+ malicious skills to users of three
+  major agent products; publishing requires only a `SKILL.md` and a week-old
+  account. FR-113 scanned tool descriptors but not skill bodies, which the model
+  reads identically and which are typically an order of magnitude larger. Skills
+  bundling executable scripts measure at 2.12× the vulnerability rate of
+  instruction-only skills, and the ecosystem format that ~40 products adopted
+  after the standard opened (2025-12-18) is a directory that may carry them.
+  Separately, FR-062 and FR-129 forbade each other — one requires the tool set to
+  change mid-run, the other pins "the resolved tool-catalog contents" and FR-088
+  makes a mid-run digest change a defect. And the sandbox was the one place a
+  capability could be reached with no permission chain at all, precisely as the
+  code-execution pattern (GA February 2026, ~98% token reduction on the reference
+  workload) invites.
+- **Comparison set**: **Tool execution came out ahead of the entire set** — the
+  single pipeline, the published total permission order, and the
+  digest/claim/receipt trilogy have no equivalent in Claude Code, OpenHands,
+  SWE-agent, OpenClaw/GoClaw, or Hermes — and **skill governance likewise**, since
+  the ecosystem's gate is a marketplace listing. The borrowings are specific.
+  **Claude Code** supplies deferred tool loading at a declared context-budget
+  threshold (the trigger FR-062 lacked) and the plugin model in which skills,
+  hooks, subagents, and MCP servers are one versioned installable unit — the
+  packaging insight behind treating a skill as a bundle rather than a row.
+  **Anthropic's advanced tool use** supplies Tool Search and Programmatic Tool
+  Calling as the two patterns FR-148 and FR-149 must answer. **MCP `2026-07-28`**
+  supplies cacheable listings (a TOCTOU on the admission scan), multi-round-trip
+  server-initiated input (an inbound path to the human), and structured results.
+  The **Agent Skills standard and the security literature that followed it**
+  supply the three-tier disclosure model, the executable-bundle threat, and the
+  graduated trust-tier posture that replaces binary admit/reject. **SWE-agent and
+  OpenHands** supply the agent-computer-interface lesson that a small, well-shaped
+  tool set beats a large one — the argument for measuring selection accuracy
+  rather than only catalog coverage. **OpenClaw/GoClaw** supply per-thread channel
+  isolation and the channel allowlist as a first-class control. **Hermes** supplies
+  the per-skill suite already adopted in FR-143. The **2026 protocol stack**
+  (MCP / A2A / AG-UI) supplies the third surface class the spec never named.
+- **Alternatives considered**: Bare tool names with last-writer-wins resolution
+  (rejected — shadowing is a documented attack and connection order is not a
+  policy); pinning the materialized descriptor set into the harness digest
+  (rejected — it makes FR-062 unimplementable and every load a reproducibility
+  defect); allowing sandbox code to call connectors directly for the token savings
+  (rejected — it is the absence of the control surface, not an optimization, and
+  every guarantee in the trust section is void on that path); trusting server
+  cache hints (rejected — a listing that can change after admission makes the scan
+  a formality); treating a skill as reviewed text (rejected — the ecosystem
+  artifact carries executable code and the measured malicious population is not
+  hypothetical); admitting unsigned imports at a reduced trust tier (rejected — a
+  reduced tier for an unauthenticated artifact is a decision made about a publisher
+  nobody identified); honouring a skill's declared tools as a grant (rejected — it
+  reintroduces the widening lever FR-111 closes, reachable from injected content);
+  binding a shared conversation to whoever opened it, the prevailing practice
+  (rejected — it runs one participant's instructions under another's authority and
+  makes separation of duties unevaluable); sending outbound messages inline
+  (rejected — a duplicated reply is user-visible and a lost escalation is
+  indistinguishable from a human who declined to answer); and admitting agent
+  callers on the ordinary service-token path (rejected — it produces an
+  un-taint-tracked instruction channel that can also answer the platform's own
+  questions).
+
 ## Resolved unknowns summary
 
 | Technical Context item | Resolution |
@@ -776,6 +860,7 @@ not measurable from the designed data.
 | Catalog/token/reliability gap-closure | Descriptor injection scan; audience-bound tokens; eval-gated stuck detection; hybrid Gate-3 classifier (§25) |
 | Durable state artifacts | Condensation / Checkpoint / Snapshot separated; write-ahead idempotency claim; replay vs resume vs fork; harness digest; eval-gated compaction (§26) |
 | Ecosystem integration | Optional adapters behind existing ports; one authority boundary; gateway as transport not router; OTLP-only observability; conformance-recorded capability matrix (§27) |
+| Channels / tools / skills | Qualified tool identity with one namespace owner; catalog manifest pinned instead of the materialized set; broker-only sandbox tool calls; signed skill bundles under one admission gate, narrowing-only; surface capability descriptors driving approval routing; per-turn principal authority; delivery outbox; agent-principal ingress class (§29) |
 | Evaluation measurement | k-trial statistical gate with `pass^k`/intervals and a three-valued verdict; environment digest + cold sandboxes; suite classes with graduation; in-boundary online scorer + rollout guardrail; pinned calibrated cross-family judge; fork-based trajectory cases; per-artifact suites + scheduled re-run; efficiency in the gate; measured held-out gap; eval entities made first-class (§28) |
 
 **No `NEEDS CLARIFICATION` remain.** Proceed to Phase 1.
