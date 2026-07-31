@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1248" height="940" viewBox="16 0 1248 940" font-family="Helvetica, Arial, sans-serif">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5b6472"/></marker></defs>
+<rect x="16" y="0" width="1248" height="940" fill="#fcfbf7"/>
+<text x="40" y="50.6" font-size="28" fill="#1f2937" text-anchor="start" xml:space="preserve">Nexus Agent — Control-Plane / Data-Plane Architecture</text>
+<text x="40" y="80.2" font-size="15" fill="#5b6472" text-anchor="start" xml:space="preserve">One kernel behind every surface; the data plane is a configuration flag away from a customer VPC.</text>
+<rect x="40" y="110" width="1200" height="124" rx="31" fill="#eef6ff" stroke="#1d4ed8" stroke-width="2"/>
+<text x="56" y="135.3" font-size="14" fill="#1d4ed8" text-anchor="start" xml:space="preserve">Surface adapters — thin, translate I/O only (no control-flow fork) · nine classes; agent-to-agent ingress is its own admission class, off by default</text>
+<rect x="64" y="162" width="116" height="54" rx="14" fill="#ffffff" stroke="#1f2937" stroke-width="1"/>
+<text x="122" y="193.3" font-size="14" fill="#1f2937" text-anchor="middle" xml:space="preserve">CLI</text>
+<rect x="193" y="162" width="116" height="54" rx="14" fill="#ffffff" stroke="#1f2937" stroke-width="1"/>
+<text x="251" y="193.3" font-size="14" fill="#1f2937" text-anchor="middle" xml:space="preserve">REST/gRPC</text>
+<rect x="322" y="162" width="116" height="54" rx="14" fill="#ffffff" stroke="#1f2937" stroke-width="1"/>
+<text x="380" y="193.3" font-size="14" fill="#1f2937" text-anchor="middle" xml:space="preserve">Slack/Teams</text>
+<rect x="451" y="162" width="116" height="54" rx="14" fill="#ffffff" stroke="#1f2937" stroke-width="1"/>
+<text x="509" y="193.3" font-size="14" fill="#1f2937" text-anchor="middle" xml:space="preserve">Web</text>
+<rect x="580" y="162" width="116" height="54" rx="14" fill="#ffffff" stroke="#1f2937" stroke-width="1"/>
+<text x="638" y="193.3" font-size="14" fill="#1f2937" text-anchor="middle" xml:space="preserve">Email</text>
+<rect x="709" y="162" width="116" height="54" rx="14" fill="#ffffff" stroke="#1f2937" stroke-width="1"/>
+<text x="766" y="193.3" font-size="14" fill="#1f2937" text-anchor="middle" xml:space="preserve">Cron</text>
+<rect x="838" y="162" width="116" height="54" rx="14" fill="#ffffff" stroke="#1f2937" stroke-width="1"/>
+<text x="896" y="193.3" font-size="14" fill="#1f2937" text-anchor="middle" xml:space="preserve">Telegram</text>
+<rect x="967" y="162" width="116" height="54" rx="14" fill="#ffffff" stroke="#1f2937" stroke-width="1"/>
+<text x="1024" y="193.3" font-size="14" fill="#1f2937" text-anchor="middle" xml:space="preserve">Zalo</text>
+<rect x="1096" y="162" width="116" height="54" rx="14" fill="#ffffff" stroke="#1f2937" stroke-width="1"/>
+<text x="1154" y="193.3" font-size="14" fill="#1f2937" text-anchor="middle" xml:space="preserve">Agent ingress</text>
+<polyline points="640,238 640,262" fill="none" stroke="#5b6472" stroke-width="2" marker-end="url(#ah)"/>
+<rect x="40" y="264" width="1200" height="96" rx="24" fill="#ecfdf5" stroke="#0f766e" stroke-width="2"/>
+<text x="640" y="307.2" font-size="15" fill="#0f766e" text-anchor="middle" xml:space="preserve">Control plane (Go): AuthN (SSO/OIDC, per-tenant issuer) · RBAC · per-tenant rate limits</text>
+<text x="640" y="326.0" font-size="15" fill="#0f766e" text-anchor="middle" xml:space="preserve">budget check (pre-spend reservation) · deterministic routing by data label + difficulty</text>
+<polyline points="640,362 640,394" fill="none" stroke="#5b6472" stroke-width="2" marker-end="url(#ah)"/>
+<text x="656" y="377.4" font-size="12" fill="#5b6472" text-anchor="start" xml:space="preserve">versioned contract — moving the data plane is a deployment flag, not a rewrite</text>
+<rect x="40" y="396" width="1200" height="266" rx="32" fill="#ecfdf5" stroke="#0f766e" stroke-width="3"/>
+<text x="56" y="422.2" font-size="15" fill="#0f766e" text-anchor="start" xml:space="preserve">Data plane (Go) — deployable into a customer VPC (BYOC) unchanged</text>
+<rect x="70" y="440" width="200" height="90" rx="22" fill="#fff7ed" stroke="#b45309" stroke-width="2"/>
+<text x="170" y="473.4" font-size="13" fill="#b45309" text-anchor="middle" xml:space="preserve">Durable queue</text>
+<text x="170" y="489.6" font-size="13" fill="#b45309" text-anchor="middle" xml:space="preserve">(NATS JetStream)</text>
+<text x="170" y="505.9" font-size="13" fill="#b45309" text-anchor="middle" xml:space="preserve">session-key serial lock</text>
+<rect x="300" y="440" width="200" height="90" rx="22" fill="#eef6ff" stroke="#1d4ed8" stroke-width="2"/>
+<text x="400" y="473.4" font-size="13" fill="#1d4ed8" text-anchor="middle" xml:space="preserve">Stateless runtime</text>
+<text x="400" y="489.6" font-size="13" fill="#1d4ed8" text-anchor="middle" xml:space="preserve">workers</text>
+<text x="400" y="505.9" font-size="13" fill="#1d4ed8" text-anchor="middle" xml:space="preserve">all state externalized</text>
+<rect x="530" y="440" width="210" height="90" rx="22" fill="#ecfdf5" stroke="#0f766e" stroke-width="3"/>
+<text x="635" y="481.4" font-size="13" fill="#0f766e" text-anchor="middle" xml:space="preserve">Immutable kernel loop</text>
+<text x="635" y="497.6" font-size="13" fill="#0f766e" text-anchor="middle" xml:space="preserve">observe → think → act</text>
+<rect x="770" y="440" width="210" height="90" rx="22" fill="#ffffff" stroke="#1f2937" stroke-width="2"/>
+<text x="875" y="473.4" font-size="13" fill="#1f2937" text-anchor="middle" xml:space="preserve">Harness: tools · context</text>
+<text x="875" y="489.6" font-size="13" fill="#1f2937" text-anchor="middle" xml:space="preserve">memory · skills</text>
+<text x="875" y="505.9" font-size="13" fill="#1f2937" text-anchor="middle" xml:space="preserve">cost · reliability</text>
+<rect x="1010" y="440" width="200" height="90" rx="22" fill="#fff7ed" stroke="#b45309" stroke-width="2"/>
+<text x="1110" y="473.4" font-size="13" fill="#b45309" text-anchor="middle" xml:space="preserve">Warm sandbox pool</text>
+<text x="1110" y="489.6" font-size="13" fill="#b45309" text-anchor="middle" xml:space="preserve">E2B / Firecracker / gVisor</text>
+<text x="1110" y="505.9" font-size="13" fill="#b45309" text-anchor="middle" xml:space="preserve">network default-deny</text>
+<polyline points="270,485 300,485" fill="none" stroke="#5b6472" stroke-width="2" marker-end="url(#ah)"/>
+<polyline points="500,485 530,485" fill="none" stroke="#5b6472" stroke-width="2" marker-end="url(#ah)"/>
+<polyline points="740,485 770,485" fill="none" stroke="#5b6472" stroke-width="2" marker-end="url(#ah)"/>
+<polyline points="980,485 1010,485" fill="none" stroke="#5b6472" stroke-width="2" marker-end="url(#ah)"/>
+<rect x="70" y="546" width="370" height="86" rx="22" fill="#eef6ff" stroke="#1d4ed8" stroke-width="2"/>
+<text x="254" y="577.4" font-size="12" fill="#1d4ed8" text-anchor="middle" xml:space="preserve">Orchestration plane — declarative plans</text>
+<text x="254" y="592.4" font-size="12" fill="#1d4ed8" text-anchor="middle" xml:space="preserve">steps · conditions · gates · fan-out</text>
+<text x="254" y="607.4" font-size="12" fill="#1d4ed8" text-anchor="middle" xml:space="preserve">routing costs zero model tokens</text>
+<rect x="455" y="546" width="370" height="86" rx="22" fill="#ffffff" stroke="#1f2937" stroke-width="2"/>
+<text x="640" y="577.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">Connector / MCP catalog — vetted, per-tenant</text>
+<text x="640" y="592.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">RBAC-scoped · audience-restricted tokens</text>
+<text x="640" y="607.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">descriptors injection-scanned at admission</text>
+<rect x="840" y="546" width="370" height="86" rx="22" fill="#fff7ed" stroke="#b45309" stroke-width="2"/>
+<text x="1026" y="577.4" font-size="12" fill="#b45309" text-anchor="middle" xml:space="preserve">Oversight — approval + input requests</text>
+<text x="1026" y="592.4" font-size="12" fill="#b45309" text-anchor="middle" xml:space="preserve">digest-bound · durable suspend</text>
+<text x="1026" y="607.4" font-size="12" fill="#b45309" text-anchor="middle" xml:space="preserve">zero token cost while waiting</text>
+<polyline points="640,664 640,700" fill="none" stroke="#5b6472" stroke-width="2" marker-end="url(#ah)"/>
+<rect x="40" y="702" width="1200" height="128" rx="32" fill="#f8fafc" stroke="#1f2937" stroke-width="2"/>
+<text x="56" y="728.2" font-size="15" fill="#1f2937" text-anchor="start" xml:space="preserve">Trust surface (day-one)</text>
+<rect x="70" y="746" width="225" height="68" rx="17" fill="#ffffff" stroke="#1f2937" stroke-width="2"/>
+<text x="182" y="776.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">Postgres — append-only</text>
+<text x="182" y="791.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">event log + RLS (txn-local)</text>
+<rect x="302" y="746" width="225" height="68" rx="17" fill="#ffffff" stroke="#1f2937" stroke-width="2"/>
+<text x="414" y="776.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">Redis — session-key lock +</text>
+<text x="414" y="791.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">atomic budget reservations</text>
+<rect x="534" y="746" width="225" height="68" rx="17" fill="#ffffff" stroke="#1f2937" stroke-width="2"/>
+<text x="646" y="776.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">Object storage — offloaded</text>
+<text x="646" y="791.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">tool output + artifacts</text>
+<rect x="766" y="746" width="225" height="68" rx="17" fill="#ffffff" stroke="#1f2937" stroke-width="2"/>
+<text x="878" y="776.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">Vault + KMS — handles only;</text>
+<text x="878" y="791.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">sign-only audit key, BYOK</text>
+<rect x="998" y="746" width="225" height="68" rx="17" fill="#ffffff" stroke="#1f2937" stroke-width="2"/>
+<text x="1110" y="776.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">Hash-chained, anchored receipts</text>
+<text x="1110" y="791.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">content-free OTel traces</text>
+<rect x="40" y="858" width="1200" height="58" rx="14" fill="#eef6ff" stroke="#1d4ed8" stroke-width="2"/>
+<text x="640" y="892.2" font-size="15" fill="#1d4ed8" text-anchor="middle" xml:space="preserve">Python helpers (off the paying loop): eval harness · LLM-as-judge · context condenser  →  CI release gate</text>
+</svg>

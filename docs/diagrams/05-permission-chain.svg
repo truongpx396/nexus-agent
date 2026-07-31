@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1248" height="816" viewBox="16 0 1248 816" font-family="Helvetica, Arial, sans-serif">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5b6472"/></marker></defs>
+<rect x="16" y="0" width="1248" height="816" fill="#fcfbf7"/>
+<text x="40" y="50.6" font-size="28" fill="#1f2937" text-anchor="start" xml:space="preserve">Nexus Agent — Permission Chain &amp; Tool Execution Pipeline</text>
+<text x="40" y="80.2" font-size="15" fill="#5b6472" text-anchor="start" xml:space="preserve">One published total order. A deny at any layer is final; steps 6–7 are never skipped; a standing scope may answer an ask, never suppress one.</text>
+<rect x="40" y="110" width="570" height="534" rx="32" fill="#f8fafc" stroke="#1f2937" stroke-width="2"/>
+<text x="56" y="135.3" font-size="14" fill="#1f2937" text-anchor="start" xml:space="preserve">Permission resolution order (FR-111) — walked at pipeline step 8</text>
+<rect x="60" y="150" width="530" height="40" rx="10" fill="#fff7ed" stroke="#b45309" stroke-width="1"/>
+<text x="74" y="173.9" font-size="11.5" fill="#b45309" text-anchor="start" xml:space="preserve">1</text>
+<text x="100" y="173.9" font-size="11.5" fill="#b45309" text-anchor="start" xml:space="preserve">Deny rules (tenant / tool / pattern)</text>
+<text x="388" y="173.9" font-size="11.5" fill="#b45309" text-anchor="start" xml:space="preserve">DENY — final</text>
+<rect x="60" y="197" width="530" height="40" rx="10" fill="#ffffff" stroke="#1f2937" stroke-width="1"/>
+<text x="74" y="220.9" font-size="11.5" fill="#1f2937" text-anchor="start" xml:space="preserve">2</text>
+<text x="100" y="220.9" font-size="11.5" fill="#1f2937" text-anchor="start" xml:space="preserve">PreToolUse hooks</text>
+<text x="388" y="220.9" font-size="11.5" fill="#1f2937" text-anchor="start" xml:space="preserve">DENY · ASK · DEFER</text>
+<rect x="60" y="244" width="530" height="40" rx="10" fill="#fff7ed" stroke="#b45309" stroke-width="1"/>
+<text x="74" y="267.9" font-size="11.5" fill="#b45309" text-anchor="start" xml:space="preserve">3</text>
+<text x="100" y="267.9" font-size="11.5" fill="#b45309" text-anchor="start" xml:space="preserve">Autonomy level (pinned, ratcheting)</text>
+<text x="388" y="267.9" font-size="11.5" fill="#b45309" text-anchor="start" xml:space="preserve">DENY · ASK · DEFER</text>
+<rect x="60" y="291" width="530" height="40" rx="10" fill="#ffffff" stroke="#1f2937" stroke-width="1"/>
+<text x="74" y="314.9" font-size="11.5" fill="#1f2937" text-anchor="start" xml:space="preserve">4</text>
+<text x="100" y="314.9" font-size="11.5" fill="#1f2937" text-anchor="start" xml:space="preserve">Gate 1 — global permission profile</text>
+<text x="388" y="314.9" font-size="11.5" fill="#1f2937" text-anchor="start" xml:space="preserve">DENY · DEFER</text>
+<rect x="60" y="338" width="530" height="40" rx="10" fill="#ffffff" stroke="#1f2937" stroke-width="1"/>
+<text x="74" y="361.9" font-size="11.5" fill="#1f2937" text-anchor="start" xml:space="preserve">5</text>
+<text x="100" y="361.9" font-size="11.5" fill="#1f2937" text-anchor="start" xml:space="preserve">Gate 2 — capability metadata / effect class</text>
+<text x="388" y="361.9" font-size="11.5" fill="#1f2937" text-anchor="start" xml:space="preserve">DENY · ASK · DEFER</text>
+<rect x="60" y="385" width="530" height="40" rx="10" fill="#ecfdf5" stroke="#0f766e" stroke-width="1"/>
+<text x="74" y="408.9" font-size="11.5" fill="#0f766e" text-anchor="start" xml:space="preserve">6</text>
+<text x="100" y="408.9" font-size="11.5" fill="#0f766e" text-anchor="start" xml:space="preserve">Gate 3 — per-invocation safety on input</text>
+<text x="388" y="408.9" font-size="11.5" fill="#0f766e" text-anchor="start" xml:space="preserve">ALWAYS EVALUATED</text>
+<rect x="60" y="432" width="530" height="40" rx="10" fill="#ecfdf5" stroke="#0f766e" stroke-width="1"/>
+<text x="74" y="455.9" font-size="11.5" fill="#0f766e" text-anchor="start" xml:space="preserve">7</text>
+<text x="100" y="455.9" font-size="11.5" fill="#0f766e" text-anchor="start" xml:space="preserve">Rule of Two — taint + declared legs</text>
+<text x="388" y="455.9" font-size="11.5" fill="#0f766e" text-anchor="start" xml:space="preserve">ALWAYS EVALUATED</text>
+<rect x="60" y="479" width="530" height="40" rx="10" fill="#ffffff" stroke="#1f2937" stroke-width="1"/>
+<text x="74" y="502.9" font-size="11.5" fill="#1f2937" text-anchor="start" xml:space="preserve">8</text>
+<text x="100" y="502.9" font-size="11.5" fill="#1f2937" text-anchor="start" xml:space="preserve">Approval policy (risk × effect × value)</text>
+<text x="388" y="502.9" font-size="11.5" fill="#1f2937" text-anchor="start" xml:space="preserve">AUTO · ASK</text>
+<rect x="60" y="526" width="530" height="40" rx="10" fill="#ffffff" stroke="#1f2937" stroke-width="1"/>
+<text x="74" y="549.9" font-size="11.5" fill="#1f2937" text-anchor="start" xml:space="preserve">9</text>
+<text x="100" y="549.9" font-size="11.5" fill="#1f2937" text-anchor="start" xml:space="preserve">Standing scope / batch / plan pre-auth</text>
+<text x="388" y="549.9" font-size="11.5" fill="#1f2937" text-anchor="start" xml:space="preserve">may only ANSWER an ask</text>
+<rect x="60" y="573" width="530" height="40" rx="10" fill="#f8fafc" stroke="#5b6472" stroke-width="1"/>
+<text x="74" y="596.9" font-size="11.5" fill="#5b6472" text-anchor="start" xml:space="preserve">10</text>
+<text x="100" y="596.9" font-size="11.5" fill="#5b6472" text-anchor="start" xml:space="preserve">Otherwise</text>
+<text x="388" y="596.9" font-size="11.5" fill="#5b6472" text-anchor="start" xml:space="preserve">ALLOW</text>
+<rect x="640" y="110" width="600" height="534" rx="32" fill="#f8fafc" stroke="#1f2937" stroke-width="2"/>
+<text x="656" y="135.3" font-size="14" fill="#1f2937" text-anchor="start" xml:space="preserve">The single execution pipeline — every call, one path (FR-007)</text>
+<text x="660" y="163.9" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">1    Lookup {namespace}/{name}@{version} via the signed alias map</text>
+<text x="660" y="179.5" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">1a   Descriptor re-verification against the admitted digest</text>
+<text x="660" y="195.1" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">2    Abort check (cancellation / stop hook)</text>
+<text x="660" y="210.8" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">3    Schema validation        4  Semantic validation</text>
+<text x="660" y="226.4" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">5    Speculative safety classifier + Rule-of-Two evaluation</text>
+<text x="660" y="242.0" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">6    Input backfill (defaults, absolute-path coercion)</text>
+<text x="660" y="257.6" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">7    PreToolUse hooks</text>
+<text x="660" y="273.2" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">8    Permission chain  ←  the total order on the left</text>
+<text x="660" y="288.9" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">8a   Canonical digest = approval binding AND idempotency key</text>
+<text x="660" y="304.5" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">8b   Approval gate — durable suspend at zero token cost</text>
+<text x="660" y="320.1" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">9    Secret injection from the vault (the model saw a handle)</text>
+<text x="660" y="335.8" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">9a   Digest re-verify — divergence → approval_mismatch</text>
+<text x="660" y="351.4" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">9b   Write-ahead idempotency claim, committed in_flight</text>
+<text x="660" y="367.0" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">10   Execute in the per-tenant sandbox (limits, net deny)</text>
+<text x="660" y="382.6" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">10a  Claim resolution — probe or human, never re-execute</text>
+<text x="660" y="398.2" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">11   Result budgeting — cap / paginate, spill to storage</text>
+<text x="660" y="413.9" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">12   PostToolUse hooks     12a  Authorization receipt</text>
+<text x="660" y="429.5" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">13   Audit receipt — hash-chained, over digests</text>
+<text x="660" y="445.1" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">14   Append tool_result (paired, envelope-encrypted)</text>
+<text x="660" y="460.8" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">15   Record taint transition</text>
+<text x="660" y="476.4" font-size="12.5" fill="#1f2937" text-anchor="start" xml:space="preserve">16   Error classification + content-free cost span</text>
+<text x="660" y="541.4" font-size="12" fill="#5b6472" text-anchor="start" xml:space="preserve">Brokered calls are indistinguishable in the record: the same events,</text>
+<text x="660" y="556.4" font-size="12" fill="#5b6472" text-anchor="start" xml:space="preserve">receipts, taint folding, and per-call result budgeting apply whether the</text>
+<text x="660" y="571.4" font-size="12" fill="#5b6472" text-anchor="start" xml:space="preserve">call came from the model or from agent-written code in the sandbox.</text>
+<text x="660" y="586.4" font-size="12" fill="#5b6472" text-anchor="start" xml:space="preserve"></text>
+<text x="660" y="601.4" font-size="12" fill="#5b6472" text-anchor="start" xml:space="preserve">A capability reachable without this path is a complete bypass of every</text>
+<text x="660" y="616.4" font-size="12" fill="#5b6472" text-anchor="start" xml:space="preserve">control in the specification — so there is no such path.</text>
+<rect x="40" y="664" width="1200" height="128" rx="32" fill="#fff7ed" stroke="#b45309" stroke-width="2"/>
+<text x="640" y="708.9" font-size="12.5" fill="#b45309" text-anchor="middle" xml:space="preserve">Exactly two callers, indistinguishable downstream of step 1: the loop (a tool_use chunk) and the in-sandbox broker (agent-written code).</text>
+<text x="640" y="724.5" font-size="12.5" fill="#b45309" text-anchor="middle" xml:space="preserve">There is no third caller — a direct network path from sandbox code to a connector or MCP endpoint is a prohibited egress route, not a shortcut.</text>
+<text x="640" y="740.1" font-size="12.5" fill="#b45309" text-anchor="middle" xml:space="preserve">A deny at any layer is final. Steps 6–7 never skip: a standing scope, batch, or plan pre-authorization may satisfy an ask — never suppress one.</text>
+<text x="640" y="755.8" font-size="12.5" fill="#b45309" text-anchor="middle" xml:space="preserve">Skills sit below the table, not inside it: an activated skill intersects the resolved catalog and can only remove candidates, never add one.</text>
+</svg>
