@@ -51,9 +51,18 @@ prefix and a **deferred** tier advertised as name + description until loaded.
 - Built-in tools ship first-party: workspace-restricted filesystem
   (`file_read`/`file_write`/`file_search`/…), a sandboxed shell/code-execution tool
   (hard CPU/memory/PID/wall-clock limits, network default-deny — FR-059),
-  and web search/fetch (egress-allowlisted, untrusted results; crawl4ai backend
-  returning clean chunked markdown) — governed by the
-  three gates below and per-invocation safety (FR-056–FR-059).
+  web search/fetch (egress-allowlisted, untrusted results; crawl4ai backend
+  returning clean chunked markdown), and **document conversion** (PDF/DOCX/PPTX/
+  XLSX/CSV → the same chunked markdown, FR-160) — governed by the
+  three gates below and per-invocation safety (FR-056–FR-059, FR-160).
+- **Extraction and conversion backends run inside the sandbox**, never in the
+  runtime worker: a headless-browser extractor renders attacker-supplied HTML and
+  script, and PDF/Office parsers are a first-tier memory-safety surface fed bytes
+  the attacker chose. Their output is `returns_untrusted_content` — conversion is
+  decoding, not sanitization — and where conversion invokes a model (image
+  description, transcription, OCR) that call goes through the `Provider` port so
+  it is routed by data label, reserved pre-spend, and metered like any other
+  (FR-160, FR-047, FR-087, FR-027).
 - Cache-aware ordering: `sort(builtins) ++ sort(mcpTools)` over the **resident**
   tier so the tool-schema catalog in the prompt prefix stays byte-stable
   (Constitution III). Deferred tools contribute name + description only, and a

@@ -41,8 +41,12 @@ a single internal provider-abstraction interface with adapters
 (Anthropic native, OpenAI-compatible, Bedrock/Vertex, CLI-subprocess fallback);
 OpenTelemetry SDK; MCP client for external connectors; E2B sandbox runtime
 (default code-execution backend, swappable for Docker/microVM/local-OS isolation);
-crawl4ai for LLM-friendly web fetch/crawl (clean chunked markdown); Python: eval
-runner + LLM-as-judge; React 19 + Vite + Tailwind + React Query
+crawl4ai for LLM-friendly web fetch/crawl and a MarkItDown-class converter for
+documents (both **in-sandbox**, returning clean chunked markdown — they are not
+dependencies of the Go worker); pgvector as the default retrieval backend when
+the file-first tier stops being enough (a dedicated vector store attaches as an
+optional `retrieval` adapter); Python: eval runner + LLM-as-judge + pinned grader
+libraries; React 19 + Vite + Tailwind + React Query
 
 **Storage**: PostgreSQL (append-only, `schema_version`-stamped event log + cost
 records + hash-chained audit receipts + tenant/agent/skill config; tenant
@@ -326,7 +330,9 @@ backend-go/
 
 ml-python/                    # Python 3.12 helper service (off the paying loop)
 ├── src/
-│   ├── evals/                # corpus + suite classes, trial statistics, environment digest,
+│   ├── evals/                # corpus + suite classes (incl. retrieval), trial statistics,
+│   │                         #   pinned grader libraries beneath the statistics layer,
+│   │                         #   scheduled adversarial discovery (off the gate), env digest,
 │   │                         #   fork-based cases, efficiency budgets, integrity, CI gate
 │   ├── condenser/            # structured compaction / summarizer on a cheaper helper model
 │   └── judge/                # rubric scoring, held-out grader protection, human-label calibration

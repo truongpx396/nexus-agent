@@ -40,10 +40,11 @@ responsibilities are never delegated:
 | Durable queue (FR-046) | NATS JetStream | SQS, Redis Streams, **Temporal / Restate / Inngest / DBOS** | Scheduler + delivery guarantee | The event log; the approval mechanism; the exactly-once mechanism (FR-136) |
 | Plan runner (FR-102) | Platform plan evaluator | Same durable-execution engines | Step scheduling and durability | The source of branch decisions, which must replay from the log |
 | Telemetry export (FR-117) | OTLP → self-hosted collector | **Langfuse**, Arize/Phoenix, Braintrust, Grafana/Tempo, Datadog, Honeycomb | A view of structure, latency, tokens, and cost | A content store; an audit record; a second write path (FR-134) |
-| Eval / datasets (FR-043) | Platform eval runner + judge in CI | Langfuse datasets, Braintrust, Promptfoo, DeepEval | Corpus hosting, score storage, analysis | The gate (FR-135); the judge's calibration (FR-141); the trial statistics or verdict (FR-137) |
+| Eval platform / datasets (FR-043) | Platform eval runner + judge in CI | Langfuse datasets, Braintrust, Arize | Corpus hosting, score storage, analysis | The gate (FR-135); the judge's calibration (FR-141); the trial statistics or verdict (FR-137) |
+| *Grader libraries* — **not a port** (FR-135) | Platform code + model graders | **DeepEval, Promptfoo, Ragas** — pinned in-tree under `ml-python/` | Assertions and metrics *beneath* the platform's statistics | The verdict; an uncalibrated judge wearing a metric's name (FR-137, FR-141, FR-144) |
 | `Workspace` / sandbox (FR-047) | E2B | Docker, Firecracker, gVisor, local-OS isolation | The execution boundary | A path around the resource limits or egress allowlist |
 | Connector catalog (FR-012) | Built-in connectors | MCP servers, per-tenant connectors | Capability | Unvetted, unscanned, or audience-unrestricted access (FR-113, FR-114) |
-| Memory / retrieval (FR-019, FR-022) | File-first per-tenant memory | pgvector, Qdrant, Weaviate, a knowledge graph | A retrieval tier when scale justifies it | A trusted instruction channel — retrieved content stays untrusted (FR-087) |
+| Memory / retrieval (FR-019, FR-022) | File-first per-tenant memory, then **pgvector** | Qdrant, Weaviate, a knowledge graph | A retrieval tier when scale justifies it | A trusted instruction channel (FR-087); an index that survives an erasure (FR-162) |
 | Prompt / config source (FR-042) | Version control + review | Prompt-management tools | An authoring surface | A runtime source — versions pin into the harness digest at start (FR-136, FR-129) |
 | Vault / KMS | Deployment vault | HashiCorp Vault, cloud KMS/HSM | Secret custody | A component that can read the sign-only audit key (FR-081) |
 | `Surface` — frontend (FR-028, FR-155) | Platform SSE/WS event stream | **AG-UI** adapters, CopilotKit-style frontends, chat platform SDKs | Presentation and a wire format | The event log; a second progress source; a path around the capability descriptor (FR-155) |
@@ -137,6 +138,116 @@ surfaces, and each meets a rule that already exists here.
   question answered by the agent that raised the situation is not oversight.
   Disabled by default; enabling it is a governance decision (FR-096).
 
+## Evaluation: a platform and a library are different things (FR-135)
+
+The eval ecosystem ships in two shapes that are routinely conflated at
+integration time, and they carry different risk. The port map has a row for each.
+
+**A hosted platform** — Langfuse datasets, Braintrust — is an adapter on the
+`eval` port. It stores corpora and receives scores. It is admitted like any
+adapter and holds no gate authority; `no_gate_authority` and `score_only_egress`
+are recorded conformance dimensions rather than policy prose.
+
+**A grader library** — DeepEval, Promptfoo, Ragas — is *not* an adapter. It is a
+pinned in-tree dependency of the eval runner under FR-078, and it gets no port
+row because it runs inside the platform's own CI. What it supplies is
+**assertions and metrics beneath the platform's statistics**:
+
+| The library provides | The platform still owns |
+|---|---|
+| Assertion primitives, metric implementations, RAG metrics, test scaffolding | The k-trial design, exact intervals, interval-separation regression definition, and the three-valued verdict (FR-137) |
+| A convenient way to express a check | Which checks are deterministic and which need a judge (FR-144) |
+| Model-graded metrics (G-Eval, model-graded rubrics, faithfulness, answer relevancy) | Those *are judges* — pinned snapshot, different model family, calibration floor met before blocking (FR-141) |
+
+Two failure modes this closes. Adopting a library's per-assertion pass/fail as
+the gate's decision silently replaces a statistical gate with a point estimate —
+these libraries do not implement FR-137 and are not trying to. And enabling a
+model-graded metric by name in a config file installs an **uncalibrated
+instrument with a credible label**; it reaches the gate as a `Judge` row or not
+at all.
+
+## Adversarial discovery, off the gate (FR-163)
+
+Automated red-team scanners — Garak, a grader library's red-team module, an
+internal generator — close a real hole: the `safety` class tests only the attacks
+someone already imagined, and FR-143's scheduled re-run discovers none. They
+attach as **scheduled discovery**, never as an adapter and never as a gate.
+
+- **Findings are candidates, not verdicts.** A finding is triaged by a human and
+  promoted into the versioned `safety` class, where it becomes gating in the
+  ordinary way. Nothing generated at scan time blocks a release: probe generation
+  is non-deterministic, which is irreconcilable with FR-137's per-case trials and
+  FR-138's refusal to compare across environment digests.
+- **The scan runs through a real surface**, as a declared non-human
+  `principal_kind` (FR-158) against a dedicated eval tenant. A scan pointed at a
+  bare provider endpoint measures the model; every control worth testing here —
+  the Rule of Two, the digest-bound approval, the egress allowlist, the broker,
+  taint propagation — lives between the surface and the model.
+- **Coverage is recorded as partial.** A model-level scanner substantially
+  exercises the FR-069 input guard and the FR-068 egress sanitizer and reaches
+  almost none of the oversight, permission, or effect machinery. A clean scan is
+  reported as what it is; it is never read as adversarial assurance.
+- Finding rate, triage backlog, and promotion count are signals on the FR-095
+  footing — a scan nobody triages is a report, not a control.
+
+## Retrieval backends (FR-022, FR-162)
+
+The retrieval port is the one place where adopting the obvious tool costs
+guarantees the built-in store gives for free. Postgres already carries the
+platform's trust model; a dedicated vector database carries none of it and must
+re-earn each one:
+
+| Guarantee | pgvector | A dedicated vector store |
+|---|---|---|
+| Tenant isolation (FR-039) | The same row-level security, transaction-locally scoped | A collection per tenant, or a payload filter the application supplies — the latter is an **application ACL**, the enforcement model Principle VI rejects |
+| Erasure (FR-080, FR-162) | Rows deleted in the same transaction that destroys the key | A second erasure path in a second system, and vectors it never encrypted |
+| Residency (FR-091) | The tenant's pinned region, already enforced by placement | A second placement story to build and prove |
+| Restore (FR-090) | One PITR, one drill, one RPO/RTO | A second backup posture inside the same objectives |
+
+So: **pgvector is the default when the file-first tier stops being enough, and a
+dedicated store is the escape hatch scale justifies** — adopted deliberately,
+with `tenant_isolation_primitive`, `subject_level_delete`, `region_placement`,
+and `pitr_backup` recorded in its capability matrix. An adapter that cannot
+enumerate and delete a subject's rows is not admissible for a tenant with an
+erasure obligation, whatever its recall.
+
+Independent of backend, the index is a **projection of the log, never a store of
+record** (FR-162). That is what makes it deletable at all, and encrypting it is
+not a substitute — published inversion attacks recover substantive text from
+embeddings, so a vector surviving a crypto-shred is retained content.
+
+And it is measured: no retrieval tier is enabled, and no embedding-model,
+chunking, reranker, or top-K change ships, without the `retrieval` suite class of
+FR-161 — context precision/recall, first-relevant rank, and citation validity by
+code graders; groundedness by a judge under FR-141; retrieved tokens per query on
+the FR-145 efficiency footing, because raising recall by injecting more context
+is a cost regression a quality metric reports as a win.
+
+## Content conversion is a tool, not a port (FR-058, FR-160)
+
+Web extraction (crawl4ai) and document conversion (MarkItDown, Docling,
+Unstructured) are **built-in tools**, not adapters — they supply no platform
+capability that a port abstracts, and swapping one changes a tool's
+implementation rather than a plane's authority. The rules they inherit are
+already written; three are worth stating because placement is easy to get wrong:
+
+- **They execute in the sandbox** (FR-047, FR-059), never in the runtime worker.
+  A headless-browser extractor renders attacker-supplied HTML and script, and PDF
+  and Office parsers are a first-tier memory-safety surface fed bytes the
+  attacker chose. This is also what resolves the language seam: the extraction
+  and conversion backends are an in-sandbox concern, not a Python dependency of
+  the Go worker.
+- **Their output is untrusted** (FR-087 `returns_untrusted_content`). A document
+  carries injected instructions and hidden text exactly as a web page does.
+  Conversion is decoding, not sanitization; ingestion into memory or a corpus
+  still clears FR-075 provenance and poison screening afterwards.
+- **A model-backed conversion is a model call.** Image description, chart
+  interpretation, transcription, and multimodal OCR go through the `Provider`
+  port (FR-027) — routed by data label, reserved pre-spend, metered per token
+  class. A converter holding its own provider client is an unrouted, unmetered,
+  unceilinged call arriving under a parser's name, and it would carry a
+  `regulated` document across the boundary FR-091 pins.
+
 ## Skill registries (FR-152)
 
 A registry may distribute; it may never admit. Provenance, signature verification
@@ -171,7 +282,14 @@ An adapter is enabled for a tenant only when:
   adapters satisfy (FR-097), on the deterministic-provider harness where
   applicable;
 - its **capability matrix** — supported / degraded / unsupported per contract
-  feature — is recorded and versioned with the adapter;
+  feature — is recorded and versioned with the adapter, on the dimensions
+  declared **for its port**: a `retrieval` adapter is tested on isolation
+  primitive, subject- and tenant-level delete, region placement, and restore
+  posture; an `eval` adapter on score-only egress and the absence of gate
+  authority; a `surface` adapter on the FR-155 descriptor and `principal_kind`;
+  a `skill_source` on provenance, signature, and pinning. A port whose
+  dimensions are undeclared admits no adapters — one provider-shaped list says
+  nothing about a store or a gate;
 - no claimed success criterion depends on a capability recorded as degraded or
   unsupported; and
 - governance sign-off exists, as for any new tool or connector (FR-096).

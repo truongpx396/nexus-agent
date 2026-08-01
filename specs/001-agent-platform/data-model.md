@@ -238,17 +238,33 @@ recorded capability matrix (FR-131, FR-133). Configuration, never a kernel fork.
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `adapter_id` | string (PK) | e.g. `litellm`, `temporal`, `langfuse-otlp`, `qdrant` |
-| `port` | enum | `provider` / `queue` / `plan_runner` / `telemetry_export` / `sandbox` / `connector` / `retrieval` / `prompt_source` / `vault` |
+| `adapter_id` | string (PK) | e.g. `litellm`, `temporal`, `langfuse-otlp`, `pgvector`, `qdrant`, `braintrust`, `agui`, `skillhub` |
+| `port` | enum | `provider` / `queue` / `plan_runner` / `telemetry_export` / `sandbox` / `connector` / `retrieval` / `prompt_source` / `vault` / `eval` / `surface` / `skill_source` — the **closed, normative** set of FR-131; a framework with no port here has no admission path |
 | `version` | string | Pinned; a bump is an eval-gated dependency deploy (FR-078) |
-| `capabilities` | jsonb | Per contract feature: `supported` / `degraded` / `unsupported` — e.g. `token_class_reporting`, `cache_breakpoints`, `cache_affinity_ttl`, `native_tool_calling`, `schema_normalization`, `reasoning_roundtrip`, `stream_ordering` (FR-133) |
+| `capabilities` | jsonb | Per contract feature: `supported` / `degraded` / `unsupported`, on the dimensions declared **for this `port`** (FR-133) — see below |
 | `conformance_run_id` | UUID | The suite run that produced `capabilities`; absent ⇒ not enablable |
 | `governance_signoff` | jsonb | Recorded approver + timestamp, as for any new tool or connector (FR-096) |
 | `enabled_for_tenants` | UUID[] | Per-tenant enablement; disabled everywhere is the default |
 
+**Conformance dimensions are per port** (FR-133), because a provider-shaped list
+says nothing about a store or a gate. A port whose dimensions are undeclared
+admits no adapters:
+
+| Port | Dimensions recorded in `capabilities` |
+|---|---|
+| `provider` | `token_class_reporting`, `cache_breakpoints`, `cache_affinity_ttl`, `native_tool_calling`, `schema_normalization`, `reasoning_roundtrip`, `stream_ordering` (FR-132) |
+| `queue` / `plan_runner` | `exactly_once_claim_compat`, `durable_redelivery`, `digest_bound_approval_compat`, `log_remains_source_of_truth` (FR-136) |
+| `telemetry_export` | `otlp_only_write_path`, `tenant_isolation_primitive`, `attribute_allowlist_preserved` (FR-134) |
+| `retrieval` | `tenant_isolation_primitive` (store-enforced vs. application-supplied filter — the latter is `degraded`, being the application ACL FR-039 rejects), `subject_level_delete`, `tenant_level_delete`, `region_placement`, `pitr_backup` (FR-162, FR-091, FR-090) |
+| `eval` | `score_only_egress`, `dataset_import_from_fr125`, `no_gate_authority`, `no_trace_mining` (FR-135, FR-134) |
+| `surface` | The FR-155 capability descriptor plus `principal_kind` admission (FR-158) |
+| `skill_source` | `publisher_provenance`, `signature_over_bundle_digest`, `version_pinning` (FR-152) |
+| `sandbox` / `connector` / `prompt_source` / `vault` | Per the contract each already satisfies |
+
 - **Optional by construction**: the platform passes its full suite with every adapter row disabled (FR-131, SC-040).
-- **A degraded capability withdraws the claim it supports**: e.g. an adapter with `token_class_reporting: degraded` means the FR-014/SC-003 cache-read gate is **not claimed** on that path — recorded, surfaced in the release report, never estimated around (FR-132, FR-133).
-- **Authority boundary** (FR-131): no adapter row can grant routing authority, ceiling authority, source-of-truth status, gate authority, audit-record status, or content access. Those are not fields here because they are not configurable.
+- **A degraded capability withdraws the claim it supports**: e.g. an adapter with `token_class_reporting: degraded` means the FR-014/SC-003 cache-read gate is **not claimed** on that path — recorded, surfaced in the release report, never estimated around (FR-132, FR-133). The same rule bites hardest on `retrieval`: an adapter with `subject_level_delete: unsupported` is **not admissible for any tenant carrying an erasure obligation**, because crypto-shredding the key does not reach an index it never encrypted (FR-162).
+- **Authority boundary** (FR-131): no adapter row can grant routing authority, ceiling authority, source-of-truth status, gate authority, audit-record status, or content access. Those are not fields here because they are not configurable. An `eval` adapter is the sharpest case — it may hold corpora and receive scores and still holds no gate authority, which is why `no_gate_authority` is a recorded conformance dimension rather than a policy statement.
+- **A grader library is not an adapter row**: DeepEval, Promptfoo, and Ragas are pinned in-tree dependencies of the eval runner under FR-078, supplying metrics beneath the platform's FR-137 statistics. They get no row here because they run in the platform's own CI rather than behind a port — and any model-graded metric they contribute is a `Judge` row subject to FR-141 in full (FR-135).
 
 ### Price Book
 A versioned, effective-dated price table; cost is never computed from constants in
@@ -724,6 +740,28 @@ after injection screening (FR-019).
 
 - **Injection rule**: immutable snapshot at session start; updates take effect next session.
 
+### Derived Artifact
+Anything built by transforming customer content and stored outside the event log:
+a vector or keyword index, a knowledge graph, an FR-072 response-cache entry, a
+search index over memory. Always a **projection**, never a store of record —
+which is what makes it hard-deletable where an event is not (FR-162, FR-080).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `artifact_id` | UUID (PK) | |
+| `tenant_id` | UUID (FK) | RLS key |
+| `kind` | enum | `vector_index` / `keyword_index` / `knowledge_graph` / `response_cache` / `memory_index` |
+| `adapter_id` | string (FK, nullable) | The `retrieval`-port adapter holding it — NULL for the built-in pgvector tier |
+| `source_ref` | jsonb | What it projects from: event range, memory ids, or ingested document ids (FR-075) |
+| `erasure_subject_ids` | UUID[] | The subjects whose content contributed, so a DSAR resolves without a scan |
+| `corpus_snapshot_version` | string (nullable) | The versioned snapshot an FR-161 `retrieval` case was labelled over |
+| `rebuilt_from_seq` | bigint | The log sequence this projection is current to |
+
+- **Erasure is a deletion here, not a shred** (FR-162): an erasure request or retention expiry **deletes** the derived rows in the **same audited transaction** that destroys the per-tenant or per-subject key, and the deletion is itself a typed event. Encrypting the index is not an alternative — an embedding is an invertible-in-practice representation of its source text, so a vector surviving a crypto-shred is retained content.
+- **A scheduled reconciliation proves it**: no derived row may outlive its source; a survivor is an erasure defect on the FR-095 footing, not a cache-coherence nuisance.
+- **Rebuild reproduces the post-erasure state**, never the pre-erasure one, because the log it projects from no longer decrypts.
+- **Admissibility follows deletability**: a `retrieval` adapter recorded `subject_level_delete: unsupported` cannot be enabled for a tenant with an erasure obligation (FR-133).
+
 ### Approval
 The authorization **transaction** for a high-impact invocation — bound to the exact
 input it authorizes, rendered to a named approver, resolvable only by an authorized
@@ -910,9 +948,9 @@ never break" (FR-139).
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `suite_id` | string (PK) | e.g. `regression`, `capability`, `safety`, `negative`, `skill:invoice-triage` |
-| `class` | enum | `regression` / `capability` / `safety` / `negative` |
-| `scope` | enum | `platform` / `skill` / `tool` / `plan` / `approval_policy` / `condenser` (FR-143) |
+| `suite_id` | string (PK) | e.g. `regression`, `capability`, `safety`, `negative`, `retrieval`, `skill:invoice-triage` |
+| `class` | enum | `regression` / `capability` / `safety` / `negative` / `retrieval` (FR-161) |
+| `scope` | enum | `platform` / `skill` / `tool` / `plan` / `approval_policy` / `condenser` / `retrieval_tier` (FR-143, FR-161) |
 | `scope_ref` | string (nullable) | The artifact this suite travels with, for non-`platform` scope |
 | `metric` | enum | `pass_hat_k` (all k trials pass) / `pass_at_k` (≥1 of k passes) |
 | `trials_dev` | int | Default 3 |
@@ -922,6 +960,8 @@ never break" (FR-139).
 
 - **Safety admits no waiver**: the class carries a check constraint, not a convention — a threshold below 1.0 for `class = safety` is unrepresentable rather than discouraged (FR-139, SC-046).
 - **Graduation and retirement** move a case between suites; both are recorded, because a corpus silently losing its hard cases looks identical to an agent that got better.
+- **The `retrieval` class gates a tier, not a turn** (FR-161): it runs at retrieval-tier enablement and on every embedding-model, chunking, reranker, top-K, or `retrieval`-adapter change — each an FR-078 dependency deploy whose effect an end-state grader cannot see. Its cases carry `ground_truth_chunks` and are graded predominantly by code (context precision/recall, first-relevant rank, citation validity), with a judge reserved for groundedness under FR-141.
+- **Adversarial *discovery* is not a suite** (FR-163): a scheduled scanner's findings arrive as candidate cases requiring human triage and promotion into `safety`. Nothing generated at scan time gates a release, because a non-deterministic probe set cannot satisfy FR-137's trial statistics or FR-138's digest comparison.
 
 ### Eval Case
 One addressable, versioned unit of measurement. Never an anonymous fixture: a
@@ -935,7 +975,9 @@ corpus that cannot say where a case came from cannot honour a withdrawal
 | `version` | int | Immutable per version |
 | `shape` | enum | `end_state` (FR-044) / `fork` (FR-142 — an event-log prefix, effects disabled) |
 | `input` | jsonb (encrypted) | Task input, or for `fork` shape the source `session_id` + `seq` and overrides |
-| `graders` | jsonb | Ordered list, each `{kind: code\|model\|human, ref, visible\|held_out}` (FR-144) |
+| `graders` | jsonb | Ordered list, each `{kind: code\|model\|human, ref, visible\|held_out}` (FR-144). A `ref` naming a third-party grader library (DeepEval, Promptfoo, Ragas) pins its version under FR-078; a `model`-kind entry from any such library is a `Judge` and carries FR-141 in full (FR-135) |
+| `ground_truth_chunks` | jsonb (nullable) | `retrieval` class only: the labelled relevant chunks of the pinned corpus snapshot that context precision/recall and citation validity are computed against (FR-161) |
+| `corpus_snapshot_version` | string (nullable) | `retrieval` class only: the versioned corpus the case was labelled over — a comparison across snapshots is refused on the FR-138 principle |
 | `reference_solution` | jsonb (encrypted) | A known output that passes **all** its graders; absent ⇒ case not admissible |
 | `acceptance` | text | Unambiguous enough that two qualified reviewers reach the same verdict |
 | `acceptable_actions` | jsonb (nullable) | For `fork` shape: the acceptable-action set — never a required step sequence (FR-142) |
