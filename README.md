@@ -1,4 +1,4 @@
-# 🤖 Nexus Agent
+# 🤖 Nexus Agent - 🏢 Enterprise Edition
 
 > **One model-agnostic AI agent platform** — a single reliable agent kernel wrapped in an engineered harness, exposed through thin surface adapters, fronted by a control plane, and grounded in a trust surface. It serves customers from a 5-person startup to a 50,000-person enterprise **through configuration and connectors, never per-customer code forks.**
 
@@ -214,9 +214,26 @@ principles). Every design decision maps back to one of them:
   none may become the routing authority, the cost ceiling, the source of truth,
   the release gate, the audit record, or a path to content. **Adopt the tool,
   keep the authority.** Every adapter is admitted by a conformance suite that
-  records what it supports, degrades, and cannot do — so a proxy that quietly
-  stops reporting cache-read tokens withdraws the cache-read claim instead of
-  faking it.
+  records what it supports, degrades, and cannot do — **on the dimensions that
+  matter for its port**, so a vector store is tested on tenant isolation and
+  subject-level deletion rather than on cache breakpoints, and a proxy that
+  quietly stops reporting cache-read tokens withdraws the cache-read claim
+  instead of faking it. Evaluation tooling attaches in two shapes and never one:
+  a **hosted platform** (Langfuse, Braintrust) is an adapter that stores corpora
+  and receives scores; a **grader library** (DeepEval, Promptfoo, Ragas) is a
+  pinned in-tree dependency supplying metrics *beneath* the platform's trial
+  statistics — because no such library implements k-trial intervals or a
+  three-valued verdict, and every model-graded metric it offers is a judge that
+  must be calibrated before it may block anything.
+- 📄 **Documents are an input, not an obstacle** — a PDF, DOCX, PPTX, or XLSX
+  reaching the agent through a connector or the filesystem is converted to the
+  same clean chunked markdown the web fetcher produces. The converter runs **in
+  the sandbox**, because document parsers are a first-tier memory-safety surface
+  fed bytes the attacker chose; its output is untrusted like any fetch, since
+  conversion is decoding and not sanitization; and where it invokes a model to
+  describe an image or transcribe audio, that call goes through the provider port
+  — routed by data label, metered, and ceilinged, rather than an unrouted model
+  call arriving under a parser's name.
 - ⚙️ **Config-not-forks onboarding** — new orgs are onboarded via tenant settings,
   agent definitions, seeded skills, enabled surfaces, and permission-scoped
   connectors — the kernel is never forked.
@@ -237,7 +254,8 @@ principles). Every design decision maps back to one of them:
 | 🤖 **LLM providers** | One provider abstraction + adapters: Anthropic native, OpenAI-compatible, Bedrock/Vertex, CLI-subprocess fallback; a model gateway (LiteLLM/OpenRouter/vLLM) may sit behind the same port as *transport only* |
 | 🗃️ **Object storage** | S3-compatible, for offloaded oversized tool outputs and large artifacts |
 | 🔐 **Secrets & keys** | External secrets vault (injection at tool-execution time; the model sees a handle) + KMS/HSM — per-tenant content-encryption keys with BYOK, and a **sign-only** audit-chain signing key the data plane cannot read |
-| 🌍 **Web fetch** | crawl4ai (clean chunked markdown) |
+| 🌍 **Web fetch & documents** | crawl4ai for web, a MarkItDown-class converter for PDF/DOCX/PPTX/XLSX — both **in-sandbox**, both returning clean chunked markdown, both taint-declared untrusted |
+| 🧮 **Retrieval (when files stop being enough)** | pgvector by default — it inherits RLS, region pinning, PITR, and the erasure path; Qdrant/Weaviate attach as optional `retrieval` adapters that must re-earn all four |
 | 🔭 **Observability** | OpenTelemetry SDK — OTLP is the single write path; Langfuse / Arize / Braintrust / Grafana / Datadog are optional export targets (content-free) |
 | 🔗 **Connectors** | MCP client for external systems of record |
 | 🚢 **Packaging** | OCI images + Helm chart / Terraform module; KEDA/HPA autoscale on queue depth |
@@ -263,7 +281,9 @@ backend-go/
 │   ├── connectors/           # per-user OAuth (auth-code + PKCE), token vault,
 │   │                         #   gmail/gdrive/gcalendar/notion
 │   ├── context/              # two-zone prompt, cache discipline, structured compaction
-│   ├── memory/               # file-first memory, per-tenant, injection screening, retention
+│   ├── memory/               # file-first memory, per-tenant, injection screening, retention;
+│   │                         #   pgvector retrieval tier + rerank/top-K; derived artifacts as
+│   │                         #   deletable projections (erasure deletes the index)
 │   ├── skills/               # signed content-addressed bundles, three-tier disclosure,
 │   │                         #   one admission gate per origin, capability narrowing,
 │   │                         #   propose → gate → version → promote
@@ -289,8 +309,11 @@ backend-go/
 
 ml-python/                    # Python 3.12 helper service (off the paying loop)
 ├── src/
-│   ├── evals/                # corpus + suite classes, trial statistics, environment digest,
-│   │                         #   fork-based cases, efficiency budgets, integrity, CI gate
+│   ├── evals/                # corpus + suite classes (incl. retrieval), trial statistics,
+│   │                         #   pinned grader libraries beneath the statistics layer,
+│   │                         #   scheduled adversarial discovery (off the gate),
+│   │                         #   environment digest, fork-based cases, efficiency budgets,
+│   │                         #   integrity, CI gate
 │   ├── condenser/            # structured compaction / summarizer on a cheaper helper model
 │   └── judge/                # rubric scoring, held-out grader protection, human-label calibration
 └── tests/
@@ -491,6 +514,15 @@ long-running sessions (~5,000+ per single-org deployment).
   are envelope-encrypted per tenant (BYOK where required), so a right-to-erasure
   request is satisfied by **crypto-shredding** the key while the event log still
   replays and the audit chain still verifies. No event is ever deleted or rewritten.
+- 🧹 **Erasure reaches what content was turned into** — a shred covers the log, and
+  nothing else, which is why every **derived artifact** (vector index, keyword
+  index, knowledge graph, response cache) is a projection rather than a store of
+  record: it is *hard-deleted* in the same audited transaction that destroys the
+  key, and a scheduled reconciliation proves no derived row outlived its source.
+  Encrypting the index is not an alternative — embeddings invert well enough in
+  practice that a vector surviving a shred is retained content, and a retrieval
+  backend that cannot delete by subject is simply not admissible for a tenant
+  with an erasure obligation.
 - 📋 **Tamper-evident audit** — every mutating action produces a receipt tying it to
   a user, tenant, tool, inputs, result, and timestamp, **hash-chained** to its
   predecessor, signed by a sign-only KMS key the data plane cannot read, and
@@ -680,6 +712,23 @@ long-running sessions (~5,000+ per single-org deployment).
   human-in-the-loop cases, including injected attempts to suppress or simulate
   consent, to widen autonomy mid-run, or to reach a gated effect through a standing
   scope. All must be refused and audited.
+- 🔦 **…and the attack list keeps growing without the gate going soft** — a
+  hand-authored corpus only tests the attacks someone already imagined, so a
+  **scheduled adversarial scan** probes a live eval tenant *through a real
+  surface* as a declared non-human principal (a scan pointed at a bare model
+  endpoint measures the model, not the platform between it and the caller). Its
+  findings are **candidates**, never verdicts: a human triages and promotes them
+  into the versioned safety class, because a non-deterministic probe set cannot
+  satisfy the trial statistics the gate is built on. Its coverage is reported as
+  partial — a clean scan is not adversarial assurance.
+- 🔎 **Retrieval is measured, not assumed** — reranking, top-K, grounding, and
+  citations are requirements, so they are graded: a **retrieval suite** over a
+  pinned corpus snapshot scores context precision and recall, first-relevant
+  rank, and citation validity with code graders, groundedness with a judge, and
+  retrieved-tokens-per-query on the efficiency footing — because raising recall
+  by injecting more context is a cost regression a quality metric reports as a
+  win. No retrieval tier is enabled, and no embedding-model, chunking, reranker,
+  or top-K change ships, without it.
 - 📥 **Growing the corpus from production is a governed path** — because telemetry
   is structure-free and content may not cross a tenant boundary, a production case
   becomes an eval case only through an explicit, tenant-consented, redacted,
@@ -784,7 +833,10 @@ delivery outbox, the delegation-chain columns, and the trace/event join key.
 **Deliberately deferred**, each with a stated trigger in the cut line and each
 additive against that schema: the durable queue and stateless worker pool, the
 sandbox pool, the *physical* control/data-plane split, consumer surfaces and
-personal connectors, memory tiers beyond files and skill promotion, sub-agent
+personal connectors, memory tiers beyond files (and with them the retrieval suite
+that gates one and the derived-artifact deletion that releases one) and skill
+promotion, document conversion beyond the plain-text families, scheduled
+adversarial discovery, sub-agent
 delegation and the orchestration plane as *behavior*, deferred tool disclosure
 and its gated selector, the in-sandbox broker (until it exists, connector and MCP
 endpoints stay in the sandbox egress deny set — a bypass is never the interim
