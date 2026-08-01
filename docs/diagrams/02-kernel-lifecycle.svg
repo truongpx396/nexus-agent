@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1192" height="712" viewBox="12 0 1192 712" font-family="Helvetica, Arial, sans-serif">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5b6472"/></marker></defs>
+<rect x="12" y="0" width="1192" height="712" fill="#fcfbf7"/>
+<text x="40" y="50.6" font-size="28" fill="#1f2937" text-anchor="start" xml:space="preserve">Nexus Agent — Kernel Loop Lifecycle</text>
+<text x="40" y="77.3" font-size="14" fill="#5b6472" text-anchor="start" xml:space="preserve">Pre-spend budget gate, typed classification, paired tool results, durable suspension for a human — and a producer for every terminal reason.</text>
+<rect x="60" y="140" width="170" height="78" rx="20" fill="#eef6ff" stroke="#1d4ed8" stroke-width="2"/>
+<text x="145" y="175.3" font-size="13" fill="#1d4ed8" text-anchor="middle" xml:space="preserve">Start / next turn</text>
+<text x="145" y="191.6" font-size="13" fill="#1d4ed8" text-anchor="middle" xml:space="preserve">load state + prompt</text>
+<rect x="258" y="140" width="196" height="78" rx="20" fill="#ecfdf5" stroke="#0f766e" stroke-width="2"/>
+<text x="356" y="167.3" font-size="13" fill="#0f766e" text-anchor="middle" xml:space="preserve">Hygiene pass</text>
+<text x="356" y="183.6" font-size="13" fill="#0f766e" text-anchor="middle" xml:space="preserve">repair tool pairs</text>
+<text x="356" y="199.8" font-size="13" fill="#0f766e" text-anchor="middle" xml:space="preserve">prune stale results</text>
+<rect x="482" y="140" width="200" height="78" rx="20" fill="#fff7ed" stroke="#b45309" stroke-width="2"/>
+<text x="582" y="175.3" font-size="13" fill="#b45309" text-anchor="middle" xml:space="preserve">Reserve budget (pre-spend)</text>
+<text x="582" y="191.6" font-size="13" fill="#b45309" text-anchor="middle" xml:space="preserve">worst-case · atomic per tenant</text>
+<rect x="710" y="140" width="190" height="78" rx="20" fill="#ffffff" stroke="#1f2937" stroke-width="2"/>
+<text x="805" y="175.3" font-size="13" fill="#1f2937" text-anchor="middle" xml:space="preserve">Model call</text>
+<text x="805" y="191.6" font-size="13" fill="#1f2937" text-anchor="middle" xml:space="preserve">provider stream · response</text>
+<rect x="928" y="140" width="212" height="78" rx="20" fill="#fff7ed" stroke="#b45309" stroke-width="2"/>
+<text x="1034" y="175.4" font-size="12" fill="#b45309" text-anchor="middle" xml:space="preserve">Classify response</text>
+<text x="1034" y="190.4" font-size="12" fill="#b45309" text-anchor="middle" xml:space="preserve">TOOL_CALLS / CONTENT / EMPTY</text>
+<polyline points="230,179 258,179" fill="none" stroke="#5b6472" stroke-width="2" marker-end="url(#ah)"/>
+<polyline points="454,179 482,179" fill="none" stroke="#5b6472" stroke-width="2" marker-end="url(#ah)"/>
+<polyline points="682,179 710,179" fill="none" stroke="#5b6472" stroke-width="2" marker-end="url(#ah)"/>
+<polyline points="900,179 928,179" fill="none" stroke="#5b6472" stroke-width="2" marker-end="url(#ah)"/>
+<rect x="482" y="276" width="200" height="74" rx="18" fill="#f8fafc" stroke="#5b6472" stroke-width="2"/>
+<text x="582" y="309.4" font-size="13" fill="#5b6472" text-anchor="middle" xml:space="preserve">Emit empty</text>
+<text x="582" y="325.6" font-size="13" fill="#5b6472" text-anchor="middle" xml:space="preserve">re-prompt or stop</text>
+<rect x="710" y="276" width="190" height="74" rx="18" fill="#eef6ff" stroke="#1d4ed8" stroke-width="2"/>
+<text x="804" y="309.4" font-size="13" fill="#1d4ed8" text-anchor="middle" xml:space="preserve">Emit content</text>
+<text x="804" y="325.6" font-size="13" fill="#1d4ed8" text-anchor="middle" xml:space="preserve">terminal-safe answer</text>
+<rect x="928" y="276" width="212" height="74" rx="18" fill="#fff7ed" stroke="#b45309" stroke-width="2"/>
+<text x="1034" y="301.4" font-size="13" fill="#b45309" text-anchor="middle" xml:space="preserve">Emit tool_use</text>
+<text x="1034" y="317.6" font-size="13" fill="#b45309" text-anchor="middle" xml:space="preserve">execution pipeline →</text>
+<text x="1034" y="333.9" font-size="13" fill="#b45309" text-anchor="middle" xml:space="preserve">wait for paired result</text>
+<polyline points="1034,218 1034,276" fill="none" stroke="#5b6472" stroke-width="2" marker-end="url(#ah)"/>
+<polyline points="1034,218 1034,250 805,250 805,276" fill="none" stroke="#5b6472" stroke-width="2" marker-end="url(#ah)"/>
+<polyline points="1034,218 1034,250 582,250 582,276" fill="none" stroke="#5b6472" stroke-width="2" marker-end="url(#ah)"/>
+<polyline points="500,218 500,246 36,246 36,600 330,600" fill="none" stroke="#b45309" stroke-width="2" marker-end="url(#ah)"/>
+<text x="44" y="264.4" font-size="11" fill="#b45309" text-anchor="start" xml:space="preserve">refused →</text>
+<text x="44" y="278.2" font-size="11" fill="#b45309" text-anchor="start" xml:space="preserve">cost_exhausted</text>
+<rect x="60" y="406" width="360" height="112" rx="28" fill="#fff7ed" stroke="#b45309" stroke-width="2"/>
+<text x="240" y="443.4" font-size="12" fill="#b45309" text-anchor="middle" xml:space="preserve">Oversight gate — the run suspends durably</text>
+<text x="240" y="458.4" font-size="12" fill="#b45309" text-anchor="middle" xml:space="preserve">approval or input request · zero token cost</text>
+<text x="240" y="473.4" font-size="12" fill="#b45309" text-anchor="middle" xml:space="preserve">granted → resume · denied → typed result</text>
+<text x="240" y="488.4" font-size="12" fill="#b45309" text-anchor="middle" xml:space="preserve">expired → approval_expired / input_expired</text>
+<rect x="450" y="406" width="330" height="112" rx="28" fill="#ffffff" stroke="#1f2937" stroke-width="2"/>
+<text x="615" y="443.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">Classify failure before any retry</text>
+<text x="615" y="458.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">backoff + jitter · circuit-break after 3</text>
+<text x="615" y="473.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">identical failures → error</text>
+<text x="615" y="488.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">stuck_suspected → corroborated → stop</text>
+<rect x="810" y="406" width="330" height="112" rx="28" fill="#f8fafc" stroke="#5b6472" stroke-width="2"/>
+<text x="974" y="443.4" font-size="12" fill="#5b6472" text-anchor="middle" xml:space="preserve">Steer · cancel · hooks · limits</text>
+<text x="974" y="458.4" font-size="12" fill="#5b6472" text-anchor="middle" xml:space="preserve">cancel → aborted · hook → hook_stopped</text>
+<text x="974" y="473.4" font-size="12" fill="#5b6472" text-anchor="middle" xml:space="preserve">turn ceiling → max_turns</text>
+<text x="974" y="488.4" font-size="12" fill="#5b6472" text-anchor="middle" xml:space="preserve">context overflow → prompt_too_long</text>
+<polyline points="1034,350 1034,380 240,380 240,406" fill="none" stroke="#5b6472" stroke-width="2" marker-end="url(#ah)"/>
+<polyline points="240,518 240,540 390,540 390,556" fill="none" stroke="#5b6472" stroke-width="2" marker-end="url(#ah)"/>
+<polyline points="615,518 615,556" fill="none" stroke="#5b6472" stroke-width="2" marker-end="url(#ah)"/>
+<polyline points="975,518 975,540 810,540 810,556" fill="none" stroke="#5b6472" stroke-width="2" marker-end="url(#ah)"/>
+<rect x="330" y="556" width="540" height="132" rx="32" fill="#ecfdf5" stroke="#0f766e" stroke-width="2"/>
+<text x="600" y="600.3" font-size="14" fill="#0f766e" text-anchor="middle" xml:space="preserve">Typed terminal reason — every one has a producer above</text>
+<text x="600" y="617.8" font-size="14" fill="#0f766e" text-anchor="middle" xml:space="preserve">completed · max_turns · cost_exhausted · error</text>
+<text x="600" y="635.3" font-size="14" fill="#0f766e" text-anchor="middle" xml:space="preserve">aborted · prompt_too_long · hook_stopped</text>
+<text x="600" y="652.8" font-size="14" fill="#0f766e" text-anchor="middle" xml:space="preserve">approval_expired · input_expired</text>
+<polyline points="1140,313 1180,313 1180,104 145,104 145,140" fill="none" stroke="#1d4ed8" stroke-width="2" marker-end="url(#ah)"/>
+<text x="560" y="97.4" font-size="12" fill="#1d4ed8" text-anchor="start" xml:space="preserve">next turn — paired result appended, byte-stable prefix preserved</text>
+</svg>

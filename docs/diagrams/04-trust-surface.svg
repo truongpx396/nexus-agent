@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1288" height="614" viewBox="16 0 1288 614" font-family="Helvetica, Arial, sans-serif">
+<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5b6472"/></marker></defs>
+<rect x="16" y="0" width="1288" height="614" fill="#fcfbf7"/>
+<text x="40" y="50.6" font-size="28" fill="#1f2937" text-anchor="start" xml:space="preserve">Nexus Agent — Trust Surface / Rule of Two</text>
+<text x="40" y="80.2" font-size="15" fill="#5b6472" text-anchor="start" xml:space="preserve">Tenant isolation, vaulted secrets, encrypted-and-erasable content, chained audit, content-free telemetry, human approval, and sandbox limits are one perimeter.</text>
+<rect x="40" y="120" width="1220" height="470" rx="32" fill="#f8fafc" stroke="#1f2937" stroke-width="2"/>
+<text x="56" y="147.2" font-size="16" fill="#1f2937" text-anchor="start" xml:space="preserve">Trust boundary (fail closed)</text>
+<text x="650" y="164.3" font-size="14" fill="#5b6472" text-anchor="middle" xml:space="preserve">Co-equal perimeter controls — all enforced simultaneously, not sequentially</text>
+<rect x="70" y="186" width="250" height="104" rx="26" fill="#ecfdf5" stroke="#0f766e" stroke-width="2"/>
+<text x="195" y="227.4" font-size="12" fill="#0f766e" text-anchor="middle" xml:space="preserve">Tenant / user / RBAC</text>
+<text x="195" y="242.4" font-size="12" fill="#0f766e" text-anchor="middle" xml:space="preserve">isolation at the data layer (RLS)</text>
+<text x="195" y="257.4" font-size="12" fill="#0f766e" text-anchor="middle" xml:space="preserve">transaction-local scope</text>
+<rect x="368" y="186" width="250" height="104" rx="26" fill="#fff7ed" stroke="#b45309" stroke-width="2"/>
+<text x="493" y="227.4" font-size="12" fill="#b45309" text-anchor="middle" xml:space="preserve">Secrets vault + KMS</text>
+<text x="493" y="242.4" font-size="12" fill="#b45309" text-anchor="middle" xml:space="preserve">model sees only handles</text>
+<text x="493" y="257.4" font-size="12" fill="#b45309" text-anchor="middle" xml:space="preserve">injected at execution time</text>
+<rect x="666" y="186" width="250" height="104" rx="26" fill="#fff7ed" stroke="#b45309" stroke-width="2"/>
+<text x="790" y="227.4" font-size="12" fill="#b45309" text-anchor="middle" xml:space="preserve">Human approval = a transaction</text>
+<text x="790" y="242.4" font-size="12" fill="#b45309" text-anchor="middle" xml:space="preserve">digest-bound · human-only</text>
+<text x="790" y="257.4" font-size="12" fill="#b45309" text-anchor="middle" xml:space="preserve">unanswered expires as denial</text>
+<rect x="964" y="186" width="250" height="104" rx="26" fill="#eef6ff" stroke="#1d4ed8" stroke-width="2"/>
+<text x="1089" y="227.4" font-size="12" fill="#1d4ed8" text-anchor="middle" xml:space="preserve">Sandbox boundary</text>
+<text x="1089" y="242.4" font-size="12" fill="#1d4ed8" text-anchor="middle" xml:space="preserve">network default-deny</text>
+<text x="1089" y="257.4" font-size="12" fill="#1d4ed8" text-anchor="middle" xml:space="preserve">egress via domain allowlist</text>
+<rect x="70" y="314" width="250" height="104" rx="26" fill="#ffffff" stroke="#1f2937" stroke-width="2"/>
+<text x="195" y="355.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">Encrypted at rest per tenant (BYOK)</text>
+<text x="195" y="370.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">erasure = crypto-shred the key</text>
+<text x="195" y="385.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">the log still replays</text>
+<rect x="368" y="314" width="250" height="104" rx="26" fill="#ffffff" stroke="#1f2937" stroke-width="2"/>
+<text x="493" y="355.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">Hash-chained audit receipts</text>
+<text x="493" y="370.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">externally anchored · sign-only key</text>
+<text x="493" y="385.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">over digests, never plaintext</text>
+<rect x="666" y="314" width="250" height="104" rx="26" fill="#ffffff" stroke="#1f2937" stroke-width="2"/>
+<text x="791" y="355.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">Content-free telemetry</text>
+<text x="791" y="370.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">reading content = audited,</text>
+<text x="791" y="385.4" font-size="12" fill="#1f2937" text-anchor="middle" xml:space="preserve">expiring grant + receipt per read</text>
+<rect x="964" y="314" width="250" height="104" rx="26" fill="#fff7ed" stroke="#b45309" stroke-width="2"/>
+<text x="1089" y="355.4" font-size="12" fill="#b45309" text-anchor="middle" xml:space="preserve">Per-invocation safety, fail-closed</text>
+<text x="1089" y="370.4" font-size="12" fill="#b45309" text-anchor="middle" xml:space="preserve">autonomy ratchets — tighten only</text>
+<text x="1089" y="385.4" font-size="12" fill="#b45309" text-anchor="middle" xml:space="preserve">no bypass mode exists</text>
+<rect x="360" y="452" width="580" height="104" rx="26" fill="#fff7ed" stroke="#b45309" stroke-width="2"/>
+<text x="650" y="492.4" font-size="13" fill="#b45309" text-anchor="middle" xml:space="preserve">Rule of Two — at most two of these proceed unattended</text>
+<text x="650" y="508.6" font-size="13" fill="#b45309" text-anchor="middle" xml:space="preserve">untrusted input · private data · external state change or communication</text>
+<text x="650" y="524.9" font-size="13" fill="#b45309" text-anchor="middle" xml:space="preserve">the third leg requires human approval</text>
+</svg>

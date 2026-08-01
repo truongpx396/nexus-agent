@@ -76,6 +76,7 @@ flowchart TB
     subgraph Surfaces["Surface adapters (thin, translate I/O only)"]
         CLI[CLI] & API[REST/gRPC] & Chat[Slack/Teams] & Web[Web app]
         Email[Email] & Cron[Cron] & TG[Telegram] & Zalo[Zalo]
+        A2A[Agent-to-agent ingress<br/>own principal_kind · off by default]
     end
 
     subgraph Control["Control plane (Go)"]
@@ -111,10 +112,11 @@ flowchart TB
   `input_expired`).
 - **Harness** — tools, cache-stable context, per-turn cost metering, file-first
   memory, on-demand skills, and reliability engineering.
-- **Surfaces** — thin adapters (CLI, chat, web, REST/gRPC, email, cron,
-  Telegram/Zalo) that only translate input and output; no per-surface control flow.
-- **Control plane** — auth (SSO/OIDC), RBAC, per-tenant/per-task budgets, and
-  deterministic routing.
+- **Surfaces** — thin adapters across nine surface classes (CLI, chat, web,
+  REST/gRPC, email, cron, Telegram, Zalo, and agent-to-agent ingress) that only
+  translate input and output; no per-surface control flow.
+- **Control plane** — auth (SSO/OIDC, per-tenant issuer), RBAC, per-tenant rate
+  limits, per-tenant/per-task budgets, and deterministic routing.
 - **Trust surface** — per-tenant isolation via Postgres row-level security, vaulted
   secrets, immutable audit receipts, and evals-in-CI.
 
@@ -174,8 +176,11 @@ principles). Every design decision maps back to one of them:
   platform evaluates the control flow, so **routing between steps costs zero model
   tokens**; the model works only *inside* a step. The same plan runs the same way
   twice, replays from the log naming the branch it took, and resumes from a
-  checkpoint — this is where parallelism lives, in reviewed configuration rather
-  than a model's runtime discretion.
+  checkpoint — this is where *decision* parallelism lives, in reviewed
+  configuration rather than a model's runtime discretion. (Inside a single turn,
+  parallelism is a property of the tools themselves: each declares whether it is
+  read-only, concurrency-safe, or exclusive, and only safe batches run
+  concurrently — fail-closed to serial when unproven.)
 - 🧠 **Memory & skills** — file-first per-tenant memory injected at session start
   (retention-bounded, injection-screened), and reusable skills loaded on demand
   through three bounded disclosure tiers. A skill is a **signed, content-addressed
@@ -225,12 +230,13 @@ principles). Every design decision maps back to one of them:
 | 🔵 **Control plane, gateway, kernel, workers** | Go 1.23 (`net/http`/gRPC, `pgx`, `go-redis`) |
 | 🐍 **ML / eval helpers (off the paying loop)** | Python 3.12 (`pytest`, eval runner, LLM-as-judge, context condenser) |
 | 💻 **Web surface** | TypeScript 5.x · React 19 · Vite · Tailwind · React Query |
-| 🗄️ **State store** | PostgreSQL — append-only event log + config/cost/audit tables, tenant isolation via **row-level security** |
-| ⚡ **Cache / locks** | Redis — session-key serial locks, rate-limit token buckets, sandbox-pool metadata, hot session cache |
+| 🗄️ **State store** | PostgreSQL — append-only event log + config/cost/audit tables, tenant isolation via **row-level security** with transaction-local (`SET LOCAL`) scope |
+| ⚡ **Cache / locks / reservations** | Redis — session-key serial locks, **atomic budget-reservation counters** (the pre-spend ceiling of FR-083), rate-limit token buckets, sandbox-pool metadata, hot session cache |
 | 📨 **Durable queue / event plane** | NATS JetStream (default adapter behind a swappable queue port; SQS/Redis Streams/Temporal-class alternates) |
 | 📦 **Sandbox runtime** | E2B (default), swappable for Docker / Firecracker / gVisor / local-OS isolation |
 | 🤖 **LLM providers** | One provider abstraction + adapters: Anthropic native, OpenAI-compatible, Bedrock/Vertex, CLI-subprocess fallback; a model gateway (LiteLLM/OpenRouter/vLLM) may sit behind the same port as *transport only* |
 | 🗃️ **Object storage** | S3-compatible, for offloaded oversized tool outputs and large artifacts |
+| 🔐 **Secrets & keys** | External secrets vault (injection at tool-execution time; the model sees a handle) + KMS/HSM — per-tenant content-encryption keys with BYOK, and a **sign-only** audit-chain signing key the data plane cannot read |
 | 🌍 **Web fetch** | crawl4ai (clean chunked markdown) |
 | 🔭 **Observability** | OpenTelemetry SDK — OTLP is the single write path; Langfuse / Arize / Braintrust / Grafana / Datadog are optional export targets (content-free) |
 | 🔗 **Connectors** | MCP client for external systems of record |
@@ -250,20 +256,31 @@ backend-go/
 │                             #   response classification, tool_use/tool_result invariant
 ├── internal/
 │   ├── provider/             # provider abstraction + normalized stream contract + adapters
-│   ├── tools/                # self-registering registry, buildTool factory, exec pipeline; builtins
-│   ├── connectors/           # per-user OAuth (auth-code + PKCE), token vault, gmail/gdrive/gcalendar
+│   ├── tools/                # self-registering registry, buildTool factory, exec pipeline;
+│   │                         #   qualified identity {namespace}/{name}@{version} + namespace
+│   │                         #   ownership, catalog manifest, deferred disclosure + gated
+│   │                         #   selector, descriptor re-verification; builtins
+│   ├── connectors/           # per-user OAuth (auth-code + PKCE), token vault,
+│   │                         #   gmail/gdrive/gcalendar/notion
 │   ├── context/              # two-zone prompt, cache discipline, structured compaction
 │   ├── memory/               # file-first memory, per-tenant, injection screening, retention
-│   ├── skills/               # progressive disclosure + propose → gate → version → promote
+│   ├── skills/               # signed content-addressed bundles, three-tier disclosure,
+│   │                         #   one admission gate per origin, capability narrowing,
+│   │                         #   propose → gate → version → promote
 │   ├── cost/                 # per-turn token/cost meter, per-task/per-tenant ceilings
 │   ├── reliability/          # failure classifier, circuit breaker, stuck detection,
 │   │                         #   checkpoint/snapshot/hydrate, write-ahead effect claims, resume
 │   ├── tenancy/              # tenant context, RLS scoping, per-tenant budgets/limits
 │   ├── security/             # layered defense, Rule of Two, receipts, egress, secrets vault
 │   ├── audit/                # immutable audit log + tamper-evident tool receipts
-│   ├── queue/                # durable job queue (NATS JetStream default), session-key routing
+│   ├── queue/                # durable job queue (NATS JetStream default), session-key
+│   │                         #   routing, admission control
 │   ├── sandbox/              # warm pool, TTL/reclamation, per-tenant caps, resource limits
-│   ├── surfaces/             # per-surface adapter translators
+│   │                         #   + network default-deny; broker = the only route from
+│   │                         #   sandbox code into the tool pipeline
+│   ├── surfaces/             # per-surface adapter translators; capability descriptors,
+│   │                         #   per-turn principal resolution, conversation binding,
+│   │                         #   outbound delivery outbox
 │   └── observability/        # log-derived turn-scoped spans, content-free attribute allowlist,
 │                             #   versioned attribute model, fixed metric labels + exemplars,
 │                             #   trace-context propagation, cost/latency/token spans
@@ -272,9 +289,10 @@ backend-go/
 
 ml-python/                    # Python 3.12 helper service (off the paying loop)
 ├── src/
-│   ├── evals/                # corpus + suite classes, trial statistics, environment digest, CI gate
+│   ├── evals/                # corpus + suite classes, trial statistics, environment digest,
+│   │                         #   fork-based cases, efficiency budgets, integrity, CI gate
 │   ├── condenser/            # structured compaction / summarizer on a cheaper helper model
-│   └── judge/                # rubric scoring + held-out grader protection
+│   └── judge/                # rubric scoring, held-out grader protection, human-label calibration
 └── tests/
 
 frontend/                     # React 19 web surface (a thin surface adapter)
@@ -286,7 +304,10 @@ specs/001-agent-platform/     # Specification, plan, research, data model, contr
 ├── spec.md · plan.md · research.md · data-model.md · quickstart.md
 ├── contracts/                # kernel ABI · control/data-plane · run-API OpenAPI · tool contract
 │                             #   · orchestration plane · integration ports
-└── checklists/
+└── checklists/               # requirements quality checklist
+
+docs/diagrams/                # Excalidraw sources: architecture · kernel lifecycle ·
+                              #   run flow · trust surface
 ```
 
 > **Structure decision:** The Go `backend-go/` tree holds three separately
@@ -318,8 +339,10 @@ make run-control-plane &                      # auth, RBAC, budgets, routing
 make run-worker &                             # stateless kernel worker
 ```
 
-Expected: `make migrate` reports **RLS enabled on every tenant-scoped table**, and
-the control plane logs a `v1` control/data-plane handshake.
+Expected: `make migrate` reports **RLS enabled on every tenant-scoped table** and
+that tenant scope is set **transaction-locally** (`SET LOCAL`) — the half that
+survives the transaction-pooling tier — and the control plane logs a `v1`
+control/data-plane handshake.
 
 ---
 
@@ -377,9 +400,9 @@ Response codes of note: `402` budget exhausted (per-task/per-tenant ceiling),
   named payer, and incapable of resolving an approval or answering the agent's own
   question.
 - **Per-user personal connectors**: **Gmail**, **Google Drive**, **Google
-  Calendar** (and MCP-based systems of record) via a one-time per-user OAuth 2.0
-  authorization-code + PKCE consent. Tokens are vaulted per `(tenant, user,
-  connector)`, auto-refreshed, and revocable. **The model only ever sees a
+  Calendar**, and **Notion** (plus MCP-based systems of record) via a one-time
+  per-user OAuth 2.0 authorization-code + PKCE consent. Tokens are vaulted per
+  `(tenant, user, connector)`, auto-refreshed, and revocable. **The model only ever sees a
   connector handle — never the token.** High-impact sends are gated by approval and
   constrained by the Rule of Two.
 
@@ -425,6 +448,14 @@ boundary.
   rebuild, a continuation of the same run, and a *fork* of a failed run at any step
   with a patched prompt and external effects disabled — the primitive that makes a
   production incident reproducible against a candidate fix.
+- 📜 **The event log is a versioned contract** — every event carries a schema
+  version with a documented upcasting path, so a log written years ago still
+  replays. Everything that summarizes run state (session status, approval status,
+  sandbox state) is a **projection of the log, never a second source of truth**.
+- 🔖 **One digest pins behavior** — each run persists a `harness_digest` over the
+  system-prompt version, resolved tool catalog, skill set, and safety policy, so a
+  replay cannot silently diverge from the run it reproduces; the same digest is the
+  cache-prefix identity the byte-stable prefix is measured against.
 - 🚦 **Stuck detection** — repeated actions, oscillation, or zero net change over K
   steps breaks the loop with a clear reason.
 - 🟢 **Deploy safety** — in-flight runs are never cut over mid-task (rainbow deploy).
@@ -465,11 +496,42 @@ long-running sessions (~5,000+ per single-org deployment).
   predecessor, signed by a sign-only KMS key the data plane cannot read, and
   periodically anchored outside the writing system. A scheduled verifier proves
   continuity — a per-record MAC alone would not detect an insider rewriting history.
-- 📮 **Authenticated ingress** — webhook and OAuth-callback deliveries are verified
-  by provider signature with replay rejection and per-identity flood limits *before*
-  the kernel sees them; identity binding is a separate, later control.
-- 🛡️ **Per-invocation safety, fail-closed** — each command is judged by a per-invocation
-  safety check on parsed input; tool defaults are fail-closed.
+- 🆔 **Delegated identity, never a god-mode account** — the agent acts inside the
+  **calling user's** RBAC scope, enforced at the tool boundary rather than the UI.
+  The platform issues **no credentials of its own**: each tenant brings its own
+  OIDC issuer, tokens are validated against that issuer's JWKS, a first valid
+  sign-in just-in-time provisions the user, and a per-tenant claims mapping keeps
+  an identity-provider swap (Auth0, Keycloak, Entra, Okta, Casdoor…) a config
+  change — no provider SDK is ever embedded.
+- 📮 **Authenticated ingress, then verified linking** — webhook and OAuth-callback
+  deliveries are verified by provider signature with replay rejection and
+  per-identity flood limits *before* the kernel sees them. Signature authenticity
+  and **identity binding are two different controls, and neither substitutes for
+  the other**: an inbound consumer-surface identity must be bound to a platform
+  user through a verified linking step before it can act, and an unlinked identity
+  performs zero actions.
+- 🧪 **The catalog is a trust boundary, not a manifest** — a tool, connector, or MCP
+  descriptor is itself attacker-controlled text, so **every descriptor is scanned
+  for injected instructions at admission and on every version bump**, failing
+  closed on a high-severity match — the same posture applied to ingested
+  documents. Vetting a server's provenance says nothing about what its tool
+  descriptions tell the model to do.
+- 🎟️ **Audience-restricted tokens** — every connector and MCP token is minted
+  restricted to the one server it is for, so a compromised server cannot replay it
+  against a different upstream resource. A token that cannot be audience-scoped is
+  a rejection signal at the same governance gate as an over-broad permission scope.
+- 🛡️ **Per-invocation safety, fail-closed** — each command is judged by a
+  per-invocation safety check on parsed input, layered rather than singular: a fast
+  deterministic rule pass resolves the common case in-process with no external
+  call, and only the ambiguous remainder reaches a model classifier carrying its
+  own bounded timeout that fails closed to **ASK** — never `ALLOW` — on timeout,
+  error, or an unparseable verdict. Tool defaults are fail-closed throughout.
+- 🔒 **Autonomy is a ratchet, not a label** — `read_only` refuses every mutating
+  capability, `supervised` gates every mutating invocation, `full` gates by effect
+  class and policy. The level is pinned per run and may only be **tightened**
+  mid-run: no model output, tool result, steering message, hook, or delegation
+  parameter can widen it, because a mid-run widening is a direct prompt-injection
+  lever.
 - ✌️ **The Rule of Two** — no session runs *untrusted input* + *private data* +
   *external state change* all unattended; the third leg requires human approval.
 - 👤 **Human-in-the-loop, as a transaction not a flag** — payments, deletions,
@@ -502,6 +564,18 @@ long-running sessions (~5,000+ per single-org deployment).
 - 💉 **Prompt-injection defense** — user input, tool output, and retrieved content are
   all treated as untrusted; a poisoned retrieval corpus or a planted instruction
   cannot become a trusted command.
+- 🌍 **Residency by placement, not by policy text** — a tenant's region pin binds
+  its event log, memory, artifacts, sandboxes, queue, *and* model routing to that
+  region, and a run **fails closed** rather than execute outside it. Everything
+  crossing a deployment boundary is enumerated in the control/data-plane contract
+  and bounded to structure; the approval context package is the one content-bearing
+  payload that may cross, and only when a tenant explicitly opts into upstream
+  rendering.
+- 🧬 **Our own supply chain meets the bar we impose** — reproducible, signed release
+  artifacts with published provenance, an SBOM per release, pinned build-time
+  dependencies, and dependency/container scanning in CI with a severity threshold
+  that **fails the build** — the same standard applied to third-party models,
+  connectors, and MCP servers.
 
 ---
 
@@ -519,9 +593,31 @@ long-running sessions (~5,000+ per single-org deployment).
   explicit `cost_exhausted` reason and an alert — never a surprise bill.
 - ⚡ **Cache-stable context** — a byte-stable prefix (tool catalog + stable system
   prompt + append-only transcript) and a volatile tail rebuilt each turn; structured
-  compaction at ~80% budget on a cheaper helper model, off the paying loop.
+  compaction at ~80% budget on a cheaper helper model. "Off the paying loop" means
+  *a cheaper model*, which is not the same as asynchronous — so whether compaction
+  blocks the turn is a **declared, measured property**, not an assumption, and its
+  latency contribution is reported.
+- 🎛️ **Bound the output, not just the input** — every model call carries a bounded
+  `max_tokens` and stop sequences, with schema-/grammar-constrained decoding for
+  the model's own reply (not just tool arguments) and a terse-reasoning style, so
+  filler and unbounded reasoning traces don't inflate tokens or latency. On a
+  truncation signal the platform **escalates the reservation on a bounded retry**
+  rather than emitting partial, unterminated output.
+- 🚦 **Rate limiting and provider capacity** — per-tenant rate limits and token
+  buckets sit in the control plane alongside the budget check, and provider
+  throughput limits are absorbed by connection pooling, cached prefixes, and
+  **failover-as-capacity**: one abstraction with retry → cooldown → failover across
+  multiple backends, so a throttled provider degrades throughput instead of failing
+  runs.
+- 💤 **Skip the call entirely where it's safe** — an optional response cache
+  (exact-match and/or semantic, similarity- and TTL-gated, tenant-scoped) fronts
+  the model for repeat and near-duplicate requests. It is restricted to cacheable,
+  non-state-dependent requests, is bypassable per request, and **never serves a
+  cross-tenant hit**.
 - 🔀 **Deterministic routing** — by data label (sensitivity) and difficulty
-  (capability floor); auditable, never model discretion.
+  (capability floor); auditable, never model discretion. Advanced harness features
+  degrade by model tier — a below-floor model gets a scoped-down tool catalog and
+  above-floor features disabled, by configuration rather than a kernel fork.
 - 🔭 **Content-free tracing** — turn-scoped OTel traces emitted *from the event log*
   expose decision structure and per-turn cost/latency/token spans; attributes are
   allowlisted by key so content cannot leak into a monitoring backend the tenant's
@@ -564,6 +660,30 @@ long-running sessions (~5,000+ per single-org deployment).
   hard-kill resource bands, concurrency, region) and refuses to compare across
   digests, because resource configuration alone moves agentic scores by more than
   most model changes; trials run on **cold** sandboxes, never the warm pool.
+- 🧭 **Grade the trajectory, not only the end state** — an end-state check cannot
+  see that the agent picked the wrong tool, guessed where it should have asked, or
+  burned three times the work getting there, so cases also assert on the path:
+  tool-selection accuracy, whether an input request was raised, and the turns and
+  calls consumed.
+- 🧮 **A judge is the last resort, not the default** — grader selection follows an
+  explicit rule: **deterministic, code-based graders wherever the criterion is
+  objectively checkable** (end state, exit status, schema validity, file contents),
+  with the model judge reserved for genuinely subjective criteria. Held-out graders
+  live outside the agent's workspace and reach, and the **visible-versus-held-out
+  pass-rate gap is measured** — a widening gap is how spec-gaming announces itself.
+- 🧩 **Every artifact carries its own cases** — a global corpus measures the
+  platform, not the skill, connector, or tool you are about to enable, so each
+  behavior-bearing artifact ships a **versioned case set** run at its promotion or
+  enablement gate. A scheduled corpus re-run catches upstream drift that arrives
+  with no change on our side.
+- 🎭 **The oversight gate is tested adversarially** — the corpus carries mandatory
+  human-in-the-loop cases, including injected attempts to suppress or simulate
+  consent, to widen autonomy mid-run, or to reach a gated effect through a standing
+  scope. All must be refused and audited.
+- 📥 **Growing the corpus from production is a governed path** — because telemetry
+  is structure-free and content may not cross a tenant boundary, a production case
+  becomes an eval case only through an explicit, tenant-consented, redacted,
+  governance-signed export — never by reading traces.
 - ⚖️ **The judge is an instrument** — pinned snapshot + rubric, drawn from a
   different model family than the agent it grades, and calibrated against
   human labels to a published agreement floor **before** it may block a change.
@@ -576,6 +696,27 @@ long-running sessions (~5,000+ per single-org deployment).
   verdict while regressing tokens, turns, or tool calls beyond the declared band
   is blocked. On a platform whose stop signal is cost, an ungated efficiency
   regression is an incident that ships with a green check.
+- 📟 **Agent-specific golden signals** — alerting covers more than infrastructure:
+  queue wait and oldest-message age, completion rate by terminal reason,
+  cost-ceiling breach rate, stuck-detection rate, cache-read rate, sandbox
+  reclamation, provider throttle/failover, approval fatigue and time-to-decision,
+  `approval_mismatch` and resolution-refused rates, content-access refusals,
+  unresolved in-flight effect claims, compaction chain depth, telemetry
+  attribute-drop rate, judge calibration drift, and the held-out gap. A platform
+  that alerts on latency and cost but not on whether answers got worse is measuring
+  only the failures its infrastructure can feel.
+- 👥 **Every control has a named owner** — a **platform team** owns the shared
+  harness; an **AgentOps** function owns SLOs, on-call, evals-in-CI, cost
+  dashboards, and behavioral incident response; a **governance/risk** function
+  signs off new tools, connectors, and autonomy increases and maintains the AI risk
+  register. An unowned control is not a control.
+- 🏁 **The go-live gate** — no production launch without the checklist green:
+  attributable audit, vaulted per-tenant secrets, sandboxing with hard limits and
+  network default-deny, human approval on high-impact actions, one leg of the
+  lethal trifecta broken per risky flow, per-task/per-tenant ceilings, failure
+  classification + resume + stuck detection, evals green, cache-read >90%
+  steady-state, documented residency/retention/no-train, and a rehearsed
+  behavioral-incident runbook.
 
 ---
 
@@ -598,6 +739,24 @@ Full specification and design artifacts live under
 | [contracts/integration-ports.md](specs/001-agent-platform/contracts/integration-ports.md) | Optional third-party adapters, the port map, and the authority boundary |
 | [contracts/orchestration-plane.md](specs/001-agent-platform/contracts/orchestration-plane.md) | Declarative orchestration plans — zero-token deterministic control flow |
 | [tasks.md](specs/001-agent-platform/tasks.md) | Dependency-ordered implementation tasks |
+| [checklists/requirements.md](specs/001-agent-platform/checklists/requirements.md) | Requirements-quality checklist |
+
+Visual design artifacts live under [docs/diagrams/](docs/diagrams/). Each is an
+Excalidraw source (open at [excalidraw.com](https://excalidraw.com) or with the
+VS Code extension) alongside a rendered SVG:
+
+| Diagram | Shows |
+|---------|-------|
+| [01 · architecture](docs/diagrams/01-architecture.svg) | Surfaces → control plane → data plane → trust surface, with the BYOC boundary ([source](docs/diagrams/01-architecture.excalidraw)) |
+| [02 · kernel lifecycle](docs/diagrams/02-kernel-lifecycle.svg) | One turn: hygiene → **pre-spend reservation** → model call → typed classification → paired result, with a producer for each of the nine terminal reasons ([source](docs/diagrams/02-kernel-lifecycle.excalidraw)) |
+| [03 · run lifecycle](docs/diagrams/03-run-flow.svg) | A run end to end: submit → rejection codes → queue → worker → checkpointed turns → **suspend for a human** → terminal reason ([source](docs/diagrams/03-run-flow.excalidraw)) |
+| [04 · trust surface](docs/diagrams/04-trust-surface.svg) | The co-equal perimeter controls: isolation, vault, encryption/erasure, chained audit, content-free telemetry, approval, sandbox, and the Rule of Two ([source](docs/diagrams/04-trust-surface.excalidraw)) |
+| [05 · permission chain](docs/diagrams/05-permission-chain.svg) | The published total resolution order and the single execution pipeline every call walks — including the in-sandbox broker ([source](docs/diagrams/05-permission-chain.excalidraw)) |
+
+> Editing a diagram: change the `.excalidraw` source, then re-export the SVG from
+> Excalidraw (**Export image → SVG**, background on) so the rendered copy the
+> README links does not drift from its source.
+
 
 ---
 
@@ -612,11 +771,28 @@ The spec is the *target architecture*, not the first release. [plan.md](specs/00
 carries an explicit **MVP cut line** on the principle that **seams and schema
 decisions are made early because they are expensive to retrofit, while
 infrastructure is added late because it is cheap to add and expensive to carry.**
-Increment 1 ships the kernel, transaction-local RLS, the audit chain,
-encryption/erasure, pre-spend cost ceilings, and a live eval gate on one surface;
-the durable queue, sandbox pool, physical plane split, consumer surfaces, and
-multi-topology packaging are deliberately deferred — each additive against the
-foundational schema and contracts.
+
+**Increment 1** ships the kernel, transaction-local RLS proven through the
+pooler, the hash-chained audit chain, per-tenant encryption with the erasure
+path, reserve-then-reconcile cost ceilings, a content-free telemetry export path,
+and a live eval gate — on one surface (REST), single-tenant. It ships alongside
+the **identity seams that cannot be retrofitted**: fully-qualified tool identity
+and the catalog manifest, skill `bundle_digest`/`origin`/`signature`, the surface
+capability descriptor with its `principal_kind` and conversation binding, the
+delivery outbox, the delegation-chain columns, and the trace/event join key.
+
+**Deliberately deferred**, each with a stated trigger in the cut line and each
+additive against that schema: the durable queue and stateless worker pool, the
+sandbox pool, the *physical* control/data-plane split, consumer surfaces and
+personal connectors, memory tiers beyond files and skill promotion, sub-agent
+delegation and the orchestration plane as *behavior*, deferred tool disclosure
+and its gated selector, the in-sandbox broker (until it exists, connector and MCP
+endpoints stay in the sandbox egress deny set — a bypass is never the interim
+state), third-party skill import, agent-to-agent ingress and multi-principal
+channels, third-party ecosystem adapters, fork-based incident debugging and
+log-derived span emission, content-access grants as a *workflow* (the enforcement
+point ships in Increment 1), multi-region residency, BYOK, chargeback export, and
+multi-topology packaging.
 
 ---
 

@@ -118,7 +118,7 @@ line below for what ships in Increment 1); single reusable
 kernel serving 9 surface classes (CLI, chat, web, REST/gRPC, email, cron, Telegram,
 Zalo, and agent-to-agent ingress — the last being its own `principal_kind`
 admission class, FR-158)
-plus per-user personal connectors (Gmail/Drive/Calendar); startup (5 people) →
+plus per-user personal connectors (Gmail/Drive/Calendar/Notion, FR-053); startup (5 people) →
 enterprise (50,000 people) via
 configuration; four deployment topologies from one build; ~5,000+ concurrent
 sessions per production single-org deployment
@@ -293,7 +293,7 @@ backend-go/
 │   │                         #   deferred disclosure + gated selector, descriptor re-verification;
 │   │                         #   builtin/ = filesystem, sandboxed shell, web search/fetch tools
 │   ├── connectors/           # per-user OAuth (auth-code+PKCE), token vault/refresh/revoke,
-│   │                         #   reference connectors (gmail, gdrive, gcalendar)
+│   │                         #   reference connectors (gmail, gdrive, gcalendar, notion)
 │   ├── context/              # two-zone prompt, cache discipline, structured compaction
 │   ├── memory/               # file-first memory, per-tenant, injection screening, retention
 │   ├── skills/               # signed content-addressed bundles, three-tier disclosure,

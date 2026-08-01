@@ -614,7 +614,9 @@ After generating the initial JSON, run this cycle:
 **4. Fix** — Edit the JSON to address everything you found. Common fixes:
 - Widen containers when text is clipped
 - Adjust `x`/`y` coordinates to fix spacing and alignment
-- Add intermediate waypoints to arrow `points` arrays to route around elements
+- Add intermediate waypoints to arrow `points` arrays to route around elements —
+  and set that arrow's `"roundness": null`, or Excalidraw curves the path through
+  the new waypoints instead of drawing square elbows (see `json-guidelines.md`)
 - Reposition labels closer to the element they describe
 - Resize elements to rebalance visual weight across sections
 
