@@ -94,7 +94,33 @@ Technical Context — so no `NEEDS CLARIFICATION` remains before Phase 1.
   `runtimeClassName: gvisor`. **Kata Containers** is the hardened tier for tenants
   whose threat model demands a separate kernel, selected per tenant as a second
   RuntimeClass wherever nodes expose hardware virtualization. Git worktrees per
-  session for workspace isolation.
+  session for workspace isolation. **Placement is modelled as a second, independent
+  axis** — `executor` ∈ {`local`, `ssh`, `service`} — because where a sandbox runs
+  and what boundary it runs behind are different questions with different failure
+  modes. `local` is the default; `ssh` targets a dedicated execution host and ships
+  in Increment 1; `service` is the seat for an external sandbox platform and is
+  deferred with every other third-party adapter.
+- **Why two axes rather than one enum**: an `ssh` value inside `isolation` would
+  assert a boundary it does not describe. A remote host running plain `runc` is a
+  `container` sandbox that happens to sit elsewhere, and a single enum would let a
+  deployment satisfy "isolation is configured" while running the weakest boundary
+  available. Keeping them separate also keeps `eval_environment_digest` honest —
+  placement and boundary each move a wall-clock-bounded result, and each is
+  recorded. The rule that makes the axis safe rather than merely descriptive: **the
+  executor never relaxes the isolation contract.** A non-`local` executor must
+  still deliver the FR-059 limits, the network default-deny, and the workspace-only
+  filesystem view on the far side, and one that cannot attest to them is refused
+  rather than admitted at a weaker boundary.
+- **Why `ssh` earns its place in Increment 1**: it is the single-host topology's
+  substitute for the privilege separation Kubernetes gets from RBAC. The
+  orchestrator holds root-equivalent authority over whatever runtime it drives, so
+  putting the execution host at the far end of an SSH connection is how a droplet
+  deployment stops one compromise from being total — the same split the Kubernetes
+  phase achieves with a scoped ServiceAccount. It is a built-in, not an adapter:
+  credentials come from the vault (FR-034), the target is configuration rather than
+  model output, command construction runs through the same allowlist as local
+  create arguments, and the target host is subject to the tenant's residency pin
+  (FR-091).
 - **Rationale**: Cold-start per run dominates tail latency; a warm pool trades
   small idle cost for a large p95 win. The sandbox is the trust boundary; TTL +
   reclamation prevent cost and security leaks (FR-047; Constitution V). gVisor is
@@ -143,6 +169,27 @@ Technical Context — so no `NEEDS CLARIFICATION` remains before Phase 1.
   CVE-2024-10252, `preload` injection executing before seccomp initialized — is
   structural rather than patchable: a boundary one filter deep fails whole, across
   every concurrent execution sharing it).
+- **OpenSandbox is a different question from the two above, and is admitted rather
+  than rejected.** E2B and dify-sandbox were candidates to *be* the boundary;
+  OpenSandbox (Alibaba Cloud, Apache-2.0) sits **above** it — a lifecycle control
+  plane with its own OpenAPI contracts, SDKs, an `execd` agent inside each sandbox,
+  and Docker/Kubernetes runtimes that themselves run gVisor or Kata. So it is not
+  an alternative to the decision above; it is an alternative to *this platform's
+  own* pool, TTL, and reclamation code, and it attaches as a `service` executor
+  under the FR-133 gate rather than as an `isolation` value. Three boundaries make
+  that adoption conditional rather than free, and each is an instance of
+  **adopt the tool, keep the authority** (FR-131). (a) Its **egress-policy API MUST
+  NOT become the egress decision**: the FR-037 allowlist and the FR-059 network
+  default-deny are platform-owned controls, and a vendor-side policy is at most a
+  redundant second enforcement point, never the first. (b) Its lifecycle records
+  are a **projection, not the source of truth** — pool state, TTLs, and per-tenant
+  caps remain platform-enforced, because a ceiling enforced only in a component the
+  platform does not own is not a ceiling. (c) Its in-sandbox `execd` gRPC endpoint
+  is a **second route into the sandbox** and MUST NOT become a path from sandbox
+  code into the tool pipeline that bypasses the FR-149 broker; where it is reachable
+  at all, it is reachable only by the orchestrator. Adopted within those bounds it
+  supplies real lifecycle and distributed-scheduling capacity; adopted outside them
+  it relocates four controls this platform holds constitutionally.
 
 ## 6. Context / cache discipline
 

@@ -918,7 +918,9 @@ hard resource limits; the trust boundary for all code/shell execution
 | `session_id` | UUID (FK, nullable) | Bound while in use |
 | `state` | enum | `warm` / `assigned` / `reclaimed` |
 | `ttl_expires_at` | timestamptz | Hard TTL → reclamation |
-| `isolation` | enum | `gvisor` (default) / `kata` / `container` / `microvm` (by topology) |
+| `isolation` | enum | `gvisor` (default) / `kata` / `container` / `microvm` (by topology) — **what boundary the code runs behind** |
+| `executor` | enum | `local` (default) / `ssh` / `service` — **where the sandbox is created and by whom**, orthogonal to `isolation`. `local` = this host's container runtime; `ssh` = a dedicated executor host reached over SSH; `service` = an external sandbox platform (OpenSandbox, managed E2B) behind the FR-133 adapter gate |
+| `executor_target` | string (nullable) | Host identity or service endpoint for non-`local` executors; null for `local`. Resolved from configuration, never from model output (FR-059) |
 | `cpu_limit` | numeric | Hard CPU cap (cores); breach → terminate + reclaim |
 | `mem_limit_mb` | int | Hard memory cap; breach → terminate + reclaim |
 | `pid_limit` | int | Max process/PID count (fork-bomb guard) |
@@ -930,6 +932,14 @@ hard resource limits; the trust boundary for all code/shell execution
   cold sandbox, because pooled state shared between trials produces correlated
   failures and silently inflated scores. The pool optimises production latency;
   reusing it for measurement optimises the number instead of the agent.
+- **`executor` and `isolation` are independent, and the executor never relaxes
+  the isolation contract**: moving execution to another host or to an external
+  platform changes *placement*, not the boundary. Every sandbox declares both, and
+  a non-`local` executor MUST still deliver the FR-059 limits, the network
+  default-deny, and the workspace-only filesystem view on the far side. Collapsing
+  the two into one enum is how `ssh` comes to look like an isolation level —
+  it is not one, and a remote host running plain `runc` is a `container` sandbox
+  that happens to be somewhere else.
 
 ---
 
@@ -1044,6 +1054,7 @@ comparison (FR-138). Stored as the digest input, not only its hash.
 | `env_digest` | bytea (PK) | Hash over every field below |
 | `sandbox_image` | string | Pinned like any production dependency (FR-078) |
 | `isolation` | enum | `gvisor` / `kata` / `container` / `microvm` — the backend the trial ran under (FR-059). A userspace-kernel runtime and plain runc differ in syscall cost, so a wall-clock-bounded trial moves between them; the image alone does not identify the substrate |
+| `executor` | enum | `local` / `ssh` / `service` — where the trial executed (FR-059). A remote host's CPU generation, contention, and network round-trip all move a wall-clock-bounded result, so placement is substrate exactly as isolation is |
 | `cpu_guaranteed` / `cpu_ceiling` | numeric | **Separate values.** Guaranteed allocation prevents spurious failures; the hard-kill ceiling bounds them — collapsing the two into one number is how resource configuration becomes an invisible confounder |
 | `mem_guaranteed_mb` / `mem_ceiling_mb` | int | As above |
 | `pid_limit` / `wallclock_limit_s` | int | |

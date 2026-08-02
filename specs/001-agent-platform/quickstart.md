@@ -18,7 +18,8 @@ the Phase 0 (P1) kernel is independently testable before later slices exist.
 - Docker (Postgres, Redis, sandbox images)
 - A configured provider credential in the vault (never in env/prompt — FR-034)
 
-**Local isolation backend.** These scenarios run `isolation: container` — the same
+**Local isolation backend and executor.** These scenarios run `executor: local`
+with `isolation: container` — the same
 image, the same hardening (`network=none`, all capabilities dropped, read-only
 root, CPU/memory/PID/wall-clock caps), without `--runtime=runsc`. The FR-059
 default (`gvisor`) is Linux-only and is not available under Docker Desktop on
@@ -219,7 +220,9 @@ make verify-online-scoring            # production quality score with zero conte
   pass-rate denominator (FR-138, SC-045). The isolation backend is inside that
   digest, so a local `container` run is refused against a CI `gvisor` baseline by
   construction — local eval numbers are for iterating on cases, never for clearing
-  the gate (FR-059).
+  the gate. The `executor` is in the digest for the same reason: an `ssh`-placed
+  trial is not comparable to a `local` one, because the far host's CPU generation,
+  contention, and round-trip all move a wall-clock-bounded result (FR-059).
 - `evals-calibrate` must have passed before the gate can block anything: a judge
   with no current calibration, or one that has drifted below the κ floor, is out
   of service — that condition reads as an instrument failure, not as an agent
