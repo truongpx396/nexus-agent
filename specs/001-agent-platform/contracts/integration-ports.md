@@ -42,7 +42,7 @@ responsibilities are never delegated:
 | Telemetry export (FR-117) | OTLP → self-hosted collector | **Langfuse**, Arize/Phoenix, Braintrust, Grafana/Tempo, Datadog, Honeycomb | A view of structure, latency, tokens, and cost | A content store; an audit record; a second write path (FR-134) |
 | Eval platform / datasets (FR-043) | Platform eval runner + judge in CI | Langfuse datasets, Braintrust, Arize | Corpus hosting, score storage, analysis | The gate (FR-135); the judge's calibration (FR-141); the trial statistics or verdict (FR-137) |
 | *Grader libraries* — **not a port** (FR-135) | Platform code + model graders | **DeepEval, Promptfoo, Ragas** — pinned in-tree under `ml-python/` | Assertions and metrics *beneath* the platform's statistics | The verdict; an uncalibrated judge wearing a metric's name (FR-137, FR-141, FR-144) |
-| `Workspace` / sandbox (FR-047) | OCI container under gVisor (`runsc`) | Kata Containers, plain runc, local-OS isolation, **self-hosted** microVM (Firecracker/E2B); **managed** sandbox services only where the tenant's residency configuration permits (FR-091, FR-133) | The execution boundary | A path around the resource limits or egress allowlist; a mounted runtime socket; unvalidated create args (FR-059); a route for session content out of a region-pinned or BYOC deployment (FR-091) |
+| `Workspace` / sandbox (FR-047) | gVisor (`runsc`) isolation + built-in pool; `local` / `ssh` executor | *Isolation*: Kata, plain runc, local-OS, **self-hosted** microVM (Firecracker/E2B). *Executor*: **OpenSandbox**, managed E2B, other sandbox platforms as `service` — only under FR-133 and only where residency permits (FR-091) | The execution boundary; placement, lifecycle mechanics, distributed-scheduling capacity | A path around the resource limits or egress allowlist; **the egress decision itself** (FR-037); **the pool ceilings or per-tenant caps** (FR-047); **the source of truth for sandbox state**; a mounted runtime socket; unvalidated create args (FR-059); **a second route from sandbox code into the tool pipeline via an in-sandbox agent, bypassing the broker** (FR-149); a route for session content out of a region-pinned or BYOC deployment (FR-091) |
 | Connector catalog (FR-012) | Built-in connectors | MCP servers, per-tenant connectors | Capability | Unvetted, unscanned, or audience-unrestricted access (FR-113, FR-114) |
 | Memory / retrieval (FR-019, FR-022) | File-first per-tenant memory, then **pgvector** | Qdrant, Weaviate, a knowledge graph | A retrieval tier when scale justifies it | A trusted instruction channel (FR-087); an index that survives an erasure (FR-162) |
 | Prompt / config source (FR-042) | Version control + review | Prompt-management tools | An authoring surface | A runtime source — versions pin into the harness digest at start (FR-136, FR-129) |
@@ -271,6 +271,42 @@ Permitted behind the queue port or the plan runner, with three lines held:
 3. **The write-ahead claim stays the exactly-once mechanism** (FR-127). An
    engine's idempotency is additive: it knows whether the *step* ran, never
    whether the *external effect* occurred.
+
+---
+
+## Sandbox platforms sit above the boundary, not at it (FR-047, FR-059)
+
+The sandbox port carries **two independent axes**, and conflating them is how a
+deployment comes to believe it is isolated when it is only relocated:
+
+- **`isolation`** — what boundary the code runs behind: `gvisor` (default), `kata`,
+  `container`, `microvm`.
+- **`executor`** — where the sandbox is created and by whom: `local` (default),
+  `ssh` (a dedicated execution host), `service` (an external sandbox platform).
+
+An executor **never relaxes the isolation contract**. Whatever the placement, the
+FR-059 resource limits, the network default-deny, and the workspace-only filesystem
+view are enforced on the far side, and an executor that cannot attest to them is
+refused rather than admitted at a weaker boundary. `ssh` is a built-in, not an
+adapter: it is the single-host topology's substitute for the privilege separation
+Kubernetes gets from a scoped ServiceAccount.
+
+Platforms like **OpenSandbox** (Apache-2.0) are *lifecycle control planes* — their
+own APIs, SDKs, an in-sandbox agent, and Docker/Kubernetes runtimes that themselves
+run gVisor or Kata underneath. They are therefore not alternatives to the isolation
+choice; they are alternatives to this platform's own pool and reclamation code, and
+they attach as a `service` executor. Three constraints make that adoption bounded:
+
+1. **The vendor's egress policy is never the egress decision.** The FR-037 allowlist
+   and the FR-059 default-deny are platform-owned; a vendor-side policy is at most a
+   redundant second enforcement point.
+2. **Its lifecycle records are a projection.** Pool state, TTLs, and per-tenant caps
+   stay platform-enforced — a ceiling enforced only where the platform cannot attest
+   to it is not a ceiling (FR-047, FR-083).
+3. **Its in-sandbox agent is not a second route into the tool pipeline.** Where an
+   `execd`-style endpoint is reachable at all, it is reachable by the orchestrator
+   only; sandbox-originated tool calls re-enter through the FR-149 broker or have no
+   route (FR-149, FR-150).
 
 ---
 

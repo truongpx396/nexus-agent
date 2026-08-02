@@ -42,7 +42,9 @@ a single internal provider-abstraction interface with adapters
 OpenTelemetry SDK; MCP client for external connectors; gVisor (`runsc`) as the
 default **isolation backend** for code execution — Docker `--runtime=runsc` on a single host,
 the same image under `runtimeClassName: gvisor` on Kubernetes — with Kata
-Containers, microVM, and local-OS isolation as swappable alternates;
+Containers, microVM, and local-OS isolation as swappable alternates, and
+`golang.org/x/crypto/ssh` for the `ssh` executor that places sandboxes on a
+dedicated execution host;
 crawl4ai for LLM-friendly web fetch/crawl and a MarkItDown-class converter for
 documents (both **in-sandbox**, returning clean chunked markdown — they are not
 dependencies of the Go worker); pgvector as the default retrieval backend when
@@ -92,7 +94,11 @@ under gVisor (`runsc`) with hard per-sandbox resource limits
 (CPU/memory/PID/wall-clock) and network default-deny — Docker `--runtime=runsc` on
 a single host, the same image under `runtimeClassName: gvisor` on Kubernetes —
 with Kata Containers as the per-tenant hardened tier for hostile multi-tenant SaaS
-and plain containers / local-OS isolation for single-tenant/BYOC; web surface
+and plain containers / local-OS isolation for single-tenant/BYOC. Placement is a
+second, independent axis: `executor` ∈ {`local` (default), `ssh` (a dedicated
+execution host — the single-host topology's substitute for Kubernetes RBAC
+privilege separation), `service` (an external sandbox platform under the FR-133
+gate)}, and an executor never relaxes the isolation contract; web surface
 targets evergreen browsers
 
 **Project Type**: Web application + service platform — Go backend services
@@ -245,6 +251,7 @@ rather than implicitly assumed.
 | Multi-region residency, BYOK, chargeback export | A tenant contract requires them; the schema seams (`region`, `Encryption Key`, cost dimensions) exist from day one so they are additive |
 | Fork-based incident debugging, snapshot-bounded hydration, log-derived span emission (FR-128, FR-126, FR-120) | The first long-running production incident and the first session long enough for full replay to hurt. **The seams are not deferred**: the join key, harness digest, fork columns, claim table, and separated checkpoint/snapshot tables ship in Increment 1, because each is a column on an append-only log |
 | Content-access grants as a workflow (UI, approver routing) (FR-118) | Support access is needed operationally. The *enforcement point* — no plaintext read outside a grant, receipt per read — ships with encryption in Increment 1; only the routing and UI wait |
+| The `service` executor — external sandbox platforms (**OpenSandbox**, managed E2B) (FR-059, FR-133) | A tenant needs distributed sandbox scheduling the built-in pool cannot serve, or already operates one of these platforms. Increment 1 ships `local` and `ssh`, both built-ins. **The seam is not deferred**: `executor` and `executor_target` are columns, the value is enumerated in FR-059 and inside `eval_environment_digest`, and the authority bounds are written into the port contract before any adapter exists — an external lifecycle plane admitted without them would relocate the egress decision, the pool ceilings, and the broker-only route in one step |
 | Third-party adapters — model gateway, external tracing backend, workflow engine, dataset sync (FR-131–FR-136) | Each is wanted. Increment 1 ships **built-in defaults only**, which is the state SC-040 requires to keep working forever. **The seams are not deferred**: the ports already exist, the `IntegrationAdapter` registry and the authority-boundary assertions ship with the schema, and the conformance suite ships with the first adapter — an adapter admitted without a recorded capability matrix is the failure FR-133 exists to prevent |
 | Deferred tool disclosure + the gated selector (FR-062, FR-148) | The catalog grows past the declared engagement threshold. Increment 1 ships a small resident catalog, so there is nothing to defer and no selector to measure. **The seam is not deferred**: the `CatalogManifest` pins the resolvable universe into the harness digest from day one, so turning disclosure on later never moves a run's digest |
 | The in-sandbox broker for programmatic tool calling (FR-149) | The token savings of in-sandbox orchestration are actually needed. **This is a deferral of a capability, not of a control**: until the broker exists, connector and MCP endpoints are in the sandbox egress deny set, so the "no route at all" branch of FR-149 is the shipped behaviour — a bypass is never the interim state |
@@ -321,8 +328,11 @@ backend-go/
 │   │                         #   swappable port), session-key routing, admission control
 │   ├── sandbox/              # warm pool, TTL/reclamation, per-tenant caps, resource limits
 │   │                         #   (CPU/mem/PID/wall-clock) + network default-deny; gVisor (runsc)
-│   │                         #   default backend; allowlisted create args, never a mounted runtime
-│   │                         #   socket; broker = the only route from sandbox code into the tool pipeline
+│   │                         #   default isolation; allowlisted create args, never a mounted runtime
+│   │                         #   socket; executor/ = local (default) | ssh (dedicated execution host)
+│   │                         #     | service (external platform, FR-133-gated) — placement never
+│   │                         #     relaxes the isolation contract;
+│   │                         #   broker = the only route from sandbox code into the tool pipeline
 │   ├── surfaces/             # per-surface adapter translators (cli, api, chat, email, cron,
 │   │                         #   telegram, zalo, agent-ingress); capability descriptors,
 │   │                         #   per-turn principal resolution, conversation binding,

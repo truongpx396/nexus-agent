@@ -88,7 +88,7 @@ flowchart TB
         Worker[Stateless runtime workers]
         Kernel[[Immutable kernel loop<br/>observe → think → act]]
         Harness[Harness: tools · context · memory<br/>skills · cost · reliability]
-        Sandbox[Warm sandbox pool<br/>gVisor · Kata]
+        Sandbox[Warm sandbox pool<br/>gVisor · Kata<br/>local · ssh · service]
     end
 
     subgraph Trust["Trust surface"]
@@ -250,7 +250,7 @@ principles). Every design decision maps back to one of them:
 | 🗄️ **State store** | PostgreSQL — append-only event log + config/cost/audit tables, tenant isolation via **row-level security** with transaction-local (`SET LOCAL`) scope |
 | ⚡ **Cache / locks / reservations** | Redis — session-key serial locks, **atomic budget-reservation counters** (the pre-spend ceiling of FR-083), rate-limit token buckets, sandbox-pool metadata, hot session cache |
 | 📨 **Durable queue / event plane** | NATS JetStream (default adapter behind a swappable queue port; SQS/Redis Streams/Temporal-class alternates) |
-| 📦 **Sandbox runtime** | Session-scoped OCI containers under **gVisor** (`runsc`) by default — Docker `--runtime=runsc` on a single host, the same image under `runtimeClassName: gvisor` on Kubernetes; swappable for Kata Containers, microVM, or local-OS isolation |
+| 📦 **Sandbox runtime** | Two independent axes. **Isolation** — session-scoped OCI containers under **gVisor** (`runsc`) by default (Docker `--runtime=runsc` on a single host, the same image under `runtimeClassName: gvisor` on Kubernetes), swappable for Kata, plain containers, or microVM. **Executor** — `local` by default, `ssh` for a dedicated execution host, `service` for an external platform (OpenSandbox, managed E2B) behind the adapter gate. Placement never relaxes the isolation contract |
 | 🤖 **LLM providers** | One provider abstraction + adapters: Anthropic native, OpenAI-compatible, Bedrock/Vertex, CLI-subprocess fallback; a model gateway (LiteLLM/OpenRouter/vLLM) may sit behind the same port as *transport only* |
 | 🗃️ **Object storage** | S3-compatible, for offloaded oversized tool outputs and large artifacts |
 | 🔐 **Secrets & keys** | External secrets vault (injection at tool-execution time; the model sees a handle) + KMS/HSM — per-tenant content-encryption keys with BYOK, and a **sign-only** audit-chain signing key the data plane cannot read |
