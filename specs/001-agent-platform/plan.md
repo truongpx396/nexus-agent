@@ -39,8 +39,10 @@ TypeScript 5.x on React 19 (web surface)
 adapter behind an abstract queue port (SQS/Redis Streams/Temporal-class swappable);
 a single internal provider-abstraction interface with adapters
 (Anthropic native, OpenAI-compatible, Bedrock/Vertex, CLI-subprocess fallback);
-OpenTelemetry SDK; MCP client for external connectors; E2B sandbox runtime
-(default code-execution backend, swappable for Docker/microVM/local-OS isolation);
+OpenTelemetry SDK; MCP client for external connectors; gVisor (`runsc`) as the
+default **isolation backend** for code execution — Docker `--runtime=runsc` on a single host,
+the same image under `runtimeClassName: gvisor` on Kubernetes — with Kata
+Containers, microVM, and local-OS isolation as swappable alternates;
 crawl4ai for LLM-friendly web fetch/crawl and a MarkItDown-class converter for
 documents (both **in-sandbox**, returning clean chunked markdown — they are not
 dependencies of the Go worker); pgvector as the default retrieval backend when
@@ -85,10 +87,12 @@ structure-free scores through the telemetry allowlist — the platform's answer 
 continuous evaluation without reopening the content-egress path
 
 **Target Platform**: Linux server (containerized, OCI images + Helm chart /
-Terraform module); code/shell execution defaults to E2B sandboxes with hard
-per-sandbox resource limits (CPU/memory/PID/wall-clock) and network default-deny,
-falling back to per-tenant Docker/microVM (Firecracker/gVisor) for SaaS and
-lighter containers / local-OS isolation for single-tenant/BYOC; web surface
+Terraform module); code/shell execution defaults to session-scoped OCI containers
+under gVisor (`runsc`) with hard per-sandbox resource limits
+(CPU/memory/PID/wall-clock) and network default-deny — Docker `--runtime=runsc` on
+a single host, the same image under `runtimeClassName: gvisor` on Kubernetes —
+with Kata Containers as the per-tenant hardened tier for hostile multi-tenant SaaS
+and plain containers / local-OS isolation for single-tenant/BYOC; web surface
 targets evergreen browsers
 
 **Project Type**: Web application + service platform — Go backend services
@@ -232,7 +236,7 @@ rather than implicitly assumed.
 | Deferred | Until |
 |----------|-------|
 | NATS JetStream durable queue + stateless worker pool | Concurrency exceeds one worker's comfortable load; Increment 1 runs the loop in-process behind the same queue *port* |
-| E2B / microVM sandbox pool + warm-pool autoscaler | Multi-tenant hostile isolation is required (single-tenant containers suffice first) |
+| Kata (hardened per-tenant RuntimeClass) + warm-pool autoscaler | Multi-tenant hostile isolation is required. Increment 1 ships single-tenant gVisor containers, and **this is a deferral of a tier, not of a boundary**: the image, the hardening, and the resource limits are identical, so the upgrade is a `runtimeClassName` change plus nodes exposing hardware virtualization — never a backend port. **The seams are not deferred**: `kata` is a shipped value of `Sandbox.isolation`, it is enumerated in FR-059 and inside `eval_environment_digest`, and per-tenant RuntimeClass selection ships in Increment 1 — only the node class and the autoscaler wait |
 | Control-plane / data-plane **physical** split | A customer requires BYOC; the *contract* and package boundaries exist from day one so the split is a deployment change |
 | Telegram/Zalo + personal connectors (US8) | After the trust surface (US3) — they are the highest-risk ingress and depend on FR-082 |
 | Memory tiers beyond files, skills promotion | The file-first tier is exhausted (~1M tokens durable knowledge) |
@@ -316,8 +320,9 @@ backend-go/
 │   ├── queue/                # durable job queue (NATS JetStream default adapter,
 │   │                         #   swappable port), session-key routing, admission control
 │   ├── sandbox/              # warm pool, TTL/reclamation, per-tenant caps, resource limits
-│   │                         #   (CPU/mem/PID/wall-clock) + network default-deny; E2B default backend;
-│   │                         #   broker = the only route from sandbox code into the tool pipeline
+│   │                         #   (CPU/mem/PID/wall-clock) + network default-deny; gVisor (runsc)
+│   │                         #   default backend; allowlisted create args, never a mounted runtime
+│   │                         #   socket; broker = the only route from sandbox code into the tool pipeline
 │   ├── surfaces/             # per-surface adapter translators (cli, api, chat, email, cron,
 │   │                         #   telegram, zalo, agent-ingress); capability descriptors,
 │   │                         #   per-turn principal resolution, conversation binding,
@@ -351,6 +356,9 @@ frontend/                     # React 19 web surface (a thin surface adapter)
 
 deploy/                       # OCI image set + Helm chart / Terraform module;
                               #   KEDA/HPA autoscale-on-queue-depth policy for BYOC;
+                              #   sandbox/ = hardened sandbox image + runsc install + gvisor/kata
+                              #     RuntimeClass manifests; helm/ carries the orchestrator's
+                              #     RBAC-scoped ServiceAccount (never a runtime socket);
                               #   load/ = concurrency-soak driver for the SC-008 capacity gate
 ```
 

@@ -86,15 +86,63 @@ Technical Context — so no `NEEDS CLARIFICATION` remains before Phase 1.
 ## 5. Sandbox isolation
 
 - **Decision**: Warm pool of pre-provisioned per-tenant sandboxes with hard TTLs,
-  reclamation on terminal/stuck state, and per-tenant caps. Firecracker/gVisor for
-  hostile multi-tenant SaaS; lighter containers for single-tenant/BYOC where the
-  tenant boundary is the whole stack. Git worktrees per session for workspace
-  isolation.
+  reclamation on terminal/stuck state, and per-tenant caps. The default backend is
+  a **session-scoped OCI container under gVisor (`runsc`)** — `network=none`, all
+  capabilities dropped, read-only root, explicit CPU/memory/PID/wall-clock caps.
+  The same image and the same hardening run in both deployment phases: Docker with
+  `--runtime=runsc` on a single host, then Kubernetes with
+  `runtimeClassName: gvisor`. **Kata Containers** is the hardened tier for tenants
+  whose threat model demands a separate kernel, selected per tenant as a second
+  RuntimeClass wherever nodes expose hardware virtualization. Git worktrees per
+  session for workspace isolation.
 - **Rationale**: Cold-start per run dominates tail latency; a warm pool trades
   small idle cost for a large p95 win. The sandbox is the trust boundary; TTL +
-  reclamation prevent cost and security leaks (FR-047; Constitution V).
+  reclamation prevent cost and security leaks (FR-047; Constitution V). gVisor is
+  the one option that spans a bare single host and a managed cluster **unchanged**:
+  it interposes a userspace kernel without hardware virtualization, so no node
+  class, nested-virt setting, or bare-metal instance gates the deployment, and
+  isolation strength collapses to one `runtimeClassName` field rather than an
+  architectural fork. That is what keeps the plan's deferral honest — the hostile
+  multi-tenant upgrade is a config change on a shipped interface, not a port.
+- **Two constraints this decision carries**, both load-bearing rather than
+  operational detail. (a) The sandbox orchestrator MUST NOT hold a container-runtime
+  socket from inside a container: socket access is root-equivalent on the host, so
+  containerizing an orchestrator that also parses untrusted channel input and
+  untrusted model output buys nothing. The single-host phase orchestrates from the
+  host; the Kubernetes phase removes the question entirely by creating Pods through
+  an RBAC-scoped ServiceAccount, which is *less* privilege than the arrangement it
+  replaces. (b) Every container-create argument — mounts, network mode,
+  capabilities, security options — MUST be validated against an allowlist and MUST
+  NOT be interpolated from configuration or from any model-derived value. An agent
+  platform that builds create arguments from config has a published escape
+  (OpenClaw OC-13, unvalidated bind-mount config injection → container escape →
+  host takeover); the same shape here carries the same defect.
 - **Alternatives considered**: Cold container per run (rejected — seconds of tail
-  latency); shared sandbox (rejected — breaks the trust boundary).
+  latency); shared sandbox (rejected — breaks the trust boundary); runc alone
+  (rejected as the *default* — a shared kernel suffices for single-tenant BYOC but
+  sits below the bar FR-059 sets for hostile multi-tenancy, and defaulting to it
+  would make gVisor a migration instead of a flag); **E2B** (rejected as the
+  default — the self-host path is genuinely Apache-2.0, but it is Nomad + Consul +
+  Terraform rather than Kubernetes, so it stands up a second orchestrator beside
+  the cluster, and its Firecracker sandboxes require bare metal or nested
+  virtualization. Two readmission paths stay open, and they are not the same door.
+  **Self-hosted** E2B is a `microvm` value behind the existing sandbox port,
+  admissible wherever that infrastructure cost is already paid; nothing above the
+  port changes, because the warm pool, TTLs, limits, and broker rule are all stated
+  against the port rather than the backend. **Managed** E2B is a third-party
+  adapter that moves session workspace content — tool arguments, files, converted
+  documents — outside the deployment, so it is admissible only under the FR-133
+  conformance gate and only where the tenant's residency configuration permits it
+  (FR-091). That excludes BYOC and every region-pinned tenant by construction, and
+  it is the same shape as `approval_context_mode = upstream` in FR-104: a
+  topology-restricted choice, never a backend swap); **dify-sandbox** (rejected — it is a seccomp + chroot
+  filter around Python/JS snippets inside *one shared container*, so concurrent
+  executions share a namespace, a cgroup hierarchy, and a kernel. That is precisely
+  the shared-sandbox alternative rejected above, and it offers no shell, no
+  session-scoped workspace, and no pool lifecycle. Its escape history —
+  CVE-2024-10252, `preload` injection executing before seccomp initialized — is
+  structural rather than patchable: a boundary one filter deep fails whole, across
+  every concurrent execution sharing it).
 
 ## 6. Context / cache discipline
 
@@ -837,7 +885,7 @@ not measurable from the designed data.
 | Provider dependency | One abstraction + normalized stream + failover (§2) |
 | Storage / isolation | Postgres + RLS, Redis, object storage (§3) |
 | Scale/concurrency | Durable queue (NATS JetStream default) + stateless workers, Redis session-key lock (§4) |
-| Sandbox | Warm per-tenant pool, TTL/reclamation (§5) |
+| Sandbox | Warm per-tenant pool, TTL/reclamation, gVisor default across Docker and K8s (§5) |
 | Context/cache | Two-zone prompt, off-loop structured compaction (§6) |
 | Cost/routing | Per-turn meter + ceilings + deterministic two-axis routing (§7) |
 | Memory/skills | File-first, per-tenant, gated promotion (§8) |

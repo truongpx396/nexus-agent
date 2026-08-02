@@ -18,6 +18,15 @@ the Phase 0 (P1) kernel is independently testable before later slices exist.
 - Docker (Postgres, Redis, sandbox images)
 - A configured provider credential in the vault (never in env/prompt — FR-034)
 
+**Local isolation backend.** These scenarios run `isolation: container` — the same
+image, the same hardening (`network=none`, all capabilities dropped, read-only
+root, CPU/memory/PID/wall-clock caps), without `--runtime=runsc`. The FR-059
+default (`gvisor`) is Linux-only and is not available under Docker Desktop on
+macOS or Windows, so it is exercised on a Linux CI runner rather than on a
+developer laptop. Every sandbox assertion below is a *policy* assertion and holds
+under either backend; what a local run cannot exercise is escape resistance, which
+is the one property the isolation backend exists to provide.
+
 ## Setup
 
 ```bash
@@ -58,7 +67,8 @@ curl -N localhost:8080/v1/runs/<session_id>/events   # SSE, structure only
   [contracts/kernel-abi.md](contracts/kernel-abi.md).
 - The agent uses built-in workspace-restricted filesystem tools and a sandboxed
   shell; neither can escape the session workspace or reach another tenant (FR-056,
-  FR-057). Code runs in an E2B-default sandbox with hard CPU/memory/PID/wall-clock
+  FR-057). Code runs in a gVisor-default sandbox — `container` locally, per
+  Prerequisites — with hard CPU/memory/PID/wall-clock
   limits and network default-deny — a runaway loop is killed and reclaimed, and an
   unapproved egress attempt is denied (FR-059).
 - Force the ceiling (`budget_per_task_usd` small) → the *next turn's reservation is
@@ -206,7 +216,10 @@ make verify-online-scoring            # production quality score with zero conte
 - `evals` refuses to compare against a baseline recorded under a different
   `eval_environment_digest`, provisions a **cold** sandbox per trial rather than
   drawing from the warm pool, and excludes `infra_error` outcomes from the
-  pass-rate denominator (FR-138, SC-045).
+  pass-rate denominator (FR-138, SC-045). The isolation backend is inside that
+  digest, so a local `container` run is refused against a CI `gvisor` baseline by
+  construction — local eval numbers are for iterating on cases, never for clearing
+  the gate (FR-059).
 - `evals-calibrate` must have passed before the gate can block anything: a judge
   with no current calibration, or one that has drifted below the κ floor, is out
   of service — that condition reads as an instrument failure, not as an agent
