@@ -918,7 +918,7 @@ hard resource limits; the trust boundary for all code/shell execution
 | `session_id` | UUID (FK, nullable) | Bound while in use |
 | `state` | enum | `warm` / `assigned` / `reclaimed` |
 | `ttl_expires_at` | timestamptz | Hard TTL → reclamation |
-| `isolation` | enum | `e2b` (default) / `microvm` / `gvisor` / `container` (by topology) |
+| `isolation` | enum | `gvisor` (default) / `kata` / `container` / `microvm` (by topology) |
 | `cpu_limit` | numeric | Hard CPU cap (cores); breach → terminate + reclaim |
 | `mem_limit_mb` | int | Hard memory cap; breach → terminate + reclaim |
 | `pid_limit` | int | Max process/PID count (fork-bomb guard) |
@@ -1043,6 +1043,7 @@ comparison (FR-138). Stored as the digest input, not only its hash.
 |-------|------|-------|
 | `env_digest` | bytea (PK) | Hash over every field below |
 | `sandbox_image` | string | Pinned like any production dependency (FR-078) |
+| `isolation` | enum | `gvisor` / `kata` / `container` / `microvm` — the backend the trial ran under (FR-059). A userspace-kernel runtime and plain runc differ in syscall cost, so a wall-clock-bounded trial moves between them; the image alone does not identify the substrate |
 | `cpu_guaranteed` / `cpu_ceiling` | numeric | **Separate values.** Guaranteed allocation prevents spurious failures; the hard-kill ceiling bounds them — collapsing the two into one number is how resource configuration becomes an invisible confounder |
 | `mem_guaranteed_mb` / `mem_ceiling_mb` | int | As above |
 | `pid_limit` / `wallclock_limit_s` | int | |

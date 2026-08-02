@@ -88,7 +88,7 @@ flowchart TB
         Worker[Stateless runtime workers]
         Kernel[[Immutable kernel loop<br/>observe → think → act]]
         Harness[Harness: tools · context · memory<br/>skills · cost · reliability]
-        Sandbox[Warm sandbox pool<br/>E2B / Firecracker / gVisor]
+        Sandbox[Warm sandbox pool<br/>gVisor · Kata]
     end
 
     subgraph Trust["Trust surface"]
@@ -250,7 +250,7 @@ principles). Every design decision maps back to one of them:
 | 🗄️ **State store** | PostgreSQL — append-only event log + config/cost/audit tables, tenant isolation via **row-level security** with transaction-local (`SET LOCAL`) scope |
 | ⚡ **Cache / locks / reservations** | Redis — session-key serial locks, **atomic budget-reservation counters** (the pre-spend ceiling of FR-083), rate-limit token buckets, sandbox-pool metadata, hot session cache |
 | 📨 **Durable queue / event plane** | NATS JetStream (default adapter behind a swappable queue port; SQS/Redis Streams/Temporal-class alternates) |
-| 📦 **Sandbox runtime** | E2B (default), swappable for Docker / Firecracker / gVisor / local-OS isolation |
+| 📦 **Sandbox runtime** | Session-scoped OCI containers under **gVisor** (`runsc`) by default — Docker `--runtime=runsc` on a single host, the same image under `runtimeClassName: gvisor` on Kubernetes; swappable for Kata Containers, microVM, or local-OS isolation |
 | 🤖 **LLM providers** | One provider abstraction + adapters: Anthropic native, OpenAI-compatible, Bedrock/Vertex, CLI-subprocess fallback; a model gateway (LiteLLM/OpenRouter/vLLM) may sit behind the same port as *transport only* |
 | 🗃️ **Object storage** | S3-compatible, for offloaded oversized tool outputs and large artifacts |
 | 🔐 **Secrets & keys** | External secrets vault (injection at tool-execution time; the model sees a handle) + KMS/HSM — per-tenant content-encryption keys with BYOK, and a **sign-only** audit-chain signing key the data plane cannot read |
@@ -437,7 +437,7 @@ The **same build** runs in four topologies, selected by configuration:
 
 | Topology | Description |
 |----------|-------------|
-| 🏢 **Multi-tenant SaaS** | Shared control + data plane; strict per-tenant isolation via RLS and per-tenant sandboxes (Firecracker/gVisor). |
+| 🏢 **Multi-tenant SaaS** | Shared control + data plane; strict per-tenant isolation via RLS and per-tenant sandboxes (gVisor by default; Kata where a separate kernel is required). |
 | 🏠 **Single-tenant** | Dedicated stack; the tenant boundary is the whole deployment. |
 | 🖥️ **Self-hosted / BYOC** | Data plane runs in the customer's VPC; sensitive payloads never leave their boundary. NATS JetStream travels as one embeddable Go binary. |
 | 🔀 **Hybrid** | Split control-plane / data-plane across a versioned contract. |

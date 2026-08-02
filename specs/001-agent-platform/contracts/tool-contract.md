@@ -219,7 +219,7 @@ Ordered steps applied to every call (FR-007, FR-010):
    effect leaves the process (FR-127). An existing `completed` claim short-circuits
    to its recorded result rather than executing; an existing `in_flight` claim is a
    crash-recovery case, not a retry, and is resolved by step 10a
-10. **Execute** in the per-tenant sandbox — default E2B backend, hard resource
+10. **Execute** in the per-tenant sandbox — default gVisor (`runsc`) backend, hard resource
     limits (CPU/memory/PID/wall-clock; breach → terminate + reclaim) and network
     default-deny (egress only via the domain allowlist, FR-037, FR-059)
 10a. **Claim resolution** — move the claim to `completed` / `failed` on a recorded
