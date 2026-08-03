@@ -457,7 +457,7 @@ tenant, replayable and auditable (FR-006, FR-041).
 | `data_label` | enum | `public` / `internal` / `regulated` — drives deterministic routing (FR-037) |
 | `route_model_id` | string | The routing decision actually taken (auditable, replayable) |
 | `route_reason` | jsonb | Why that model: data label, difficulty, capability floor (FR-076) |
-| `execution_class` | enum | `interactive` / `batch` — the field priority load-shedding reads (FR-049, FR-088) |
+| `execution_class` | enum | `interactive` / `batch` — the field priority load-shedding reads and, with `delegation_role`, what the scheduler derives a run's class concurrency pool from (FR-049, FR-168, FR-088) |
 | `priority` | int | Scheduling weight within the class |
 | `region` | string | Placement region; a run outside the tenant's pin fails closed (FR-091) |
 | `parent_session_id` | UUID (nullable) | Immediate parent in a delegation tree; NULL for a root run (FR-101) |
@@ -511,7 +511,7 @@ log alone, and identical to the externally published event contract (FR-085):
 |-------|-------|
 | Model output | `thought` · `content` · `tool_use` |
 | Tool | `tool_result` (incl. synthetic) · `tool_receipt_ref` · `effect_claimed` · `effect_claim_resolved` (write-ahead idempotency claim and its outcome, FR-127) |
-| Context | `condensation` (model-facing compaction, FR-015/FR-130) · `checkpoint` (machine-facing resume record, FR-024/FR-126) — **distinct artifacts, never interchangeable** |
+| Context | `condensation` (model-facing compaction, FR-015/FR-130) · `context_pruned` (a non-destructive live-context prune of the slice sent to the provider — which results were trimmed or hard-cleared and by which pass, FR-164; never mutates a prior event, so the log the condensation, fork, and content-access read see stays intact) · `checkpoint` (machine-facing resume record, FR-024/FR-126) — **distinct artifacts, never interchangeable** |
 | Human (push) | `user_message` (the mid-run steering input of FR-005) |
 | Human (pull) | `input_requested` · `input_answered` · `input_expired` · `input_invalidated` (FR-110) |
 | Approval | `approval_requested` · `approval_notified` · `approval_reminded` · `approval_escalated` · `approval_granted` · `approval_granted_modified` · `approval_denied` · `approval_expired` · `approval_invalidated` · `approval_resolution_refused` · `approval_mismatch` (FR-036, FR-103–FR-108) |
@@ -519,7 +519,7 @@ log alone, and identical to the externally published event contract (FR-085):
 | Skills | `skill_activated` (identity, version, `bundle_digest`, and whether the trigger was a match, an explicit request, or configuration) · `skill_capability_ignored` (a declared tool the run does not hold — recorded, never honoured, FR-153) |
 | Delivery | `delivery_enqueued` · `delivery_delivered` · `delivery_failed` · `delivery_suppressed` (FR-157) — the enqueue precedes the send, so a permanently undelivered approval request is separable from an unanswered one |
 | Safety | `taint_transition` · `sanitization_boundary` (FR-087) |
-| Delegation | `delegation_requested` · `delegation_refused` (bound/scope/admission) · `delegation_returned` · `delegation_reaped` (FR-098–FR-101) |
+| Delegation | `delegation_requested` · `delegation_target_selected` (a target materialized from a roster-scale search — the resolvable roster stays pinned by `harness_digest` while the chosen target is reconstructed turn by turn, FR-169) · `delegation_refused` (bound/scope/admission) · `delegation_returned` · `delegation_reaped` (FR-098–FR-101) |
 | Orchestration | `plan_started` · `plan_step_entered` · `plan_transition` · `plan_step_exited` · `plan_completed` (FR-102) |
 | Observability | `content_access_granted` · `content_accessed` · `content_access_refused` (FR-118) |
 | Lifecycle | `error` · `stuck_suspected` (first stuck-heuristic trip, non-terminal, FR-115) · `forked` (recorded on the source run when a fork branches from it, FR-128) · `terminal` (carries the FR-004 typed reason) · `erasure` (FR-080) |
@@ -675,6 +675,7 @@ exhaustion reason (FR-016, FR-017).
 | `agent_id` | UUID (FK) | Chargeback dimension |
 | `surface` | string | Chargeback dimension |
 | `turn_seq` | bigint | Per-turn granularity |
+| `call_class` | enum | The billable-call category (FR-165) — `user_turn` / `condensation` / `safety_classifier` / `judge` / `embedding` / `rerank` / `routing` / `title` / `conversion` / `memory`; an auxiliary class is reserved, metered, and ceilinged identically to `user_turn`, and is what makes the platform's own background spend visible and droppable under budget pressure |
 | `input_tokens_uncached` | int | **Split by token class** — the cache-read rate of FR-014/SC-003 is otherwise unmeasurable |
 | `input_tokens_cache_read` | int | |
 | `input_tokens_cache_write` | int | |

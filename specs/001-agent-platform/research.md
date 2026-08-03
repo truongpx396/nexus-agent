@@ -877,6 +877,131 @@ not measurable from the designed data.
   un-taint-tracked instruction channel that can also answer the platform's own
   questions).
 
+## 30. Harness context, metering, and failover mechanics
+
+- **Decision**: Live-context **pruning** becomes a stage distinct from
+  condensation — a non-destructive transform of the slice sent to the provider
+  that never mutates the log, running before condensation each turn and escalating
+  in bounded passes (per-result outlier guard → soft trim → hard clear → then
+  condensation), exempting media/model-derived results and unresolved `tool_use`
+  pairs from hard-clear, and recorded as a `context_pruned` event and eval-gated
+  like the condenser (FR-164). **Every** billable model call — compaction, the
+  classifier's model leg, a judge, an embedding/rerank, a routing pre-pass, title
+  generation, model-backed conversion — reserves, meters, attributes, and ceilings
+  on the same path as a user turn, with auxiliary calls failing closed to a
+  declared degraded behaviour under budget pressure and entitlement-billed
+  backends still recording tokens (FR-165). An adjudicating model is handed the
+  content under evaluation as delimited data and only the input it must judge,
+  returns a structured fail-closed verdict, and carries a circuit breaker so a
+  broken dependency trips to the restrictive outcome rather than metering on every
+  invocation (FR-166). And provider failover runs off a typed trigger taxonomy —
+  retryable fails over, permanent skips retry, `prompt_too_long` never fails over —
+  bounded by two rules: failover never crosses the data-label routing/residency
+  floor, and a stream that has committed output is completed or aborted to a
+  checkpoint rather than re-answered on a second backend (FR-167).
+- **Rationale**: Each seam sat *behind* an existing requirement. FR-060 folded
+  pruning and condensation into one clause though they differ in destructiveness —
+  the distinction matters most against this platform's own event-sourcing and
+  erasure model, where a non-destructive prune leaves the log (and therefore
+  crypto-shredding, fork, and audited content-access) intact while a lossy
+  compaction does not, and where the log makes a hard-cleared result a cheap
+  re-read rather than a loss. The media-exempt rule falls straight out of the cost
+  model: a vision or audio description is itself an FR-160 model call, so clearing
+  it trades a re-read for a re-derivation. FR-083 metered the user turn while the
+  platform's own background model calls — the single largest being repeated
+  compaction over a long run — went uncounted except where FR-160 named the
+  converter; a tenant ceiling that does not bound background work is not a ceiling.
+  FR-116's model leg read the input it judged and could be addressed by it, the
+  same injection surface the Rule of Two closes elsewhere, and a timeout without a
+  breaker turns a flapping classifier into a metered call on every invocation's
+  critical path. FR-027 named the failover mechanism without the taxonomy that
+  makes it safe: failing over a billing error wastes a backend, failing over a
+  context overflow defeats the routing floor, failing over a `regulated` run
+  breaches residency, and failing over mid-stream splices a turn the user is
+  already reading.
+- **Comparison set**: The **trust surface came out ahead** — the taxonomy,
+  metering, and stream-commit rules add nothing to FR-033–FR-118, which is why the
+  study touched none of them. The borrowings are concentrated in the harness. A
+  **shipped single-tenant implementation** supplied the two-pass soft-trim/
+  hard-clear prune with a per-result outlier guard and the media-exemption, the
+  observation that a compaction-heavy run is a cost centre the ceiling must see,
+  the input-guard-wraps-untrusted-content discipline and the hook circuit breaker,
+  and the failover error taxonomy with its stream-commit and cooldown rules — the
+  concrete mechanics a running system is forced to settle and a spec written ahead
+  of an implementation leaves open. It is, in the terms of this platform's own
+  governing equation, an existence proof of the ~80%-is-harness half, and the
+  mechanics validate more of the spec than they change.
+- **Alternatives considered**: One "context management" stage conflating prune and
+  condense (rejected — it is the FR-060 clause that hid the destructiveness
+  boundary and the erasure consequence); hard-clearing media results uniformly
+  (rejected — it re-bills an FR-160 model call to save a log re-read); metering
+  only the user-facing turn (rejected — it leaves the platform's own background
+  spend, compaction chief among it, outside the ceiling FR-083 exists to hold);
+  handing the adjudicator the surrounding conversation for context (rejected — it
+  makes the control addressable by the text it screens); a bare timeout with no
+  breaker (rejected — a failing classifier then meters every invocation and its
+  outages are invisible); and an undifferentiated failover on any error (rejected —
+  it wastes a backend on permanent errors, defeats the routing floor on context
+  overflow and on `regulated` runs, and splices a committed stream).
+
+## 31. Orchestration scheduling, delegation-target selection, and memory ordering
+
+**Decision**: Close three gaps a full sweep of the comparative product surface
+(pipeline, lane scheduler, memory consolidation, team delegation) surfaced beyond
+the harness internals of §30. (a) **Schedule by class of work, not only by tenant.**
+FR-049 fairness is a tenant axis; capacity itself is still one pool, so a burst of
+scheduled/cron work or one wide delegation fan-out contends for the same slots as
+an interactive turn. FR-168 partitions concurrency into independently-bounded class
+pools — interactive, delegated child, autonomous/background, platform-auxiliary
+(FR-165) — derived from `execution_class` and `delegation_role` already on the run
+record (FR-088), sheds background before interactive, and raises a signal when a
+class is held below its floor. It is orthogonal to FR-099's fan-out reservation: that closes cost
+starvation, this closes concurrency starvation. (b) **Extend deferred, measured
+selection to the delegation-target catalog.** FR-148 fixed the tool selector and
+FR-154 the skill selector once catalogs grew, but a large delegatable-agent roster
+was still a static resident list. FR-169 gives target selection the same
+deferred-search-plus-accuracy-signal discipline, pins the resolvable roster into the
+harness digest (FR-129), records each materialized target as a typed event, and
+requires every candidate to pre-satisfy FR-098's capability-subset check so the
+selector can never be the authority that widens a delegation; staggered child
+completions MAY be surfaced as one consolidated notification, but each delegation
+still records its own paired result in submission order (FR-100/FR-061), never
+collapsed. (c) **Order memory consolidation before lossy compaction.** FR-170
+makes durable-fact extraction persist before the compaction (FR-015/FR-130) or prune
+(FR-164) that discards its source, meters every consolidation model call under
+FR-165, and requires a no-model extractive fallback under pressure — which is exactly
+the degraded behaviour the comparison's own no-LLM fallback exhibits, validating
+FR-165 rather than extending it. The same requirement names passive channel mining
+as an ingestion-and-authority surface (FR-075/FR-156): off by default,
+consent-bounded, per-principal-attributed, redacted, inside the erasure boundary.
+
+**Rationale**: Each gap is a starvation-, reproducibility-, or data-loss failure the
+existing FRs leave one axis short of covering. Class-pool scheduling is the standard
+answer to background work drowning interactive work; extending FR-148's selector
+discipline to agents is the natural generalization once the roster is a catalog like
+tools and skills; and writing durable memory before truncating history is the only
+ordering that keeps compaction from discarding a fact that should have been kept.
+
+**Comparison set**: The comparative implementation runs per-class scheduler
+semaphores (main / subagent / team / cron), a hybrid delegation-target search past a
+roster threshold, a memory-flush-before-history-compaction ordering, an extractive
+no-LLM consolidation fallback, and a batch-queue that merges staggered child
+completions into one lead announcement.
+
+**Alternatives considered**: One undifferentiated concurrency pool with tenant
+fairness only (rejected — background and delegated work then starve the interactive
+turns a human waits on, which tenant fairness cannot see); a static resident roster
+of every delegatable agent (rejected — it reintroduces the flood and the
+non-reproducibility FR-148/FR-154 removed for tools and skills, ungoverned); letting
+the target selector admit any surfaced agent (rejected — selection would then widen a
+delegation past FR-098); consolidating after compaction (rejected — a fact worth
+keeping is summarized away before it is ever persisted); failing or silently dropping
+the consolidation write under a ceiling (rejected — it either breaks the user's turn
+or loses durable memory, when a no-model extractive pass or a deferral suffices); and
+an open ambient-capture path that writes shared-channel traffic to memory (rejected —
+it is unauthenticated ingestion under FR-075 and cross-principal memory under
+FR-156).
+
 ## Resolved unknowns summary
 
 | Technical Context item | Resolution |
@@ -910,5 +1035,7 @@ not measurable from the designed data.
 | Ecosystem integration | Optional adapters behind existing ports; one authority boundary; gateway as transport not router; OTLP-only observability; conformance-recorded capability matrix (§27) |
 | Channels / tools / skills | Qualified tool identity with one namespace owner; catalog manifest pinned instead of the materialized set; broker-only sandbox tool calls; signed skill bundles under one admission gate, narrowing-only; surface capability descriptors driving approval routing; per-turn principal authority; delivery outbox; agent-principal ingress class (§29) |
 | Evaluation measurement | k-trial statistical gate with `pass^k`/intervals and a three-valued verdict; environment digest + cold sandboxes; suite classes with graduation; in-boundary online scorer + rollout guardrail; pinned calibrated cross-family judge; fork-based trajectory cases; per-artifact suites + scheduled re-run; efficiency in the gate; measured held-out gap; eval entities made first-class (§28) |
+| Harness context / metering / failover | Non-destructive live-context pruning distinct from condensation (outlier-guard → soft-trim → hard-clear), media-exempt, `context_pruned`-recorded and eval-gated; every billable model call metered and ceilinged with degraded-fallback under pressure; adjudicating models fed delimited data + circuit breaker; typed failover taxonomy bounded by the routing floor and stream-commit (§30) |
+| Orchestration scheduling / delegation-target / memory ordering | Concurrency partitioned into independently-bounded class pools (interactive / child / background / auxiliary) keyed off `execution_class`, orthogonal to the fan-out cost reservation; delegation-target selection given FR-148's deferred-search-plus-accuracy discipline, roster pinned into the harness digest, every candidate pre-satisfying FR-098; memory consolidation ordered before lossy compaction, metered under FR-165 with a no-model extractive fallback, and passive channel mining gated as consent-bounded per-principal ingestion (§31) |
 
 **No `NEEDS CLARIFICATION` remain.** Proceed to Phase 1.

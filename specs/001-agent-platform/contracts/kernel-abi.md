@@ -30,7 +30,17 @@ type Chunk =
 
 - **Rule**: routing decides which `Provider`/model by data label + difficulty,
   deterministically and auditably (never model discretion).
-- **Failover**: caller layers retry → cooldown → failover across implementations.
+- **Failover**: caller layers retry → cooldown → failover across implementations,
+  driven by a **typed trigger taxonomy** rather than a bare error (FR-167):
+  *retryable* (throttle / transient 5xx / idle-stream abort / transient auth) → retry
+  then fail over; *permanent* (billing / unknown-model / auth) → skip retry, fail
+  over or terminate typed; *context-overflow* (`prompt_too_long`) → condense or
+  terminate, **never** fail over. Two boundaries: failover MUST NOT cross the
+  data-label routing / residency floor (FR-037/FR-091), and once the stream has
+  emitted its first `content`/`tool_use` chunk it is **committed** — the caller
+  completes it or aborts to the last checkpoint (FR-024/FR-067), never re-answers
+  on a second backend. Each backend carries its own cooldown with probe-on-expiry
+  (FR-048).
 - **Usage is split by token class** — an undifferentiated `input_tokens` total
   makes the >90% cache-read gate (FR-014, SC-003) unmeasurable.
 - **A deterministic implementation is mandatory** (FR-097): a recorded/fake
