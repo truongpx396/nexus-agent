@@ -121,7 +121,7 @@ named approver as a decision-ready package, resolvable only by an authorized hum
 classes), invalidated with the run it gates, and unanswered-after-escalation
 expiring as a denial (`approval_expired`)
 
-**Scale/Scope**: 163 functional requirements across 9 user stories (see the MVP cut
+**Scale/Scope**: 170 functional requirements across 9 user stories (see the MVP cut
 line below for what ships in Increment 1); single reusable
 kernel serving 9 surface classes (CLI, chat, web, REST/gRPC, email, cron, Telegram,
 Zalo, and agent-to-agent ingress — the last being its own `principal_kind`
@@ -179,7 +179,7 @@ into the Security & Trust Surface and Delivery/Scale sections above →
 FR-160, FR-162.
 
 **Result**: PASS on principles I–IX with **one recorded tension** (see Complexity
-Tracking): the constitution's "build for the current stage" rule versus a 163-FR,
+Tracking): the constitution's "build for the current stage" rule versus a 170-FR,
 9-surface-class, 4-topology target architecture starting from zero code. This is
 resolved by sequencing, not by scope reduction — the spec remains the target
 architecture and the MVP cut line below states what actually ships first. The
@@ -379,7 +379,7 @@ declare away. Each is resolved by an explicit mechanism, not by assertion.
 
 | Tension | Why the complexity is needed | Simpler alternative rejected because | Resolution |
 |---------|------------------------------|--------------------------------------|------------|
-| **Target scope (163 FRs, 9 surface classes, 4 topologies) vs. "build for the current stage"** | The spec is a target architecture for a platform whose whole thesis is that the enterprise tax cannot be retrofitted; the schema, contract, and trust seams must be right before the first migration. | Writing a smaller spec would hide the retrofit cost rather than remove it — the expensive decisions (event envelope, encryption/erasure model, audit chain, tenant scoping) are *schema* decisions that cannot be deferred cheaply. | The **MVP cut line** above: seams and schema early, infrastructure late. Every deferred item is additive against Increment 1's schema. |
+| **Target scope (170 FRs, 9 surface classes, 4 topologies) vs. "build for the current stage"** | The spec is a target architecture for a platform whose whole thesis is that the enterprise tax cannot be retrofitted; the schema, contract, and trust seams must be right before the first migration. | Writing a smaller spec would hide the retrofit cost rather than remove it — the expensive decisions (event envelope, encryption/erasure model, audit chain, tenant scoping) are *schema* decisions that cannot be deferred cheaply. | The **MVP cut line** above: seams and schema early, infrastructure late. Every deferred item is additive against Increment 1's schema. |
 | **Three languages (Go / Python / TypeScript)** | Go for the concurrency-bound kernel and small BYOC-shippable binaries; Python only where the ML/eval ecosystem lives, and strictly **off the paying loop**; TypeScript only for the web surface. | A single-language stack would either lose the eval/judge ecosystem (Go-only) or the deployable-binary and concurrency properties the data plane needs (Python-only). | Python is confined to `ml-python/` (evals, judge, condenser) and reaches the runtime only through the queue/contract — it is never in the request path. |
 | **Control/data-plane split before any customer needs BYOC** | Principle-mandated, and "move the data plane into the customer VPC" is only a flag if the planes never bled together in the first place. | Building one plane and splitting later is the rewrite the constitution's Delivery section exists to prevent. | The **contract and package boundary** ship in Increment 1; the *physical* split is deferred until a BYOC customer exists (see cut line). |
 
