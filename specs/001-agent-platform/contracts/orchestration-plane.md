@@ -101,6 +101,19 @@ through the same gates; in-flight runs finish on the version they started with
 - **Delegation**: a `delegate_fanout` step calls `Delegation.delegate` per
   `kernel-abi.md` — descent invariant, bounds, return validation, and reaping all
   apply unchanged. The plan holds decision authority; children stay read-only.
+  Where a step delegates against a large agent roster, target selection is a
+  deferred, measured search rather than a static list: the resolvable roster is
+  pinned into the harness digest, each materialized target is a typed event, and
+  every candidate has already cleared the capability-subset check (FR-169/FR-098) —
+  selection never widens what the permission chain would refuse. A concurrent
+  fan-out's children each record their own paired result and events; the plan step
+  MAY present the model one consolidated summary of them and MAY surface staggered
+  completions as a single notification rather than N (FR-100, FR-061).
+- **Scheduling**: plan steps, their fan-out children, and any autonomous/scheduled
+  invocation draw from **separate class concurrency pools** (FR-168) derived from the
+  run's `execution_class` and `delegation_role` (FR-088), so background or delegated
+  work cannot starve an interactive turn; this is orthogonal to the cost envelope
+  above (FR-099).
 - **Approval**: an `approval_gate` step suspends the run **durably at zero token
   cost** and resumes on the approval event; an unanswered approval expires as a
   denial of that step (FR-036) after its declared notify → remind → escalate stages
