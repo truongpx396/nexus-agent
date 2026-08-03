@@ -1002,6 +1002,69 @@ an open ambient-capture path that writes shared-channel traffic to memory (rejec
 it is unauthenticated ingestion under FR-075 and cross-principal memory under
 FR-156).
 
+## 32. The hook layer as a governed subsystem, not an open slot
+
+**Decision**: Make the `PreToolUse`/`PostToolUse` hook layer — resolution-order
+layer 2 and pipeline steps 7/12 — a first-class, configured, and governed
+subsystem (FR-171) rather than an under-specified extension point implied by the
+pipeline. A hook resolves only to `DENY` (final) / `ASK` / `DEFER`; a hook `ALLOW`
+is a defer and never widens; a final `pre_tool_use` deny is the sole producer of
+the `hook_stopped` terminal reason (FR-004). Each hook declares one handler —
+edition/trust-tier-restricted `command`, SSRF-protected `http`, or model-backed
+`prompt` — fires only on a `matcher` (regex over `tool_name`) or a CEL `if_expr`
+over `{tool_name, tool_input, depth}`, and is bounded by a fail-closed timeout, a
+non-overridable chain budget, a per-turn cap, a decision cache, and a per-tenant
+token budget. A `prompt` hook inherits the Gate-3 hardening (parsed input only,
+structured verdict, circuit breaker, billed and ceilinged under FR-165). A returned
+input rewrite is applied only through a dotted-path allowlist and re-enters the
+step-8a canonical digest so an approval and the idempotency claim bind what
+executes; definitions are governed tenant config pinned into `harness_digest`,
+never populated from a descriptor's own contents.
+
+**Rationale**: The pipeline already names PreToolUse/PostToolUse as steps, but an
+unbounded hook is simultaneously the platform's largest cost-burn vector (a metered
+model call on every tool invocation) and an injection surface (a hook that could
+widen would be a lever reachable from tool output). The named prior art divides into
+two lineages. The **shell-hook lineage** — Claude Code's `PreToolUse`/`PostToolUse`/
+`Stop` handlers matched by tool name, exit-2-blocks / JSON-decision — is an
+*automation* primitive: local, trusted, no cost model, no tenant governance.
+**GoClaw** hardens that into a security layer with a CEL `if_expr` matcher, a
+`prompt` handler carrying a structured `decide()` verdict and a circuit breaker, a
+per-tenant token budget, and a decision cache — the concrete reference FR-171 is
+modeled on. **OpenHands** runs both lineages *deliberately separated*: a configured
+hook layer (`HookConfig` with `command` and whole-sub-agent `agent` handlers that
+reason about semantic intent, e.g. denying `awk '{print}' /etc/passwd` a syntactic
+blacklist misses) sitting alongside a distinct risk-analyzer family
+(`Pattern`/`PolicyRail`/`Ensemble`/`LLM`/`ToolShield`/`GraySwan`) whose LLM leg
+strips attacker-influenceable `<tool>`/`<summary>`/`<thought>`/`<arguments>` spans
+before parsing and fails to `UNKNOWN`-then-confirm (never HIGH) on an
+infrastructure or parse error. That split corroborates this platform's own layering:
+the deterministic-then-model per-invocation safety check (Gate 3, FR-009/FR-116) is
+the *analyzer*, and FR-171 hooks are the configured *extension* layer — distinct
+resolution stages, not one conflated control.
+
+**Comparison set**: FR-171 tracks **GoClaw + OpenHands combined** and adds three
+mechanics neither ships: the input-rewrite-re-binds-the-canonical-digest invariant
+(FR-103/FR-071), harness-digest pinning of hook definitions (FR-129), and hooks as
+governed tenant config that injected content cannot populate (FR-096/FR-113). It is
+also strictly more expressive on authority than OpenHands, whose `HookDecision`
+still carries only `ALLOW`/`DENY` with `ASK` commented as a future addition — a hook
+there cannot route to human approval, whereas FR-171's `ASK`/`DEFER` (never
+widening) can.
+
+**Alternatives considered**: Leaving hooks as an implied pipeline step with no
+configured contract (rejected — it is the same under-specification the Gate-3
+gap-closure of §25 named for the safety classifier, and an unbounded hook is both a
+cost and an injection surface); letting a hook `ALLOW` bypass a downstream gate
+(rejected — it makes the hook a widening lever reachable from tool output, the
+inversion FR-111 forbids); conflating the deterministic analyzer with the configured
+hook into one control (rejected — OpenHands' own separation shows why the fast
+deterministic check and the configured extension want distinct lifecycles); a
+`prompt` hook without a mandatory matcher/`if_expr` (rejected — it fires a metered
+model call on every event, the exact hot-path cost FR-165 exists to bound); and
+sourcing hook definitions from descriptor contents (rejected — it is the FR-113
+tool-poisoning surface arriving through the governance door).
+
 ## Resolved unknowns summary
 
 | Technical Context item | Resolution |
@@ -1037,5 +1100,6 @@ FR-156).
 | Evaluation measurement | k-trial statistical gate with `pass^k`/intervals and a three-valued verdict; environment digest + cold sandboxes; suite classes with graduation; in-boundary online scorer + rollout guardrail; pinned calibrated cross-family judge; fork-based trajectory cases; per-artifact suites + scheduled re-run; efficiency in the gate; measured held-out gap; eval entities made first-class (§28) |
 | Harness context / metering / failover | Non-destructive live-context pruning distinct from condensation (outlier-guard → soft-trim → hard-clear), media-exempt, `context_pruned`-recorded and eval-gated; every billable model call metered and ceilinged with degraded-fallback under pressure; adjudicating models fed delimited data + circuit breaker; typed failover taxonomy bounded by the routing floor and stream-commit (§30) |
 | Orchestration scheduling / delegation-target / memory ordering | Concurrency partitioned into independently-bounded class pools (interactive / child / background / auxiliary) keyed off `execution_class`, orthogonal to the fan-out cost reservation; delegation-target selection given FR-148's deferred-search-plus-accuracy discipline, roster pinned into the harness digest, every candidate pre-satisfying FR-098; memory consolidation ordered before lossy compaction, metered under FR-165 with a no-model extractive fallback, and passive channel mining gated as consent-bounded per-principal ingestion (§31) |
+| Hook layer | `PreToolUse`/`PostToolUse` made a governed subsystem: tighten-only authority with `hook_stopped` as sole producer, `command`/`http`/`prompt` handlers, matcher-or-CEL `if_expr` firing, Gate-3-hardened prompt hooks metered under FR-165, fail-closed timeout + chain budget + per-turn cap + decision cache + tenant token budget, input rewrite re-binding the step-8a digest, and definitions as harness-pinned governed config; modeled on GoClaw + OpenHands' analyzer/hook split (§32) |
 
 **No `NEEDS CLARIFICATION` remain.** Proceed to Phase 1.
