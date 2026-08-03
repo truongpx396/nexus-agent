@@ -126,7 +126,7 @@ the chain is total and ordered. Every invocation walks it top to bottom:
 | # | Layer | May resolve to | Notes |
 |---|-------|----------------|-------|
 | 1 | **Deny rules** (tenant/tool/pattern) | `DENY` (final) | Evaluated first; nothing below may overturn a deny |
-| 2 | `PreToolUse` hooks | `DENY` (final) · `ASK` · `DEFER` | A hook may *tighten* or force a prompt; a hook `ALLOW` is a defer, never a bypass |
+| 2 | `PreToolUse` hooks (FR-171) | `DENY` (final) · `ASK` · `DEFER` | A hook may *tighten* or force a prompt; a hook `ALLOW` is a defer, never a bypass |
 | 3 | **Autonomy level** (pinned, ratcheting) | `DENY` · `ASK` · `DEFER` | `read_only` denies every mutating capability; `supervised` forces `ASK` on every mutating invocation; `full` defers |
 | 4 | Gate 1 — global profile | `DENY` · `DEFER` | |
 | 5 | Gate 2 — capability metadata | `DENY` · `ASK` · `DEFER` | Effect class routes to the approval policy |
@@ -160,6 +160,49 @@ egress, data label, or region. Ecosystem skill formats carry tool-permission
 declarations that *grant*; adopting that semantics here would make "load this
 skill" a widening primitive reachable from injected content — the same lever the
 autonomy ratchet closes, arriving through a different door.
+
+## The hook layer (FR-171)
+
+Layer 2 of the resolution order and steps 7/12 of the pipeline are this platform's
+adoption of the lifecycle-hook pattern. An unbounded hook is both a cost-burn
+vector and an injection surface, so the mechanism is specified rather than left as
+a slot:
+
+- **Events.** A hook binds to a typed lifecycle event: `pre_tool_use` and
+  `subagent_start` are **blocking** (the pipeline waits on a synchronous decision;
+  a timeout fails closed), while `post_tool_use` / `stop` / `subagent_stop` (and
+  `user_prompt_submit` where implemented) are **async** fire-and-forget.
+- **Authority.** `DENY` (final) · `ASK` · `DEFER` only — a hook `ALLOW` is a defer,
+  never a bypass, and a hook may never add a capability, widen autonomy, relax an
+  approval policy, or satisfy an approval. A final `pre_tool_use` deny halts the
+  run with `hook_stopped` (FR-004), of which the dispatcher is the sole producer.
+- **Handlers.** Exactly one per hook: `command` (JSON event on stdin, exit-0 allow
+  / exit-2 block, `allowed_env_vars` allowlist, edition/trust-tier restricted),
+  SSRF-protected `http` POST (bounded body, one bounded retry on a transient 5xx,
+  fail-closed on 4xx or malformed reply), or model-backed `prompt`. Hooks resolve
+  in scope-then-priority order (`global` / `tenant` / `agent`); the first `DENY`
+  short-circuits the chain; a non-matching hook is pass-through while a
+  matched-then-errored hook fails closed for a blocking event.
+- **Matching.** A `matcher` (regex over `tool_name`) or an `if_expr` (CEL over
+  `{tool_name, tool_input, depth}`); at least one is **required** for a `prompt`
+  hook so it never fires a metered model call on every event.
+- **Prompt-hook hardening (FR-166).** Only the parsed `tool_input` reaches the
+  evaluator; it must return a structured `decide(...)` verdict (free text fails
+  closed) and carries a circuit breaker; the model call is an auxiliary billable
+  call metered and ceiling-checked under FR-165, degrading closed at a ceiling.
+- **Bounding guards.** Per-hook timeout with an `on_timeout` posture (default
+  `block`), a non-overridable per-event chain budget, a per-turn invocation cap, a
+  bounded decision cache keyed on `(hook version, tool identity, input digest)`,
+  and a per-tenant hook token budget.
+- **Input rewrite.** A returned `updatedToolInput` is applied only through a
+  dotted-path allowlist and re-enters the step-8a canonical digest, so an approval
+  and the write-ahead idempotency claim bind exactly what executes (FR-103, FR-071).
+- **Governance and record.** Hook definitions are behaviour-bearing tenant config
+  under governance sign-off, never populated from a descriptor's own contents,
+  pinned into `harness_digest` as part of the permission policy, and every
+  execution is a typed event + `hook.<handler>.<event>` trace span. A hook-triggered
+  sub-agent carries a skip-hooks marker and a depth bound so a hook cannot
+  re-trigger itself unboundedly.
 
 ## Callers of the pipeline (FR-149)
 
@@ -199,7 +242,7 @@ Ordered steps applied to every call (FR-007, FR-010):
    Gate 3 of FR-116; Rule of Two evaluated from the tool's declared taint legs
    plus the session's accumulated taint state, FR-033, FR-087)
 6. **Input backfill** (defaults, absolute-path coercion — poka-yoke, FR-007)
-7. **PreToolUse hooks**
+7. **PreToolUse hooks** (FR-171)
 8. **Permission resolution chain** — the total order above (FR-111)
 8a. **Canonical digest + idempotency key derivation** over `tool_id` + the fully
    resolved input. **One artifact** serves three jobs: it is what an approval
@@ -230,7 +273,7 @@ Ordered steps applied to every call (FR-007, FR-010):
 11. **Result budgeting** — cap/paginate (~25K tokens); spill oversized output to
     object storage, return a preview + "do not infer success from the preview"
     banner (FR-010)
-12. **PostToolUse hooks**
+12. **PostToolUse hooks** (FR-171)
 12a. **Emit authorization receipt** when this invocation was approval-gated —
     binding approver identity, authn method, channel, approved digest, scope, and
     decision into the same chain (FR-112)

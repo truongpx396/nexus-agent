@@ -169,7 +169,11 @@ principles). Every design decision maps back to one of them:
   context firewalls whose capability can only *shrink* on descent while taint only
   *grows* on return, bounded on depth, concurrency, and per-run totals, drawing from
   a pre-reserved fan-out envelope so one delegation can't starve its tenant, and
-  attributed by full delegation chain rather than immediate parent.
+  attributed by full delegation chain rather than immediate parent. When the
+  roster of agents a run may delegate to is large, target selection uses the same
+  **deferred-disclosure-and-measured-selection** discipline as the tool and skill
+  selectors — a bounded, relevance-ranked candidate set on demand, not a static
+  resident list.
 - 📋 **Processes, not just conversations** — a recurring workflow is a **declarative
   orchestration plan** (steps, conditions, bounded loops, approval gates, optional
   read-only fan-out) that is versioned, reviewed, and eval-gated like code. The
@@ -183,7 +187,17 @@ principles). Every design decision maps back to one of them:
   concurrently — fail-closed to serial when unproven.)
 - 🧠 **Memory & skills** — file-first per-tenant memory injected at session start
   (retention-bounded, injection-screened), and reusable skills loaded on demand
-  through three bounded disclosure tiers. A skill is a **signed, content-addressed
+  through three bounded disclosure tiers. **Memory consolidation** — the
+  extraction, summarization, and dedup that writes durable memory — is an
+  **ordered, metered, degrade-capable** stage, not a background best-effort:
+  a durable fact is written *before* the compaction or prune that would discard
+  its source (memory-write precedes history-truncate), every model call it makes
+  is metered and ceiling-checked like any other, and under pressure it falls back
+  to a no-model extractive pass rather than failing the turn or dropping the
+  write. **Ambient extraction** from a shared channel's traffic (mining memory
+  with no session) is **off by default**, consent- and configuration-bounded,
+  provenance-tracked and poison-screened, and attributes each fact to the
+  principal who said it rather than to the thread. A skill is a **signed, content-addressed
   bundle**, not a text field: every file in it clears the injection scan, a bundled
   script registers as a real tool through the ordinary gates or the bundle is
   refused, and **every origin clears the same gate** — an import from a registry
@@ -483,7 +497,10 @@ boundary.
   steps breaks the loop with a clear reason.
 - 🟢 **Deploy safety** — in-flight runs are never cut over mid-task (rainbow deploy).
 - 📉 **Graceful degradation** — admission control, weighted-fair scheduling across
-  tenants, and priority load-shedding keep the system responsive under overload.
+  tenants, and priority load-shedding keep the system responsive under overload,
+  with concurrency pooled by class of work (interactive / background / auxiliary)
+  so a flood in one class **sheds background first** rather than starving the
+  interactive path.
 - 🔑 **Idempotency** — retries, at-least-once redelivery, and resume-from-checkpoint
   deduplicate state-changing effects on a durable per-effect idempotency key.
 
@@ -557,7 +574,28 @@ long-running sessions (~5,000+ per single-org deployment).
   deterministic rule pass resolves the common case in-process with no external
   call, and only the ambiguous remainder reaches a model classifier carrying its
   own bounded timeout that fails closed to **ASK** — never `ALLOW` — on timeout,
-  error, or an unparseable verdict. Tool defaults are fail-closed throughout.
+  error, or an unparseable verdict. Any model that adjudicates untrusted content
+  is hardened against it: it receives the parsed input as **delimited data, never
+  as instructions**, must return a **structured verdict** (free text fails closed),
+  and **circuit-breaks a failing judge** — repeated timeouts or unparseable
+  verdicts trip it to the fail-closed outcome for a cooldown rather than retrying
+  a broken dependency on every call. Tool defaults are fail-closed throughout.
+- 🪝 **Hooks are governed, not a free slot** — the `PreToolUse`/`PostToolUse` hook
+  layer is a configured, bounded subsystem, not an open extension point. A hook may
+  only **tighten** — `DENY` (final), `ASK`, or `DEFER`; a hook `ALLOW` is a defer,
+  never a bypass, and no hook can add a capability, widen autonomy, relax a policy,
+  or satisfy an approval (a final deny is the *sole* producer of the `hook_stopped`
+  stop). Each hook declares one handler — a trust-tier-restricted local `command`,
+  an SSRF-protected `http` POST, or a model-backed `prompt` — and fires only on a
+  `matcher` or a CEL `if_expr`, so a metered prompt hook never runs on every call.
+  Prompt hooks inherit the same hardening as the safety check (parsed input only,
+  structured verdict, circuit breaker, billed and ceiling-capped). Every hook is
+  bounded by a timeout that fails closed, a non-overridable chain budget, a per-turn
+  cap, a decision cache, and a per-tenant token budget; an input rewrite is applied
+  only through a path allowlist and **re-binds the canonical digest**, so approval
+  and exactly-once bind what actually executes. Definitions are governed tenant
+  config pinned into the harness digest — never populated from a descriptor's own
+  contents.
 - 🔒 **Autonomy is a ratchet, not a label** — `read_only` refuses every mutating
   capability, `supervised` gates every mutating invocation, `full` gates by effect
   class and policy. The level is pinned per run and may only be **tightened**
@@ -619,16 +657,33 @@ long-running sessions (~5,000+ per single-org deployment).
   **versioned price book** so historical cost stays reproducible when a provider
   changes prices, and attributed to the task chain + tenant + user + agent +
   surface for showback/chargeback.
+- 🧮 **Every model call is metered, not just the interactive turn** — the calls a
+  user never sees (structured compaction, the safety-classifier model leg, an
+  online judge or scorer, memory consolidation, retrieval embedding/rerank, an
+  intent-classification pre-pass, title generation, model-backed document
+  conversion) traverse the **same pre-spend reservation, per-class metering,
+  price-book, attribution, and ceiling** path as a foreground turn. **"Off the
+  paying loop" means a *cheaper* model, never an *unmetered* one** — a tenant
+  ceiling bounds background work too, so at the ceiling an auxiliary call **fails
+  closed to a declared degraded behaviour** (skip the title, defer the
+  consolidation, fall back to the deterministic classifier leg) rather than
+  breaching the ceiling or failing the user's turn. An entitlement-billed backend
+  still records its token counts so it is never a blind spot.
 - 🚧 **Hard ceilings, enforced before the spend** — every turn reserves its
   worst-case cost against an atomic per-tenant counter *before* the model call, so
   a burst of concurrent sessions cannot overshoot; a refusal terminates with an
   explicit `cost_exhausted` reason and an alert — never a surprise bill.
 - ⚡ **Cache-stable context** — a byte-stable prefix (tool catalog + stable system
-  prompt + append-only transcript) and a volatile tail rebuilt each turn; structured
-  compaction at ~80% budget on a cheaper helper model. "Off the paying loop" means
-  *a cheaper model*, which is not the same as asynchronous — so whether compaction
-  blocks the turn is a **declared, measured property**, not an assumption, and its
-  latency contribution is reported.
+  prompt + append-only transcript) and a volatile tail rebuilt each turn. Before
+  compaction, **non-destructive live-context pruning** trims what a turn *shows*
+  the model — a per-result outlier guard, then a soft trim, then a hard clear to a
+  refetchable reference — and it **never mutates, summarizes, or deletes any event
+  in the log**, so a fork, an erasure, or an audited content read still sees the
+  original; **structured compaction** at ~80% budget on a cheaper helper model is
+  reached only when pruning cannot bring the slice under budget. "Off the paying
+  loop" means *a cheaper model*, which is not the same as asynchronous — so whether
+  compaction blocks the turn is a **declared, measured property**, not an
+  assumption, and its latency contribution is reported.
 - 🎛️ **Bound the output, not just the input** — every model call carries a bounded
   `max_tokens` and stop sequences, with schema-/grammar-constrained decoding for
   the model's own reply (not just tool arguments) and a terse-reasoning style, so
