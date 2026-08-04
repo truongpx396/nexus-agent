@@ -157,10 +157,12 @@ that produces the next action from history — not code, never forked per custom
 | `bootstrap` | text | Markdown persona (`SOUL.md`/`IDENTITY.md`/`TOOLS.md`) |
 | `toolset_profile` | enum | `read_only` / `coding` / `messaging` / `full` |
 | `autonomy_level` | enum | `read_only` (refuses every mutating capability) / `supervised` (approval on every mutating invocation) / `full` (approval per effect class + Rule of Two + `ApprovalPolicy`) — normative pipeline semantics, not a label (FR-111) |
+| `prompt_mode` | enum | `full` / `task` / `minimal` / `none` — the **default** selector for which named prefix sections load, resolved to a concrete mode at run start together with the surface and execution class; behaviour-bearing config, versioned and eval-gated like `bootstrap`, and folded into `Session.harness_digest` so a mode change is a distinct cache prefix (FR-172, FR-129) |
 | `created_at` | timestamptz | |
 
 - **Immutability**: a change is a new versioned row; a prompt/model change is a deploy.
 - **Autonomy is enforced, not advisory**: the three levels have defined effects in the execution pipeline and sit at a fixed position in the one published permission resolution order (FR-111, [contracts/tool-contract.md](contracts/tool-contract.md)). Raising a tenant's autonomy level carries a recorded governance sign-off (FR-096).
+- **Prompt mode selects text, never a control** (FR-172): the mode gates which system-prefix sections render, but the per-invocation safety check (FR-009), permission chain (FR-111), and tenant attribution (FR-038) are enforced in the pipeline, not in prompt text. A mode that would omit the safety or tool-contract section from an agent whose `autonomy_level` can reach a mutating capability is **refused at configuration**, and the resolved mode is recorded on `Session` so a replay names the sections it ran under.
 
 ### Tool
 A self-describing capability with input schema and per-invocation checks; a built-in
@@ -735,11 +737,13 @@ after injection screening (FR-019).
 | `memory_id` | UUID (PK) | |
 | `tenant_id` | UUID (FK) | RLS key |
 | `kind` | enum | `working` / `episodic` / `semantic` (L0/L1/L2) |
+| `tier` | enum | `resident` (L0 `working`, injected at session start) / `on_demand` (L1/L2, loaded during the run through the gated selector) — the disclosure discipline, distinct from `kind` (FR-173) |
 | `content` | text | File-first; screened before injection |
 | `expires_at` | timestamptz | Retention (default now+90d) |
 | `screened` | bool | Injection/exfiltration scan passed |
 
-- **Injection rule**: immutable snapshot at session start; updates take effect next session.
+- **Injection rule**: the `resident` (L0) tier is an immutable snapshot at session start; updates take effect next session.
+- **Progressive disclosure** (FR-173): `on_demand` (L1/L2) memory is not resident in the cache-stable prefix. The **resolvable memory set** — the identity over the memory rows and derived indexes a run may load, capped by a per-run budget — is pinned into `Session.harness_digest` exactly as the catalog manifest is (FR-148/FR-129), and each load is a typed **`memory_loaded`** event appended to the volatile zone, so which memory was visible at each turn replays from the log while the digest stays constant. The selector is gated and measured on the FR-095/FR-161 footing (memory-selection accuracy, wrong-item and no-item rates), every tier is screened before injection (FR-019/FR-075), and each L1/L2 index is a **deletable derived artifact** (`kind = memory_index`) inside the erasure boundary (FR-162).
 
 ### Derived Artifact
 Anything built by transforming customer content and stored outside the event log:
@@ -1081,6 +1085,33 @@ trusted and re-measured on a schedule (FR-141).
 | `sampled_at` | timestamptz | Re-sampled on schedule against fresh labels to detect drift |
 
 - **Calibration precedes blocking** (SC-048): a gate steering development on an uncalibrated instrument is unmeasured development wearing a green check.
+
+### Adaptation Proposal
+A first-class, versioned **candidate change** to a behaviour-bearing artifact that
+the platform's own production signals generated — the eval-gated, human-in-the-loop
+inverse of "metrics → auto-adapt," which FR-044 and Principle IX forbid (FR-174).
+Never an action: a row here is a proposal awaiting the ordinary gate, never a change
+already applied.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `proposal_id` | UUID (PK) | |
+| `tenant_id` | UUID (FK) | RLS key |
+| `target_kind` | enum | `prompt_section` / `prompt_mode` / `skill` / `approval_policy` / `condenser_config` / `selector_config` — the artifact class the diff touches (FR-172, FR-021, FR-109, FR-130, FR-148/FR-173) |
+| `target_ref` | string | Fully-qualified identity of the target and its **current** version, so a stale proposal against a superseded version is detectable |
+| `proposed_diff` | jsonb | The candidate change, expressed against `target_ref` |
+| `evidence` | jsonb | **Structure-only** signal evidence that motivated it — golden-signal deltas (FR-095), online quality scores (FR-140), efficiency deltas (FR-145), held-out gap (FR-146); content-free by construction (FR-117) |
+| `generator_ref` | string | The off-the-gate generator that produced it (FR-163); its model calls are auxiliary billable spend metered under FR-165 |
+| `eval_run_id` | UUID (FK, nullable) | The gate run the proposal must clear before promotion — the **same** statistical gate as a hand-authored change (FR-137/FR-043) |
+| `governance_signoff` | jsonb (nullable) | Recorded human approver + timestamp; required before the change is enabled (FR-096) |
+| `status` | enum | `proposed` / `in_review` / `gated` / `approved` / `rejected` / `superseded` — a *projection* of the proposal events; there is no `applied` state that skips the gate |
+| `rollout_ref` | UUID (nullable) | The FR-140 progressive-rollout the approved change ships under — bounded traffic slice, auto-rollback on breach |
+| `created_at` | timestamptz | |
+
+- **Never auto-applied** (FR-174): a proposal advances only through `proposed → in_review → gated → approved`, and `approved` still requires both `eval_run_id` (passing) and `governance_signoff` — the same bar a tool, connector, or policy clears. A rejected proposal is a retained, audited record, never a silent retry.
+- **It cannot widen** (FR-111): a `proposed_diff` that would add a tool, connector, egress destination, data label, region, autonomy level, or approval-policy relaxation is refused as a human governance decision the pipeline surfaces — no volume of evidence promotes it here.
+- **The generator never gates** (FR-163): like adversarial discovery, it is non-deterministic and blocks zero releases; it feeds the queue, and the gate and a human decide.
+- **Rollout stays reversible** (FR-140): even a gate-passing, human-approved adaptation ships behind the progressive-rollout guardrail and auto-rolls-back on a live quality breach.
 
 ---
 
