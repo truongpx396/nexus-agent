@@ -1,0 +1,88 @@
+name: Telegram Notify
+description: >-
+  Send a rich Telegram message about a CI/CD event (deploy start/success/failure
+  or a CI failure). No-ops quietly when the bot token or chat id are absent, so a
+  fork without secrets never fails a build on notification.
+
+inputs:
+  bot-token:
+    description: Telegram bot token (from @BotFather). Pass ${{ secrets.TELEGRAM_BOT_TOKEN }}.
+    required: false
+  chat-id:
+    description: Telegram chat id to post to. Pass ${{ secrets.TELEGRAM_CHAT_ID }}.
+    required: false
+  status:
+    description: One of started | success | failure.
+    required: true
+  title:
+    description: Short headline, e.g. "Deploy to production".
+    required: true
+  environment:
+    description: Environment name (staging | production | ci). Optional.
+    required: false
+    default: ""
+  message:
+    description: Optional extra body text appended under the standard fields.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Send Telegram message
+      shell: bash
+      env:
+        TG_BOT_TOKEN: ${{ inputs.bot-token }}
+        TG_CHAT_ID: ${{ inputs.chat-id }}
+        TG_STATUS: ${{ inputs.status }}
+        TG_TITLE: ${{ inputs.title }}
+        TG_ENV: ${{ inputs.environment }}
+        TG_EXTRA: ${{ inputs.message }}
+        GH_REPO: ${{ github.repository }}
+        GH_REF: ${{ github.ref_name }}
+        GH_SHA: ${{ github.sha }}
+        GH_ACTOR: ${{ github.actor }}
+        GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "${TG_BOT_TOKEN:-}" || -z "${TG_CHAT_ID:-}" ]]; then
+          echo "::notice title=Telegram::Bot token or chat id not set — skipping notification."
+          exit 0
+        fi
+
+        case "$TG_STATUS" in
+          success)  icon="✅" ;;
+          failure)  icon="❌" ;;
+          started)  icon="🚀" ;;
+          *)        icon="ℹ️" ;;
+        esac
+
+        short_sha="${GH_SHA:0:7}"
+
+        # Telegram HTML parse mode: escape the few reserved characters in dynamic text.
+        esc() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+        nl=$'\n'
+
+        text="${icon} <b>$(esc "$TG_TITLE")</b>"
+        [[ -n "$TG_ENV" ]] && text="${text}${nl}<b>Env:</b> $(esc "$TG_ENV")"
+        text="${text}${nl}<b>Repo:</b> $(esc "$GH_REPO")"
+        text="${text}${nl}<b>Ref:</b> $(esc "$GH_REF")"
+        text="${text}${nl}<b>Commit:</b> <code>${short_sha}</code>"
+        text="${text}${nl}<b>By:</b> $(esc "$GH_ACTOR")"
+        text="${text}${nl}<b>Status:</b> $(esc "$TG_STATUS")"
+        [[ -n "$TG_EXTRA" ]] && text="${text}${nl}${nl}$(esc "$TG_EXTRA")"
+        text="${text}${nl}${nl}🔗 <a href=\"${GH_RUN_URL}\">View run</a>"
+
+        code=$(curl -sS -o /tmp/tg_resp.json -w '%{http_code}' \
+          -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+          --data-urlencode "chat_id=${TG_CHAT_ID}" \
+          --data-urlencode "text=${text}" \
+          --data-urlencode "parse_mode=HTML" \
+          --data-urlencode "disable_web_page_preview=true" || echo "000")
+
+        if [[ "$code" != "200" ]]; then
+          echo "::warning title=Telegram::sendMessage returned HTTP ${code}: $(cat /tmp/tg_resp.json 2>/dev/null || true)"
+        else
+          echo "Telegram notification sent."
+        fi

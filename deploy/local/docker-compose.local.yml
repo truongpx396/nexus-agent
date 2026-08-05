@@ -1,0 +1,153 @@
+# =============================================================================
+# Nexus Agent — LOCAL deploy test (mirrors the DO production topology)
+# =============================================================================
+# Same service graph and same Caddy front-door as deploy/do, but:
+#   - images are BUILT locally from the mini Dockerfiles (or pulled if IMAGE_TAG
+#     points at a real Docker Hub tag) so you can test the prod shape offline
+#   - Caddy uses INTERNAL (self-signed) TLS via `tls internal` — no public domain,
+#     no Let's Encrypt — reachable at https://localhost
+#
+# Purpose: validate the real prod cutover path (Caddy -> control, health gate,
+# compose pull/up) on your machine BEFORE shipping. Run:
+#   cd deploy/local && cp .env.local.example .env && docker compose \
+#     -f docker-compose.local.yml up -d --build
+# =============================================================================
+
+name: nexus-local
+
+x-common-env: &common-env
+  NEXUS_TOPOLOGY: single-tenant
+  NEXUS_ALL_IN_ONE: "true"
+  NEXUS_QUEUE_ADAPTER: redis
+  NEXUS_WORKER_POOL_SIZE: "2"
+  NEXUS_COMPACTION: remote_python
+  NEXUS_OBJECT_STORE: filesystem
+  NEXUS_WARM_POOL_SIZE: "1"
+  NEXUS_SANDBOX_RUNTIME: runc
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      nexus-control:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.local:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  nexus-control:
+    build:
+      context: ../..
+      dockerfile: deploy/mini/Dockerfile          # TARGET-STATE (see deploy/mini/README.md)
+    image: ${IMAGE_NAMESPACE:-nexus-agent}/nexus-control:${IMAGE_TAG:-local}
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      NEXUS_ROLE: control-surface
+      NEXUS_POSTGRES_DSN: postgres://nexus:${POSTGRES_PASSWORD:-nexus}@postgres:5432/nexus?sslmode=disable
+      NEXUS_REDIS_ADDR: redis:6379
+      NEXUS_CONDENSER_ENDPOINT: http://nexus-ml-python:8090
+      NEXUS_SANDBOX_BROKER_SOCKET: /run/nexus/sandboxd.sock
+      NEXUS_VAULT_ADDR: http://openbao:8200
+      NEXUS_VAULT_TOKEN: ${VAULT_TOKEN:-dev-root-token}
+      NEXUS_OIDC_ISSUER: ${OIDC_ISSUER:-http://casdoor:8000}
+      NEXUS_OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-nexus-agent}
+      NEXUS_OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-change-me}
+    expose:
+      - "8080"
+    volumes:
+      - nexus_workspaces:/var/lib/nexus/workspaces
+      - nexus_artifacts:/var/lib/nexus/artifacts
+      - ${SANDBOX_BROKER_SOCKET:-/run/nexus/sandboxd.sock}:/run/nexus/sandboxd.sock:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nexus-ml-python:
+        condition: service_started
+      openbao:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  nexus-ml-python:
+    build:
+      context: ../..
+      dockerfile: deploy/mini/Dockerfile.ml-python  # TARGET-STATE
+    image: ${IMAGE_NAMESPACE:-nexus-agent}/nexus-ml-python:${IMAGE_TAG:-local}
+    restart: unless-stopped
+    environment:
+      NEXUS_ML_ROLE: condenser
+      NEXUS_ML_BIND_ADDR: 0.0.0.0:8090
+    expose:
+      - "8090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8090/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nexus
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nexus}
+      POSTGRES_DB: nexus
+    volumes:
+      - nexus_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexus -d nexus"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - nexus_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  openbao:
+    image: openbao/openbao:latest
+    restart: unless-stopped
+    cap_add:
+      - IPC_LOCK
+    environment:
+      BAO_DEV_ROOT_TOKEN_ID: ${VAULT_TOKEN:-dev-root-token}
+      BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    expose:
+      - "8200"
+
+  casdoor:
+    image: casbin/casdoor:latest
+    restart: unless-stopped
+    environment:
+      RUNNING_IN_DOCKER: "true"
+    ports:
+      - "8000:8000"               # exposed locally so you can configure the IdP
+
+volumes:
+  nexus_pgdata:
+  nexus_redisdata:
+  nexus_workspaces:
+  nexus_artifacts:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,32 @@
+# Nexus Agent — LOCAL Caddyfile (deploy test)
+#
+# `tls internal` makes Caddy mint its own locally-trusted certificate — no public
+# domain and no Let's Encrypt round-trip. Reach the stack at https://localhost
+# (your browser will warn unless you trust Caddy's local root CA; that's expected
+# for a local test). This mirrors the production Caddyfile's proxy behavior so the
+# cutover path is identical.
+
+{
+	# Local test: no ACME, no email needed.
+	auto_https disable_redirects
+}
+
+localhost {
+	tls internal
+	encode zstd gzip
+
+	handle /healthz {
+		reverse_proxy nexus-control:8080
+	}
+
+	reverse_proxy nexus-control:8080 {
+		flush_interval -1
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Real-IP {remote_host}
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

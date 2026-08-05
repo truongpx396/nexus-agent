@@ -1,0 +1,44 @@
+# Nexus Agent — production Caddyfile (DigitalOcean droplet)
+#
+# Automatic HTTPS: Caddy provisions and renews a Let's Encrypt certificate for
+# ${APP_DOMAIN} on first request and terminates TLS, reverse-proxying to the
+# internal control-plane service. Point ${APP_DOMAIN}'s DNS A-record at the
+# droplet (Terraform does this when `domain`/`subdomain` are set) before first
+# boot so the ACME HTTP-01 challenge can succeed.
+
+{
+	email {$ACME_EMAIL}
+	# Uncomment to test against Let's Encrypt staging (avoids rate limits):
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+{$APP_DOMAIN} {
+	encode zstd gzip
+
+	# Security headers.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# Health endpoint stays cheap and unauthenticated for the deploy smoke test.
+	handle /healthz {
+		reverse_proxy nexus-control:8080
+	}
+
+	# Everything else -> the control/surface plane (REST + SSE).
+	reverse_proxy nexus-control:8080 {
+		# SSE: don't buffer the event stream.
+		flush_interval -1
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Real-IP {remote_host}
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

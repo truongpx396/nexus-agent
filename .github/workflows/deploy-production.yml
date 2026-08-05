@@ -1,0 +1,130 @@
+name: Deploy · Production
+
+# Promote a validated build to production. Triggered by a semver tag (v1.2.3) or a
+# manual dispatch naming the source tag. The `production` GitHub Environment adds a
+# required-reviewer gate, so a human approves before the droplet is touched. The
+# image that was already validated on staging is re-tagged :vX.Y.Z + :latest and
+# rolled out with the same health-gate + auto-rollback used for staging.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: "Existing image tag to promote (e.g. sha-abc1234 or staging)."
+        required: true
+        default: staging
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE || secrets.DOCKERHUB_USERNAME }}
+  ENVIRONMENT: production
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "source=staging" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.inputs.source_tag }}" >> "$GITHUB_OUTPUT"
+            echo "source=${{ github.event.inputs.source_tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Re-tag the already-built, staging-validated images to the release tag and
+      # :latest without rebuilding, guaranteeing prod runs the exact tested bits.
+      - name: Re-tag validated images
+        shell: bash
+        run: |
+          set -euo pipefail
+          NS="${IMAGE_NAMESPACE}"
+          SRC="${{ steps.meta.outputs.source }}"
+          DST="${{ steps.meta.outputs.tag }}"
+          for name in nexus-control nexus-ml-python; do
+            ref="${REGISTRY}/${NS}/${name}"
+            if docker manifest inspect "${ref}:${SRC}" >/dev/null 2>&1; then
+              docker buildx imagetools create \
+                --tag "${ref}:${DST}" \
+                --tag "${ref}:latest" \
+                "${ref}:${SRC}"
+              echo "Promoted ${ref}:${SRC} -> :${DST}, :latest"
+            else
+              echo "::notice::${ref}:${SRC} not found yet — skipping (no image built)."
+            fi
+          done
+
+  deploy:
+    needs: promote
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/telegram-notify
+        with:
+          bot-token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat-id: ${{ secrets.TELEGRAM_CHAT_ID }}
+          status: started
+          title: "Deploy to PRODUCTION"
+          environment: production
+          message: "Releasing ${{ needs.promote.outputs.tag }}."
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.PROD_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy over SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.PROD_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER || 'deploy' }}
+          IMAGE_TAG: ${{ needs.promote.outputs.tag }}
+          IMAGE_NAMESPACE: ${{ env.IMAGE_NAMESPACE }}
+        run: ./scripts/deploy.sh do production
+
+      - name: Notify success
+        if: success()
+        uses: ./.github/actions/telegram-notify
+        with:
+          bot-token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat-id: ${{ secrets.TELEGRAM_CHAT_ID }}
+          status: success
+          title: "PRODUCTION deploy succeeded"
+          environment: production
+          message: "Now serving ${{ needs.promote.outputs.tag }}."
+
+      - name: Notify failure
+        if: failure()
+        uses: ./.github/actions/telegram-notify
+        with:
+          bot-token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat-id: ${{ secrets.TELEGRAM_CHAT_ID }}
+          status: failure
+          title: "PRODUCTION deploy FAILED"
+          environment: production
+          message: "Automatic rollback attempted. Immediate attention required."

@@ -1,0 +1,221 @@
+name: CI
+
+# Lint, test, build and security-scan every change. The repo is spec-stage today:
+# jobs detect whether a component actually has source yet and SKIP gracefully when
+# it does not, then light up automatically once code lands under backend-go/ or
+# backend-python/. Nothing here needs editing when the first real code is merged.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Decide which pipelines are relevant for this commit. A component is "present"
+  # when its directory contains source, so a spec-only checkout runs a fast no-op.
+  # ---------------------------------------------------------------------------
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.check.outputs.go }}
+      python: ${{ steps.check.outputs.python }}
+      docker: ${{ steps.check.outputs.docker }}
+      terraform: ${{ steps.check.outputs.terraform }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          has() { compgen -G "$1" > /dev/null 2>&1 && echo true || echo false; }
+          {
+            echo "go=$(has 'backend-go/**/*.go')"
+            echo "python=$(has 'backend-python/**/*.py')"
+            echo "docker=$(has 'deploy/**/Dockerfile*')"
+            echo "terraform=$(has 'infra/terraform/**/*.tf')"
+          } >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Go control/data plane.
+  # ---------------------------------------------------------------------------
+  go:
+    needs: detect
+    if: needs.detect.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend-go
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend-go/go.mod
+          cache-dependency-path: backend-go/go.sum
+      - name: Verify modules
+        run: go mod verify
+      - name: Vet
+        run: go vet ./...
+      - name: Lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: backend-go
+      - name: Test
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+      - uses: actions/upload-artifact@v4
+        with:
+          name: go-coverage
+          path: backend-go/coverage.out
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Python ML / condenser helper.
+  # ---------------------------------------------------------------------------
+  python:
+    needs: detect
+    if: needs.detect.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend-python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+          if [ -f pyproject.toml ]; then pip install -e ".[dev]" || pip install -e . || true; fi
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+      - name: Lint (ruff)
+        run: ruff check .
+      - name: Format check (ruff)
+        run: ruff format --check .
+      - name: Test (pytest)
+        run: |
+          if compgen -G "tests/**/*.py" > /dev/null || compgen -G "**/test_*.py" > /dev/null; then
+            pip install pytest && pytest -q
+          else
+            echo "No tests found yet — skipping."
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Validate every Dockerfile builds (no push here — that is the deploy workflow).
+  # ---------------------------------------------------------------------------
+  docker-build:
+    needs: detect
+    if: needs.detect.outputs.docker == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build images (no push)
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          built=0
+          for df in deploy/**/Dockerfile*; do
+            echo "::group::Build $df"
+            docker buildx build \
+              --file "$df" \
+              --tag "nexus-agent:ci-$(basename "$df" | tr '.' '-')" \
+              --load \
+              . || { echo "::error::Build failed for $df"; exit 1; }
+            echo "::endgroup::"
+            built=$((built+1))
+          done
+          echo "Built $built image(s)."
+
+  # ---------------------------------------------------------------------------
+  # Supply-chain / security. Advisory to start (continue-on-error) so the first
+  # green build is never blocked; flip a single `continue-on-error` to false to
+  # enforce once the codebase settles.
+  # ---------------------------------------------------------------------------
+  security:
+    needs: detect
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Filesystem vulnerability + misconfig scan (Trivy)
+        uses: aquasecurity/trivy-action@0.24.0
+        continue-on-error: true
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Terraform misconfig scan (Checkov)
+        if: needs.detect.outputs.terraform == 'true'
+        uses: bridgecrewio/checkov-action@v12
+        continue-on-error: true
+        with:
+          directory: infra/terraform
+          quiet: true
+          soft_fail: true
+
+  # ---------------------------------------------------------------------------
+  # Single gate the branch-protection rule can require. Fails only if a job that
+  # actually ran ended in failure; skipped (absent-component) jobs pass the gate.
+  # ---------------------------------------------------------------------------
+  ci-gate:
+    needs: [go, python, docker-build, security]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate results
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+          for r in "${{ needs.go.result }}" "${{ needs.python.result }}" \
+                   "${{ needs.docker-build.result }}" "${{ needs.security.result }}"; do
+            if [[ "$r" == "failure" ]]; then fail=1; fi
+          done
+          if [[ "$fail" == "1" ]]; then
+            echo "::error::One or more CI jobs failed."; exit 1
+          fi
+          echo "CI gate passed."
+
+  # ---------------------------------------------------------------------------
+  # Notify Telegram only on a failed pipeline on main (keeps PR noise down).
+  # ---------------------------------------------------------------------------
+  notify-failure:
+    needs: [ci-gate]
+    if: always() && failure() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/telegram-notify
+        with:
+          bot-token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat-id: ${{ secrets.TELEGRAM_CHAT_ID }}
+          status: failure
+          title: "CI failed on main"
+          environment: ci
+          message: "A push to main did not pass CI. Investigate before deploying."

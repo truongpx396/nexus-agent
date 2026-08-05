@@ -1,0 +1,171 @@
+# =============================================================================
+# Nexus Agent — PRODUCTION (DigitalOcean droplet) topology
+# =============================================================================
+# The mini single-tenant profile, deployed from published Docker Hub images and
+# fronted by Caddy (automatic HTTPS via Let's Encrypt). This is what runs on the
+# droplet after `scripts/deploy.sh do <env>` pulls and rolls it forward.
+#
+# Differences vs deploy/mini/docker-compose-mini.yml (the source-build reference):
+#   - `image:` from Docker Hub instead of `build:`   (CI publishes the tags)
+#   - Caddy added as the only internet-facing service (443/80); app port is NOT
+#     published — Caddy reverse-proxies to it on the internal network
+#   - image tag is pinned by the ${IMAGE_TAG} the deploy script exports
+#
+# Everything not exposed here (postgres, redis, openbao, casdoor, the app's raw
+# 8080) is reachable ONLY on the internal docker network + the DO firewall.
+# =============================================================================
+
+name: nexus-do
+
+x-common-env: &common-env
+  NEXUS_TOPOLOGY: single-tenant
+  NEXUS_ALL_IN_ONE: "true"
+  NEXUS_QUEUE_ADAPTER: redis
+  NEXUS_WORKER_POOL_SIZE: "4"
+  NEXUS_COMPACTION: remote_python
+  NEXUS_OBJECT_STORE: filesystem
+  NEXUS_WARM_POOL_SIZE: "1"
+  NEXUS_SANDBOX_RUNTIME: runc
+
+services:
+  # ---------------------------------------------------------------------------
+  # Caddy — the ONLY internet-facing service. Terminates TLS (Let's Encrypt) and
+  # reverse-proxies to nexus-control. Uses the ${APP_DOMAIN} + ${ACME_EMAIL} from
+  # the environment to provision a real certificate automatically.
+  # ---------------------------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      nexus-control:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"           # HTTP/3
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?set APP_DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data          # certificates + ACME account (persist!)
+      - caddy_config:/config
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:2019/config/"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  nexus-control:
+    image: ${IMAGE_NAMESPACE:?set IMAGE_NAMESPACE}/nexus-control:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      NEXUS_ROLE: control-surface
+      NEXUS_POSTGRES_DSN: postgres://nexus:${POSTGRES_PASSWORD:?}@postgres:5432/nexus?sslmode=disable
+      NEXUS_REDIS_ADDR: redis:6379
+      NEXUS_CONDENSER_ENDPOINT: http://nexus-ml-python:8090
+      NEXUS_SANDBOX_BROKER_SOCKET: /run/nexus/sandboxd.sock
+      NEXUS_VAULT_ADDR: http://openbao:8200
+      NEXUS_VAULT_TOKEN: ${VAULT_TOKEN:?}
+      NEXUS_OIDC_ISSUER: ${OIDC_ISSUER:?}
+      NEXUS_OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?}
+      NEXUS_OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?}
+    expose:
+      - "8080"                    # internal only — Caddy proxies to it
+    volumes:
+      - nexus_workspaces:/var/lib/nexus/workspaces
+      - nexus_artifacts:/var/lib/nexus/artifacts
+      # Narrow, read-only broker socket (see deploy/mini/README.md — the create
+      # path is nexus-sandboxd on the host, NOT the container-runtime socket).
+      - ${SANDBOX_BROKER_SOCKET:-/run/nexus/sandboxd.sock}:/run/nexus/sandboxd.sock:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nexus-ml-python:
+        condition: service_started
+      openbao:
+        condition: service_started
+      casdoor:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  nexus-ml-python:
+    image: ${IMAGE_NAMESPACE:?}/nexus-ml-python:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      NEXUS_ML_ROLE: condenser
+      NEXUS_ML_BIND_ADDR: 0.0.0.0:8090
+    expose:
+      - "8090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8090/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nexus
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: nexus
+    volumes:
+      - nexus_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexus -d nexus"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - nexus_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  openbao:
+    image: openbao/openbao:latest
+    restart: unless-stopped
+    cap_add:
+      - IPC_LOCK
+    environment:
+      # Production: replace dev mode with a sealed backend unsealed by a KMS.
+      BAO_DEV_ROOT_TOKEN_ID: ${VAULT_TOKEN:?}
+      BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    expose:
+      - "8200"                    # internal only — never publish the vault
+    volumes:
+      - nexus_baodata:/openbao/file
+
+  casdoor:
+    image: casbin/casdoor:latest
+    restart: unless-stopped
+    environment:
+      RUNNING_IN_DOCKER: "true"
+    expose:
+      - "8000"                    # proxied via Caddy at /auth if desired
+
+volumes:
+  nexus_pgdata:
+  nexus_redisdata:
+  nexus_baodata:
+  nexus_workspaces:
+  nexus_artifacts:
+  caddy_data:
+  caddy_config:
