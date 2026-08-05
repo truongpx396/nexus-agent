@@ -1,0 +1,196 @@
+# =============================================================================
+# Nexus Agent — MINI single-tenant profile (collapsed topology)
+# =============================================================================
+# The smallest honestly-production-shaped deployment of the FULL product for a
+# single, TRUSTED small-company tenant that authenticates via Casdoor (OIDC).
+#
+# This is the "config-not-forks" collapse described in the spec:
+#   - control-plane + surface-gateway + embedded worker pool -> ONE Go binary
+#   - runtime-worker                 -> internal worker pool in the same process
+#   - Python condenser service       -> separate runtime service
+#   - NATS JetStream                 -> Redis Streams (queue port swapped by config)
+#   - object storage            -> local filesystem adapter (no MinIO/S3)
+#   - secrets/KMS               -> OpenBao (lightweight, but PRESENT — load-bearing)
+#   - identity                  -> Casdoor as the external OIDC IdP
+#
+# See ./README.md for how each collapse maps to spec.md / plan.md / research.md
+# and for the constraints you must NOT collapse (the trust-surface floor).
+#
+# NOTE: build contexts (../../backend-go, etc.) are TARGET-STATE — this repo is
+# currently at the spec stage. Treat this file as the reference topology that the
+# implementation is built to satisfy. Swap `build:` for `image:` once images ship.
+# =============================================================================
+
+name: nexus-mini
+
+x-common-env: &common-env
+  # --- Topology / collapse switches (the whole point of this profile) ---------
+  NEXUS_TOPOLOGY: single-tenant          # one org, one host, one compact runtime
+  NEXUS_ALL_IN_ONE: "true"               # control-plane + embedded worker pool in one process
+  NEXUS_QUEUE_ADAPTER: redis             # queue port -> Redis Streams (not NATS)
+  NEXUS_WORKER_POOL_SIZE: "4"            # bounded internal workers for the mini host
+  NEXUS_COMPACTION: remote_python        # compaction delegated to ml-python service
+  NEXUS_OBJECT_STORE: filesystem         # offload oversized tool outputs to a local volume
+  NEXUS_WARM_POOL_SIZE: "1"              # small warm sandbox pool for the mini host
+  NEXUS_SANDBOX_RUNTIME: runc            # single TRUSTED tenant -> runc is acceptable
+                                         #   (set to `runsc` for gVisor on a hardened host)
+
+services:
+  # ---------------------------------------------------------------------------
+  # Control plane + surface gateway in one process. The same binary now runs
+  # a bounded internal worker pool for queue-driven execution, which is the
+  # mini-profile collapse while preserving the same queue contract.
+  # ---------------------------------------------------------------------------
+  nexus-control:
+    build:
+      context: ../..
+      dockerfile: deploy/mini/Dockerfile      # TARGET-STATE (see README)
+    image: nexus-agent:mini-control
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      NEXUS_ROLE: control-surface
+      # --- Datastores ---------------------------------------------------------
+      NEXUS_POSTGRES_DSN: postgres://nexus:${POSTGRES_PASSWORD:-nexus}@postgres:5432/nexus?sslmode=disable
+      NEXUS_REDIS_ADDR: redis:6379           # cache + locks + budget counters + queue + fan-out
+      NEXUS_CONDENSER_ENDPOINT: http://nexus-ml-python:8090
+      # --- Sandbox create path (single-host analogue of the K8s ServiceAccount) -
+      #     control talks ONLY to the host broker's narrow Unix socket, never a
+      #     container-runtime socket (FR-059a). See the volume + comment below.
+      NEXUS_SANDBOX_BROKER_SOCKET: /run/nexus/sandboxd.sock
+      # --- Secrets / KMS seam (load-bearing — do NOT drop) --------------------
+      NEXUS_VAULT_ADDR: http://openbao:8200
+      NEXUS_VAULT_TOKEN: ${VAULT_TOKEN:-dev-root-token}
+      # --- Identity: Casdoor as the OIDC provider (config, not code) ----------
+      NEXUS_OIDC_ISSUER: ${OIDC_ISSUER:-http://casdoor:8000}
+      NEXUS_OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-nexus-agent}
+      NEXUS_OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-change-me}
+      # --- Model provider credential is read FROM THE VAULT at tool-exec time,
+      #     never from env/prompt (FR-034). Seed it into OpenBao, not here.
+    ports:
+      - "8080:8080"                          # REST/SSE surface
+    volumes:
+      - nexus_workspaces:/var/lib/nexus/workspaces   # per-session git worktrees
+      - nexus_artifacts:/var/lib/nexus/artifacts     # filesystem object-store adapter
+      # Sandbox creation goes through nexus-sandboxd: a MINIMAL-PRIVILEGE daemon
+      # running directly on the HOST (a systemd unit, NOT a container) that holds
+      # the only handle to the container runtime and exposes a narrow, allowlisted
+      # create/destroy RPC over the Unix socket mounted below (read-only). That
+      # socket is NOT the container-runtime socket, so FR-059(a) holds: the app
+      # never holds a root-equivalent runtime socket in-container. This is the
+      # single-host analogue of the K8s RBAC ServiceAccount (spec.md FR-059,
+      # tasks T105c/T105f). Do NOT replace it by bind-mounting /var/run/docker.sock.
+      - ${SANDBOX_BROKER_SOCKET:-/run/nexus/sandboxd.sock}:/run/nexus/sandboxd.sock:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nexus-ml-python:
+        condition: service_started
+      openbao:
+        condition: service_started
+      casdoor:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # Python helper service (runtime condenser). Evals and judge remain CI/offline,
+  # but compaction stays off the paying loop through this isolated helper.
+  # ---------------------------------------------------------------------------
+  nexus-ml-python:
+    build:
+      context: ../..
+      dockerfile: deploy/mini/Dockerfile.ml-python  # TARGET-STATE (see README)
+    image: nexus-agent:mini-ml-python
+    restart: unless-stopped
+    environment:
+      NEXUS_ML_ROLE: condenser
+      NEXUS_ML_BIND_ADDR: 0.0.0.0:8090
+    expose:
+      - "8090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8090/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — the append-only event log + hash-chained audit + config + RLS.
+  # This is the architecture, not a cache. Cannot be collapsed away.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nexus
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nexus}
+      POSTGRES_DB: nexus
+    volumes:
+      - nexus_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexus -d nexus"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Redis — does QUADRUPLE duty in this profile: hot cache, session-serial locks,
+  # atomic budget-reservation counters (FR-083), AND the durable job queue +
+  # event fan-out (queue port = redis). AOF is ON so a run survives worker death
+  # (FR-024) — without persistence the "a run is a durable job" guarantee breaks.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - nexus_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # OpenBao — the secrets/KMS seam (open-source Vault fork). Holds provider
+  # credentials, per-tenant envelope-encryption keys, and the sign-only audit key.
+  # Lightweight here, but PRESENT: dropping it changes the product (FR-034/080/081).
+  # Dev mode is for local/eval only — use a sealed, unsealed-by-KMS backend in prod.
+  # ---------------------------------------------------------------------------
+  openbao:
+    image: openbao/openbao:latest
+    restart: unless-stopped
+    cap_add:
+      - IPC_LOCK
+    environment:
+      BAO_DEV_ROOT_TOKEN_ID: ${VAULT_TOKEN:-dev-root-token}
+      BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    ports:
+      - "8200:8200"                          # UI/API for seeding secrets (local only)
+
+  # ---------------------------------------------------------------------------
+  # Casdoor — the external OIDC/OAuth2 identity provider for this tenant.
+  # Nexus consumes it purely by configuration (issuer + client). No kernel fork.
+  # ---------------------------------------------------------------------------
+  casdoor:
+    image: casbin/casdoor:latest
+    restart: unless-stopped
+    environment:
+      RUNNING_IN_DOCKER: "true"
+      # Casdoor can use its own bundled DB or a schema in the Postgres above.
+      # Kept default (built-in) here to keep the identity plane self-contained.
+    ports:
+      - "8000:8000"                          # Casdoor console + OIDC endpoints
+
+volumes:
+  nexus_pgdata:
+  nexus_redisdata:
+  nexus_workspaces:
+  nexus_artifacts:

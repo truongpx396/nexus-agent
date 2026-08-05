@@ -298,7 +298,12 @@ backend-go/
 ├── cmd/
 │   ├── control-plane/        # gateway: authN (SSO/OIDC), RBAC, rate limit, budget, routing
 │   ├── runtime-worker/       # stateless worker: pulls a session, runs the kernel loop
-│   └── surface-gateway/      # thin surface adapters entrypoint (CLI/API/chat/email/cron/telegram/zalo)
+│   ├── surface-gateway/      # thin surface adapters entrypoint (CLI/API/chat/email/cron/telegram/zalo)
+│   └── sandboxd/             # OPTIONAL single-host-only broker (mini profile): minimal-privilege
+│                             #   host daemon holding the only runtime handle, exposes a narrow
+│                             #   allowlisted create/destroy socket. NOT deployed on Kubernetes
+│                             #   (there the RBAC ServiceAccount is the create path) — enterprise
+│                             #   topology is unchanged; this is the single-host analogue only
 ├── kernel/                   # the agent loop: async-generator step, typed terminal states,
 │                             #   response classification, tool_use/tool_result invariant
 ├── internal/
@@ -362,6 +367,8 @@ deploy/                       # OCI image set + Helm chart / Terraform module;
                               #   sandbox/ = hardened sandbox image + runsc install + gvisor/kata
                               #     RuntimeClass manifests; helm/ carries the orchestrator's
                               #     RBAC-scoped ServiceAccount (never a runtime socket);
+                              #   mini/ = single-host compose profile + nexus-sandboxd systemd
+                              #     unit (the single-host analogue of that ServiceAccount);
                               #   load/ = concurrency-soak driver for the SC-008 capacity gate
 ```
 
@@ -370,7 +377,11 @@ deploy/                       # OCI image set + Helm chart / Terraform module;
 `runtime-worker`, `surface-gateway`) sharing the immutable `kernel/` and
 `internal/` harness — this realizes the mandatory control-plane / data-plane split
 (the data plane = `runtime-worker` + `kernel` + `internal/{sandbox,memory,provider}`
-can deploy into a customer VPC unchanged). `ml-python/` isolates ML/eval work that
+can deploy into a customer VPC unchanged). A fourth binary, `sandboxd`, is
+**optional and single-host-only**: it exists solely so the mini profile has an
+FR-059(a)-compliant create path (a host-side broker instead of the Kubernetes RBAC
+ServiceAccount) and is never part of the enterprise/Kubernetes topology, which is
+unchanged. `ml-python/` isolates ML/eval work that
 must run off the paying loop. `frontend/` is one surface adapter among many. All
 per-organization behavior lives in Postgres config rows + markdown bootstrap files
 read at runtime — the kernel is never forked.
