@@ -460,6 +460,14 @@ Regulated/sensitive payloads are routed **deterministically by data label** (not
 model discretion) to a self-hosted in-VPC model so they never leave the trust
 boundary.
 
+For a small, single **trusted** tenant (e.g. a company on Casdoor), the
+single-tenant topology collapses to **~5 standing services + Casdoor** on one
+Linux host — control-plane + surface-gateway + an embedded worker pool merge into
+one binary, the Python condenser stays as a separate service, NATS folds into
+Redis, a small warm sandbox pool remains on the host, and object storage becomes
+a local volume. See [`deploy/mini/`](deploy/mini/README.md) for the reference
+`docker-compose-mini.yml` and how each collapse maps back to the spec.
+
 ---
 
 ## ⚡ Reliability & scale
