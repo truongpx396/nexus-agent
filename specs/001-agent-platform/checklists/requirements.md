@@ -151,6 +151,37 @@ not revisited after a later design review landed. All are now closed.
 - [x] Principle V's Status cell held a narrative paragraph after the verdict; moved to the compliance column so every row's status is a bare verdict
 - [x] The 4 spec Key Entities that are fields rather than tables (`Condensation`, `Harness Digest`, `Taint State`, `Surface Capability`) are now enumerated in data-model.md with where each lives and why a table would be wrong
 
+### Cross-artifact consistency pass (`/speckit.analyze`, 2026-08-06)
+
+A read-only consistency analysis across spec / plan / tasks / data-model found **no
+CRITICAL issues and 100% FR coverage** (175/175), but 5 real defects — all the same
+class as 2026-07-31's: plan.md and data-model.md were correct when last revisited
+and had not been reconciled since the 2026-08-01 → 2026-08-06 design-review batch
+(FR-160–FR-175, SC-056–SC-071) landed. All are now closed.
+
+- [x] plan.md stated "170 functional requirements" in three places (Scale/Scope,
+  Constitution Check result, Complexity Tracking) against an actual 175 — the same
+  defect class as the 2026-07-31 pass's "three conflicting FR counts." All three
+  corrected to 175
+- [x] FR-175 (zero-LLM keyword recall, added 2026-08-06) had full task coverage
+  (T095d/T095e) and was grouped with the core Increment-1 built-ins in
+  data-model.md, but appeared in neither plan.md's "In Increment 1" list nor its
+  deferred table — silence, not a decision. Recorded explicitly in the deferred
+  table as a deliberate sequencing choice (bundled with US5's memory work, not a
+  technical dependency), leaving tasks.md's Phase 7 placement unchanged
+- [x] FR-171 (the `PreToolUse`/`PostToolUse` hook layer) ships in Increment 1
+  (Phase 3, US1/MVP; 5 dedicated tasks) but was absent from plan.md entirely —
+  not in Technical Context, the Increment-1 list, or the Constitution Check.
+  Added to both the Increment-1 bullet list and Constitution Check row V
+- [x] SC-068 was the only success criterion in its batch (SC-064–SC-071) with no
+  task-level `SC-` tag, defeating the coverage check the other 70 enable — the
+  same defect class as 2026-07-31's "11 success criteria... carried no SC- tag."
+  Added to T041q, which already covers its acceptance criteria
+- [x] data-model.md's "fields not tables" reconciliation table claimed to resolve
+  spec.md's Key Entities list completely but listed 4 of what are now 6 field-only
+  entities (missing Prompt Mode and Memory Tier / Resolvable Memory Set, added by
+  FR-172/FR-173). Both added with their actual location in the schema
+
 ## Notes
 
 - Items marked incomplete require spec updates before `/speckit.clarify` or `/speckit.plan`
