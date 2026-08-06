@@ -99,7 +99,7 @@ erDiagram
 
 ### Key Entities that are fields, not tables
 
-Four entities named in spec.md's Key Entities list have no table of their own,
+Six entities named in spec.md's Key Entities list have no table of their own,
 because each is a **property of a row or an event** rather than an independently
 addressable record. They are listed here so the spec's entity list resolves
 completely and nobody goes looking for a missing migration:
@@ -110,6 +110,8 @@ completely and nobody goes looking for a missing migration:
 | **Harness Digest** (FR-129) | `Session.harness_digest`, copied onto `Checkpoint`, `CostRecord`, `EvalRun`, and every span | A digest of configuration in force, pinned at run start; a separate table would imply it can change during a run, and a mid-run change is a defect (FR-088) |
 | **Taint State** (FR-087) | `Session.taint_state` (a **projection**), with `taint_transition` / `sanitization_boundary` events as the truth | Derived state rebuildable by replay; a table would become a second source of truth for which legs are engaged |
 | **Surface Capability** (FR-155) | `Surface.capabilities` + `Surface.principal_kind` + `Surface.conversation_binding` | A declared, conformance-tested descriptor versioned with the surface row it belongs to |
+| **Prompt Mode** (FR-172) | `Agent.prompt_mode` (the default selector), resolved per run and recorded on `Session`, folded into `Session.harness_digest` | A selector over which named prefix sections load, not a record in its own right; a table would imply modes are independently addressable rather than a versioned facet of agent config |
+| **Memory Tier / Resolvable Memory Set** (FR-173) | the `working`/`episodic`/`semantic` tiering and the resolvable-set digest described under the Memory entity, pinned into `Session.harness_digest`, with each on-demand load a `memory_loaded` event | A disclosure structure over `Memory` rows and derived indexes, not a record of its own — the tiers and the set they resolve to are properties of how `Memory` is loaded, not a separate addressable entity |
 
 ---
 
