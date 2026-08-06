@@ -39,5 +39,18 @@ out/
 # ── Secrets / local env ──────────────────────────────────────────────────────────
 .env.*
 !.env.example
+!.env.*.example
 *.pem
 *.key
+
+# ── Terraform ────────────────────────────────────────────────────────────────────
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+tfplan
+tfplan-*
+plan.txt
+*.tfvars.local
+override.tf
+override.tf.json
