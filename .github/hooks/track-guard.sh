@@ -244,7 +244,13 @@ case "$tool" in
       case "$_c" in
         *--delete*|*--mirror*|*--all*|*--tags*|*--prune*|*" -d "*) return 1 ;;
       esac
-      _wt="${GIT_WT_ROOT:-$PWD}"
+      # $PWD at hook-invocation time is not guaranteed to be the repo root (observed: the
+      # PreToolUse subprocess can run from elsewhere), so a bare $PWD fallback made every
+      # check below fail closed. BASH_SOURCE[0] is this script's own path, always inside
+      # the repo (invoked via an absolute path from settings.json), so resolve the
+      # toplevel through that first and only fall back to $PWD if it somehow fails too.
+      _wt="${GIT_WT_ROOT:-$(cd "${BASH_SOURCE[0]%/*}" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)}"
+      [ -n "$_wt" ] || _wt="$PWD"
       _cur="$(git -C "$_wt" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
       { [ -n "$_cur" ] && [ "$_cur" != "HEAD" ]; } || return 1
       # Never publish the base/default branch — that is the merge gate's ref, not ours.
@@ -257,8 +263,33 @@ case "$tool" in
       # Already on the remote → this is an update, not a first publish. Needs the opt-in.
       ! git -C "$_wt" rev-parse --verify --quiet "refs/remotes/$_rem/$_cur" >/dev/null 2>&1 || return 1
       # A refspec, if present, must name THIS branch — no `HEAD:main` style redirection.
-      _spec="$(printf '%s' "$_c" | sed -n 's/.*git push//p' | tr ' \t' '\n\n' \
-               | grep -v '^-' | grep -v "^${_rem}$" | grep -v '^$' | tail -1 || true)"
+      # $_c is the RAW command text (Claude Code passes the whole multi-line/multi-statement
+      # Bash invocation, not just the push itself), so a naive "everything after git push"
+      # extraction mistakes a trailing redirect (`2>&1`, `>out.log`) or a chained command
+      # (`&& echo done`) for the refspec. Stop at the first shell statement separator
+      # (`;`, `&`, `|`), skip a redirect operator token AND the target token right after it
+      # (`> out.log` — the filename alone would not otherwise look like shell syntax), and
+      # drop any other token containing `<`/`>` — a real branch/ref name can never contain
+      # those characters, so none of this can ever strip a genuine refspec.
+      _spec="$(printf '%s\n' "$_c" | awk -v rem="$_rem" '
+        /git push/ {
+          line = $0
+          sub(/.*git push/, "", line)
+          split(line, parts, /[;&|]/)
+          n = split(parts[1], toks, /[ \t]+/)
+          last = ""
+          skip_next = 0
+          for (i = 1; i <= n; i++) {
+            t = toks[i]
+            if (t == "") continue
+            if (skip_next) { skip_next = 0; continue }
+            if (t ~ /^[0-9]*(>>?|<)$/) { skip_next = 1; continue }
+            if (t ~ /^-/ || t == rem || t ~ /[<>]/) continue
+            last = t
+          }
+          print last
+        }
+      ' | tail -1)"
       case "$_spec" in
         ""|HEAD|"$_cur"|"HEAD:$_cur"|"$_cur:$_cur") return 0 ;;
         *) return 1 ;;
