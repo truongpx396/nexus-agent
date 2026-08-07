@@ -95,10 +95,15 @@ prefix and a **deferred** tier advertised as name + description until loaded.
 ## The three gates (fail-closed)
 
 ```
-Gate 1 — Global profile      : read_only | coding | messaging | full
+Gate 1 — Tool profile        : membership in the run's resolved, pinned
+                               ToolProfile version (FR-176) — an explicit set of
+                               {namespace}/{name}@{version} identities. Seed
+                               profiles: platform/{read_only,coding,messaging,full}
 Gate 2 — Capability metadata : read-only vs mutating ; concurrency class ;
                                taint declaration {returns_untrusted,
                                reads_private_data, mutates_external} ; effect class
+                               (a qualified {namespace}/{name} identity from the
+                               tenant-extensible taxonomy, FR-177 — not an enum)
 Gate 3 — Per-invocation check: safety classifier on PARSED input (fail closed)
 ```
 
@@ -128,7 +133,7 @@ the chain is total and ordered. Every invocation walks it top to bottom:
 | 1 | **Deny rules** (tenant/tool/pattern) | `DENY` (final) | Evaluated first; nothing below may overturn a deny |
 | 2 | `PreToolUse` hooks (FR-171) | `DENY` (final) · `ASK` · `DEFER` | A hook may *tighten* or force a prompt; a hook `ALLOW` is a defer, never a bypass |
 | 3 | **Autonomy level** (pinned, ratcheting) | `DENY` · `ASK` · `DEFER` | `read_only` denies every mutating capability; `supervised` forces `ASK` on every mutating invocation; `full` defers |
-| 4 | Gate 1 — global profile | `DENY` · `DEFER` | |
+| 4 | Gate 1 — **tool profile** (FR-176) | `DENY` · `DEFER` | Membership in the run's pinned profile version; a non-member denies. **Never resolves `ALLOW`**, and never overturns layers 1–3 |
 | 5 | Gate 2 — capability metadata | `DENY` · `ASK` · `DEFER` | Effect class routes to the approval policy |
 | 6 | Gate 3 — **per-invocation safety** on parsed input | `DENY` · `ASK` · `DEFER` | **Always evaluated. No exception, ever** |
 | 7 | **Rule of Two** (session taint + declared legs) | `ASK` · `DEFER` | **Always evaluated. No exception, ever** |
@@ -149,6 +154,16 @@ Two invariants make this order load-bearing rather than decorative:
 - **Autonomy ratchets** (FR-111): pinned at run start, tightenable mid-run by an
   operator, and widenable by nothing — not model output, not a tool result, not a
   steering message, not a hook, not a delegation parameter, **not a skill**.
+- **The tool profile is an allowlist, not a grant** (FR-176). Layer 4 answers one
+  question — is this identity a member of the run's pinned profile version — and
+  answers it with `DENY` or `DEFER`, never `ALLOW`. It sits *below* autonomy
+  deliberately: a profile naming a mutating tool for a `read_only` agent grants
+  nothing, because layer 3 already denied. The profile is resolved once at run start
+  and pinned into the harness digest; it is unreachable from model output, a tool
+  result, a steering message, a skill, a hook, or a delegation parameter, and is never
+  populated from a catalog descriptor's own contents (FR-113) — a profile a catalog
+  source can write is a capability grant handed to the party the catalog distrusts.
+  A delegated child's profile is always a subset of its parent's (FR-099, FR-101).
 
 **Skills sit below this table, not inside it** (FR-153). An activated skill's
 declared tool set is applied as an **intersection** over the catalog resolved at
@@ -383,7 +398,13 @@ Ordered steps applied to every call (FR-007, FR-010):
 ```
 
 A mutating counterpart declares its effect class and idempotency derivation, which
-is what an approval scope binds to and what dedup keys off:
+is what an approval scope binds to and what dedup keys off. The class is a
+fully-qualified identity from the tenant-extensible taxonomy (FR-177), never a bare
+enum value: a tenant gates its own high-impact actions by defining classes such as
+`acme-edu/transcript_release` — inheriting separation of duties by declaring them
+`irreversible` — rather than mapping them onto the nearest platform-shaped label. An
+absent or unresolvable class is gated at the most restrictive treatment, never
+defaulted to `platform/other`:
 
 ```json
 {
@@ -397,7 +418,7 @@ is what an approval scope binds to and what dedup keys off:
     "reads_private_data": true,
     "mutates_external": true
   },
-  "effect_class": "external_send",
+  "effect_class": "platform/external_send",
   "idempotency_key_spec": { "fields": ["to", "subject", "body_digest"], "scope": "tenant" },
   "approval_binding": {
     "digest_fields": ["to", "cc", "bcc", "subject", "body_digest", "attachment_digests"],

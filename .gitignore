@@ -4,6 +4,10 @@ draft-plan.md
 # ── Speckit / agent run artifacts ───────────────────────────────────────────────
 runs/
 .specify/feature.json
+# Per-worktree LOCAL hook scope override. Stays untracked on purpose: committing a
+# permissive TRACK_ALLOWED_PREFIXES would make one session's working scope the
+# repo-wide policy. The committed defaults live in .github/hooks/track-env.base.sh.
+.github/hooks/track-env.sh
 
 # ── OS / editor ─────────────────────────────────────────────────────────────────
 .DS_Store

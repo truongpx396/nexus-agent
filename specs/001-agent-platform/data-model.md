@@ -33,6 +33,12 @@ Three cross-cutting rules govern how these tables are read and written:
 erDiagram
     TENANT ||--o{ USER : has
     TENANT ||--o{ AGENT : defines
+    TENANT ||--o{ TOOL_PROFILE : scopes
+    TOOL_PROFILE ||--o{ AGENT : grants_gate1_to
+    TOOL_PROFILE ||--o{ CATALOG_MANIFEST : bounds
+    TENANT ||--o{ EFFECT_CLASS : defines
+    EFFECT_CLASS ||--o{ APPROVAL : classifies
+    EFFECT_CLASS ||--o{ APPROVAL_POLICY : tiered_by
     TENANT ||--o{ SESSION : owns
     TENANT ||--o{ SKILL : owns
     TENANT ||--o{ MEMORY : owns
@@ -147,9 +153,9 @@ The delegated identity whose RBAC permission scope the agent acts within (FR-035
 | `created_at` | timestamptz | |
 
 ### Agent
-An immutable configuration (persona/bootstrap, toolset profile, autonomy level)
-that produces the next action from history — not code, never forked per customer
-(FR-050).
+An immutable configuration (persona/bootstrap, a pinned tool-profile reference,
+autonomy level) that produces the next action from history — not code, never forked
+per customer (FR-050).
 
 | Field | Type | Notes |
 |-------|------|-------|
@@ -157,12 +163,14 @@ that produces the next action from history — not code, never forked per custom
 | `tenant_id` | UUID (FK) | RLS key |
 | `version` | int | Immutable; new version = new row (FR-042) |
 | `bootstrap` | text | Markdown persona (`SOUL.md`/`IDENTITY.md`/`TOOLS.md`) |
-| `toolset_profile` | enum | `read_only` / `coding` / `messaging` / `full` |
+| `tool_profile_id` | UUID (FK) | The named Gate-1 profile this agent holds (FR-176); replaces the former fixed `read_only`/`coding`/`messaging`/`full` enum |
+| `tool_profile_version` | int (FK part) | Pinned. Publishing a new profile version changes no existing agent; adopting one is a new `Agent` version |
 | `autonomy_level` | enum | `read_only` (refuses every mutating capability) / `supervised` (approval on every mutating invocation) / `full` (approval per effect class + Rule of Two + `ApprovalPolicy`) — normative pipeline semantics, not a label (FR-111) |
 | `prompt_mode` | enum | `full` / `task` / `minimal` / `none` — the **default** selector for which named prefix sections load, resolved to a concrete mode at run start together with the surface and execution class; behaviour-bearing config, versioned and eval-gated like `bootstrap`, and folded into `Session.harness_digest` so a mode change is a distinct cache prefix (FR-172, FR-129) |
 | `created_at` | timestamptz | |
 
 - **Immutability**: a change is a new versioned row; a prompt/model change is a deploy.
+- **A profile reference is pinned, not followed** (FR-176): the agent names a profile *version*, so a newly published profile version reaches no running agent until a new `Agent` row adopts it — which makes a capability change an eval-gated, revertible deploy like any other (FR-042, FR-078).
 - **Autonomy is enforced, not advisory**: the three levels have defined effects in the execution pipeline and sit at a fixed position in the one published permission resolution order (FR-111, [contracts/tool-contract.md](contracts/tool-contract.md)). Raising a tenant's autonomy level carries a recorded governance sign-off (FR-096).
 - **Prompt mode selects text, never a control** (FR-172): the mode gates which system-prefix sections render, but the per-invocation safety check (FR-009), permission chain (FR-111), and tenant attribution (FR-038) are enforced in the pipeline, not in prompt text. A mode that would omit the safety or tool-contract section from an agent whose `autonomy_level` can reach a mutating capability is **refused at configuration**, and the resolved mode is recorded on `Session` so a replay names the sections it ran under.
 
@@ -188,7 +196,7 @@ or a per-tenant permission-scoped connector (FR-007, FR-011).
 | `returns_untrusted` | bool | Taint leg A — output is untrusted content. Default **true** (fail-closed, FR-087) |
 | `reads_private_data` | bool | Taint leg B — touches tenant/private data. Default **true** (FR-087) |
 | `mutates_external` | bool | Taint leg C — changes external state or communicates outward. Default **true** (FR-087) |
-| `effect_class` | enum (nullable) | For mutating tools: `payment` / `delete` / `external_send` / `prod_change` / `other` — the unit an approval scope may cover (FR-036) |
+| `effect_class_id` | string (FK, nullable) | For mutating tools: the fully-qualified `{namespace}/{name}` identity of exactly one `Effect Class` (FR-177) — the unit an approval scope may cover (FR-036). Absent, retired, or unresolvable ⇒ gated at the most restrictive treatment, never defaulted to `platform/other` |
 | `idempotency_key_spec` | jsonb (nullable) | How a stable per-effect key is derived for state-changing calls (FR-071) |
 | `connector_id` | UUID (FK, nullable) | Set when tool is a connector |
 | `catalog_scan_status` | enum | `pending` / `clean` / `flagged` / `rejected` — result of the descriptor injection scan (FR-113). A tool MUST NOT be enumerable to the model while `pending` or `rejected` |
@@ -202,9 +210,37 @@ or a per-tenant permission-scoped connector (FR-007, FR-011).
 - **One owner per namespace** (FR-147): uniqueness is `(tenant_id, namespace, name, tool_version)`, and a second source attempting to register into a namespace it does not own fails admission. Registration order is never a resolution policy — a hostile source shadowing a legitimate tool would silently re-point every approval scope and audit receipt naming that string.
 - **The alias map is tenant configuration** (FR-147): pipeline step 1 resolves aliases from a governance-signed tenant table, never from descriptor contents. An alias a catalog source can write is a rename primitive handed to the party the catalog exists to distrust.
 
+### Tool Profile
+The named, versioned Gate-1 capability set an `Agent` references — what makes "which
+domain is this agent for" configuration rather than a platform enum (FR-176, FR-011).
+See [contracts/tool-contract.md](contracts/tool-contract.md).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `tool_profile_id` | UUID (PK) | |
+| `tenant_id` | UUID (FK, nullable) | **RLS key.** NULL only for the platform-owned seed profiles; a tenant may neither enumerate nor reference another tenant's profiles (FR-039) |
+| `version` | int (PK part) | Immutable; a change publishes a new version |
+| `name` | string | Unique within `(tenant_id)` — e.g. `legal-review`, `clinical-intake` |
+| `status` | enum | `draft` / `gated` / `enabled` / `retired` |
+| `member_tool_ids` | string[] | Flat, fully-resolved `{namespace}/{name}@{version}` set (FR-147). An authoring-time `extends` is flattened at publish and never stored as runtime indirection (FR-176) |
+| `member_digest` | bytea | Hash over the sorted member set — a component of `Session.harness_digest` (FR-129) |
+| `case_set_version` | string (FK) | Its own **coverage-and-refusal** case set: does the agent complete what the profile claims, and refuse what it excludes (FR-143) |
+| `eval_run_id` | UUID (nullable) | The gate run that cleared it (FR-043) |
+| `governance_signoff` | jsonb (nullable) | Recorded approver + timestamp; required to reach `enabled` on a **membership** change (FR-096) |
+| `rolled_from_version` | int (nullable) | Set when this version is a **version roll** only — identities unchanged but for a member tool's pin. Inherits that tool's FR-078 gate run; no fresh sign-off (FR-176) |
+| `created_at` | timestamptz | |
+
+- **Gate 1 resolves `DENY` or `DEFER`, never `ALLOW`** (FR-176, FR-111). A profile is an allowlist at layer 4, not a bypass: a deny rule (layer 1), a hook deny (layer 2), and the pinned ratcheting autonomy level (layer 3) each still override it, so a profile naming a mutating tool for a `read_only` agent grants nothing.
+- **The profile bounds the manifest**, not the reverse: `Catalog Manifest.resident_tool_ids ∪ deferred_tool_ids ⊆ member_tool_ids`, and a violation is refused at configuration time (FR-148).
+- **A delegated child's profile is a subset of its parent's** — never a union, never a widening (FR-099, FR-101, SC-021).
+- **Seed profiles** (`tenant_id` NULL, version 1): `platform/read_only`, `platform/coding`, `platform/messaging`, `platform/full` — the four former enum values, so every requirement naming them keeps its meaning and day-one behaviour is unchanged.
+- **Not model-reachable**: no model output, tool result, steering message, skill (FR-153), hook (FR-171), or delegation parameter may select or alter a profile, and no catalog descriptor may write one (FR-113, FR-147).
+- **A membership change is a governance event; a version roll is not.** Requiring sign-off on every pinned-version advance would make profile maintenance scale with catalog churn and push tenants toward stale pins — the outcome FR-078 exists to prevent.
+
 ### Catalog Manifest
 The **resolvable universe** of tools for a run — what the harness digest pins so that
-deferred disclosure (FR-062) does not mutate a run's configuration mid-flight (FR-148).
+deferred disclosure (FR-062) does not mutate a run's configuration mid-flight (FR-148),
+bounded above by the run's resolved `Tool Profile` (FR-176).
 
 | Field | Type | Notes |
 |-------|------|-------|
@@ -215,7 +251,9 @@ deferred disclosure (FR-062) does not mutate a run's configuration mid-flight (F
 | `resident_token_budget` | int | Cap on the resident tier; exceeded ⇒ relevance selection, never arbitrary truncation |
 | `max_loadable_per_run` | int | Ceiling on mid-run loads (FR-148) |
 | `selector_version` | string (FK) | The eval-gated selector config in force; behaviour-bearing config under FR-143 |
+| `tool_profile_id` | UUID (FK) | The profile whose membership bounded this manifest; with its version, a component of `Session.harness_digest` (FR-176) |
 
+- **The profile is the manifest's upper bound** (FR-176): the selector chooses the resident/deferred split *within* the profile and can never surface an identity outside it. A manifest naming a non-member is a configuration-time error, not a runtime denial.
 - **The manifest is fixed for the run; the materialized subset is not.** Each load appends a `tool_loaded` event, so a replay reconstructs the visible catalog turn by turn while `harness_digest` never moves (FR-148, FR-088).
 - **Selection is measured**: tool-selection accuracy, wrong-tool rate, and no-tool-found rate are reported per agent version and harness digest (FR-095).
 
@@ -785,7 +823,8 @@ human, and invalidated with the run it gates (FR-036, FR-103–FR-108).
 | `idempotency_key` | string | Derived from the same digest, so approved / executed / de-duplicated are provably one invocation (FR-071) |
 | `kind` | enum | `single` / `batch` / `plan_preauth` — a batch or pre-authorization **enumerates** its members (FR-109) |
 | `member_digests` | bytea[] (nullable) | For `batch` / `plan_preauth`: the enumerated set an invocation must match to be admitted. Non-empty when `kind ≠ single` |
-| `effect_class` | enum | `payment` / `delete` / `external_send` / `prod_change` / `other` |
+| `effect_class_id` | string (FK) | Fully-qualified `{namespace}/{name}` identity of the class this approval gates (FR-177) — bound by identity so a later definition cannot re-point what this grant authorized |
+| `effect_class_taxonomy_version` | int | The taxonomy version in force when the class was resolved — recorded, so *what `irreversible` meant at the time* replays (FR-177) |
 | `risk_tier` | enum | Resolved from the `ApprovalPolicy` at request time — recorded, so the policy version that gated this is replayable |
 | `context_package` | jsonb *(encrypted)* | The decision-ready package of FR-104: action summary, blast-radius parameters, taint legs, cost + delegation chain, requester |
 | `redaction_policy_version` | string | Which masking rules produced `context_package` (FR-037, FR-104) |
@@ -798,7 +837,7 @@ human, and invalidated with the run it gates (FR-036, FR-103–FR-108).
 | `resolution_token_hash` | bytea | Hash of the single-use channel token bound to `approval_id` + resolver; invalid after first use and after TTL (FR-105) |
 | `scope` | enum | `once` / `session` / `standing` — **no unbounded `permanent`** (FR-036) |
 | `scope_tool_id` | string (nullable) | A scope names the tool it covers |
-| `scope_effect_class` | enum (nullable) | …and the effect class it covers |
+| `scope_effect_class_id` | string (FK, nullable) | …and the effect class it covers, by fully-qualified identity (FR-177, FR-147) |
 | `scope_expires_at` | timestamptz (nullable) | Every scope wider than `once` carries an expiry — no scope permanently ungates a class |
 | `status` | enum | `pending` / `granted` / `granted_modified` / `denied` / `expired` / `invalidated` — *projection* of the approval events |
 | `ttl_expires_at` | timestamptz | Decision deadline; on expiry → `expired` (fail-closed) |
@@ -816,18 +855,45 @@ human, and invalidated with the run it gates (FR-036, FR-103–FR-108).
 - **Every outcome is an event** — `approval_requested` / `notified` / `reminded` / `escalated` / `granted` / `granted_modified` / `denied` / `expired` / `invalidated` / `resolution_refused` — and this table is the projection (FR-085).
 - **Every resolution emits a chained receipt** binding approver, authn method, channel, digest, scope, and decision (FR-112) — the authorization record is not merely a mutable projection.
 
+### Effect Class
+The named, versioned, tenant-extensible unit of high-impact action — what an approval
+scope covers, what an approval policy tiers on, and what an approver's context package
+leads with (FR-177, FR-036, FR-104, FR-109).
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `effect_class_id` | string (PK) | Fully-qualified `{namespace}/{name}` (FR-147 applied to the approval axis). One owning source per namespace per tenant |
+| `tenant_id` | UUID (FK, nullable) | **RLS key.** NULL only for the five platform seeds; the `platform/` namespace is reserved and a tenant-defined class in it is refused at admission |
+| `version` | int (PK part) | Immutable; a change publishes a new taxonomy version |
+| `status` | enum | `draft` / `gated` / `enabled` / `retired` |
+| `irreversible` | bool | Forces separation of duties — resolver ≠ run initiator (FR-105). **Add-only**: a version clearing it on any class is refused |
+| `high_value` | bool | Forces step-up re-authentication at resolution (FR-105). **Add-only**, same rule |
+| `description` | text | Human-readable, rendered in the approver's context package (FR-104) |
+| `case_set_version` | string (FK) | Its own versioned case set (FR-143) |
+| `eval_run_id` | UUID (nullable) | The gate run that cleared it (FR-043) |
+| `governance_signoff` | jsonb (nullable) | Recorded approver + timestamp; required to reach `enabled` (FR-096) |
+| `created_at` | timestamptz | |
+
+- **Seeds** (`tenant_id` NULL, version 1): `platform/payment`, `platform/delete`, `platform/prod_change` (all `irreversible`), `platform/external_send`, `platform/other` — the five former enum values, so every requirement naming them keeps its meaning and day-one behaviour is unchanged.
+- **Declarations tighten only.** A taxonomy version that clears `irreversible` or `high_value` on any class — a platform seed above all — is **refused at configuration time**, not accepted as a policy change. A downgradeable class is a route out of the control it exists to route into, and the posture matches the FR-111 autonomy ratchet: tightening always available, loosening a defect.
+- **Resolution fails closed** (FR-177): a mutating tool declares exactly one class; absent, retired, or unresolvable ⇒ approval required and separation of duties enforced, never `platform/other` as a permissive default. Same footing as the missing-taint-declaration rule (FR-087).
+- **Bound by identity, not by string.** `Approval.effect_class_id`, `Approval.scope_effect_class_id`, every FR-112 audit receipt, and each `ApprovalPolicy.rules` entry resolve the qualified identity, so a later definition cannot re-point what a past grant authorized (FR-147).
+- **Not model-reachable**: no model output, tool result, steering message, skill, hook, or catalog descriptor may define or alter a class (FR-113).
+
 ### Approval Policy
 The versioned, tenant-scoped rule set that bounds **how often** a human is asked, so
-the effect-class gate does not degrade into rubber-stamping (FR-109).
+the effect-class gate does not degrade into rubber-stamping (FR-109). Its effect-class
+axis is the `Effect Class` taxonomy above, resolved by identity (FR-177).
 
 | Field | Type | Notes |
 |-------|------|-------|
 | `policy_id` | UUID (PK) | |
 | `tenant_id` | UUID (FK) | RLS key |
 | `version` | int (PK part) | Immutable; a change publishes a new version (FR-042) |
-| `rules` | jsonb | Ordered (effect class × risk tier × value threshold × autonomy level) → `auto` / `once` / `session` / `multi_party` |
+| `rules` | jsonb | Ordered (effect class × risk tier × value threshold × autonomy level) → `auto` / `once` / `session` / `multi_party`. The class axis names fully-qualified `Effect Class` identities (FR-177) |
+| `effect_class_taxonomy_version` | int (FK) | The taxonomy version this policy resolves against; pinned into `Session.harness_digest` beside the policy version (FR-129, FR-177) |
 | `routing` | jsonb | Per-class assignee/group/rotation, reminder offsets, escalation chain (FR-108) |
-| `step_up_classes` | enum[] | Effect classes demanding fresh re-authentication (FR-105) |
+| `step_up_classes` | string[] | Effect-class identities demanding fresh re-authentication, **in addition to** every class whose taxonomy entry declares `high_value` (FR-105, FR-177) |
 | `redaction_policy` | jsonb | Masking rules producing the `context_package` (FR-037, FR-104) |
 | `eval_run_id` | UUID (nullable) | The gate run that cleared it (FR-043) |
 | `governance_signoff` | jsonb (nullable) | Recorded approver + timestamp; required to enable (FR-096) |
