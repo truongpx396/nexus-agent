@@ -637,7 +637,7 @@ not measurable from the designed data.
   OpenRouter, cloud gateways, self-hosted vLLM/Ollama) attaches as a `Provider`
   adapter with gateway-side aliasing, substitution, and fallback disabled and one
   pinned snapshot per request (FR-132). An **observability backend** (Langfuse,
-  Arize/Phoenix, Braintrust, Grafana/Tempo, Datadog) attaches **only** through the
+  Opik, Arize/Phoenix, Braintrust, Grafana/Tempo, Datadog) attaches **only** through the
   platform's OTLP export so the FR-117 allowlist applies; vendor SDKs and
   auto-instrumentation are prohibited (FR-134). **Eval/dataset platforms** may
   host corpora and scores but never the gate (FR-135). **Durable-execution

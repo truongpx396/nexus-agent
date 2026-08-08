@@ -39,8 +39,8 @@ responsibilities are never delegated:
 | `Provider` (FR-027) | Native Anthropic / OpenAI-compatible / Bedrock / Vertex adapters | **LiteLLM**, OpenRouter, cloud model gateways, self-hosted vLLM / Ollama | Transport + capacity multiplexer, failover-as-capacity | The router; the ceiling; the model-choice authority (FR-132) |
 | Durable queue (FR-046) | NATS JetStream | SQS, Redis Streams, **Temporal / Restate / Inngest / DBOS** | Scheduler + delivery guarantee | The event log; the approval mechanism; the exactly-once mechanism (FR-136) |
 | Plan runner (FR-102) | Platform plan evaluator | Same durable-execution engines | Step scheduling and durability | The source of branch decisions, which must replay from the log |
-| Telemetry export (FR-117) | OTLP → self-hosted collector | **Langfuse**, Arize/Phoenix, Braintrust, Grafana/Tempo, Datadog, Honeycomb | A view of structure, latency, tokens, and cost | A content store; an audit record; a second write path (FR-134) |
-| Eval platform / datasets (FR-043) | Platform eval runner + judge in CI | Langfuse datasets, Braintrust, Arize | Corpus hosting, score storage, analysis | The gate (FR-135); the judge's calibration (FR-141); the trial statistics or verdict (FR-137) |
+| Telemetry export (FR-117) | OTLP → self-hosted collector | **Langfuse**, Opik, Arize/Phoenix, Braintrust, Grafana/Tempo, Datadog, Honeycomb | A view of structure, latency, tokens, and cost | A content store; an audit record; a second write path (FR-134) |
+| Eval platform / datasets (FR-043) | Platform eval runner + judge in CI | Langfuse datasets, Opik, Braintrust, Arize | Corpus hosting, score storage, analysis | The gate (FR-135); the judge's calibration (FR-141); the trial statistics or verdict (FR-137) |
 | *Grader libraries* — **not a port** (FR-135) | Platform code + model graders | **DeepEval, Promptfoo, Ragas** — pinned in-tree under `ml-python/` | Assertions and metrics *beneath* the platform's statistics | The verdict; an uncalibrated judge wearing a metric's name (FR-137, FR-141, FR-144) |
 | `Workspace` / sandbox (FR-047) | OCI container under gVisor (`runsc`) | Kata Containers, plain runc, local-OS isolation, **self-hosted** microVM (Firecracker/E2B); **managed** sandbox services only where the tenant's residency configuration permits (FR-091, FR-133) | The execution boundary | A path around the resource limits or egress allowlist; a mounted runtime socket; unvalidated create args (FR-059); a route for session content out of a region-pinned or BYOC deployment (FR-091) |
 | Connector catalog (FR-012) | Built-in connectors | MCP servers, per-tenant connectors | Capability | Unvetted, unscanned, or audience-unrestricted access (FR-113, FR-114) |
@@ -143,7 +143,7 @@ surfaces, and each meets a rule that already exists here.
 The eval ecosystem ships in two shapes that are routinely conflated at
 integration time, and they carry different risk. The port map has a row for each.
 
-**A hosted platform** — Langfuse datasets, Braintrust — is an adapter on the
+**A hosted platform** — Langfuse datasets, Opik, Braintrust — is an adapter on the
 `eval` port. It stores corpora and receives scores. It is admitted like any
 adapter and holds no gate authority; `no_gate_authority` and `score_only_egress`
 are recorded conformance dimensions rather than policy prose.

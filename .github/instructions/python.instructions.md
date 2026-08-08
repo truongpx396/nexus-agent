@@ -118,7 +118,7 @@ and dependency management.
 - Attach contextual fields (request ID, trace ID, user ID) instead of formatting them into the message
 - Choose appropriate levels (`debug`, `info`, `warning`, `error`); reserve `error` for actionable failures
 - Never log secrets, tokens, passwords, or PII
-- Use OpenTelemetry / Langfuse instrumentation for tracing LLM and pipeline operations, consistent with the project's observability stack
+- Use OpenTelemetry / Langfuse / Opik instrumentation for tracing LLM and pipeline operations, consistent with the project's observability stack
 - Either log an error or raise it — avoid doing both at every layer
 
 ## LLM, RAG, and MCP (project-specific)
