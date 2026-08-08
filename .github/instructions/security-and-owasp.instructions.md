@@ -13,6 +13,34 @@ Comprehensive security rules for web application development. Every anti-pattern
 - **IMPORTANT** — Significant risk. Should be fixed in the same sprint.
 - **SUGGESTION** — Defense-in-depth improvement. Plan for a future iteration.
 
+## How to Read the Detection Entries
+
+Each anti-pattern carries a **Detection** line. Two kinds appear, and they must not be
+confused:
+
+- **Locators** (a regex) — PCRE, line-scoped, meant for `grep -nP '<pattern>' -r src/`. A locator
+  finds *candidate* sites. It is deliberately allowed to over-match; a hit is a place to look, not
+  a confirmed finding.
+- **Reviews** (prose, e.g. "Absence of X", "without ownership check") — no regex can decide these.
+  They require reading the surrounding code.
+
+**A regex cannot prove a negative.** Patterns like "call X without guard Y" are unmatchable when the
+guard legitimately lives on another line, in a middleware, or in a helper. Where the older revision
+of this file tried it with `.*(?!.*Y)`, the pattern was silently useless: a negative lookahead
+placed after an unbounded `.*` can always be satisfied by backtracking, so it matched every line
+containing X — including compliant ones. Those entries are now split into a locator plus an explicit
+"then confirm" step. When you write a new entry, do the same: match the risky *call*, then state what
+a reviewer must verify.
+
+Two further rules for anyone editing a Detection regex:
+
+- **Test it against this file's own BAD and GOOD examples** before committing. Two patterns here
+  previously failed to match the very BAD example printed beneath them (I1, S3).
+- **Do not assume token order.** `A.*B` requires A before B. Source code puts the sink first about as
+  often as the tainted value (`res.json({ stack: err.stack })` vs `const stack = ...; res.json(...)`),
+  so an order-dependent pattern misses roughly half of real occurrences. Use an alternation covering
+  both orders, or anchor on the sink alone.
+
 ---
 
 ## OWASP Top 10 — 2025 Quick Reference
@@ -37,8 +65,12 @@ Comprehensive security rules for web application development. Every anti-pattern
 ### I1: SQL Injection via String Concatenation
 
 - **Severity**: CRITICAL
-- **Detection**: `\$\{.*\}.*(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)`
+- **Detection**: `` `[^`]*(?:(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)[^`]*\$\{|\$\{[^`]*(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE))|(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)[^"'`\n]*['"]\s*\+ ``
 - **OWASP**: A05
+
+Covers both orders inside a template literal (keyword-then-interpolation and
+interpolation-then-keyword) plus `"..." +` string concatenation. An earlier `\$\{.*\}.*(?:SELECT...)`
+required the interpolation to come *first* and therefore missed the BAD example below.
 
 ```typescript
 // BAD
@@ -314,7 +346,11 @@ const authUrl = `https://provider.com/authorize?client_id=${clientId}&redirect_u
 ### AU8: Missing PKCE for Public OAuth Clients
 
 - **Severity**: IMPORTANT
-- **Detection**: `(?:authorization_code|code).*(?!.*code_challenge)`
+- **Detection (locator)**: `(?:grant_type|response_type)\s*[:=]\s*['"]?(?:authorization_code|code)\b`
+- **Then confirm**: the same authorization flow sets `code_challenge` + `code_challenge_method=S256`
+  on the authorize request and sends `code_verifier` on the token exchange. PKCE parameters are
+  routinely built in a different function from the grant type, so their absence cannot be matched by
+  a line-scoped regex — read the flow.
 - **OWASP**: A07
 
 Use PKCE (Proof Key for Code Exchange) with S256 challenge method for all public clients (SPAs, mobile).
@@ -433,8 +469,12 @@ const API_KEY = process.env.API_KEY;
 ### S3: Server Secrets Exposed to Client
 
 - **Severity**: CRITICAL
-- **Detection**: `NEXT_PUBLIC_.*(?:SECRET|PRIVATE|PASSWORD|KEY(?!.*PUBLIC))`
+- **Detection**: `(?:NEXT_PUBLIC_|VITE_|REACT_APP_|PUBLIC_|NUXT_PUBLIC_)[A-Z0-9_]*(?:SECRET|PRIVATE|PASSWORD|PASSWD|TOKEN|CREDENTIAL|DATABASE_URL|DB_URL|DSN|CONNECTION_STRING|API_KEY|ACCESS_KEY|SERVICE_KEY)`
 - **OWASP**: A02
+
+Covers every common client-exposed prefix, not just Next.js. The previous pattern matched only
+`SECRET|PRIVATE|PASSWORD|KEY`, so it missed its own BAD example below
+(`NEXT_PUBLIC_DATABASE_URL`) — connection strings are the most frequently leaked value of all.
 
 ```bash
 # BAD
@@ -450,24 +490,35 @@ Angular: do not put secrets in `environment.ts` files bundled into the client.
 ### S4: Default Credentials in Config
 
 - **Severity**: CRITICAL
-- **Detection**: `(?:admin|root|default|test).*(?:password|pass|pwd)\s*[:=]\s*['"](?:admin|root|password|1234|test)`
+- **Detection**: `(?i)(?:password|passwd|pwd|secret|token)\s*[:=]\s*['"]?(?:admin|root|password|passwd|pass|1234|12345678|test|changeme|secret|guest|postgres|letmein)\b`
 - **OWASP**: A02
+
+Anchors on the credential *field* rather than requiring an `admin`/`root` prefix to appear first, and
+makes the surrounding quotes optional so unquoted YAML/`.env`/Compose values (`POSTGRES_PASSWORD:
+postgres`) are caught too — the previous pattern missed both shapes.
 
 Use environment variables with validation (zod schema).
 
 ### S5: Secrets in CI/CD Pipeline Logs
 
 - **Severity**: IMPORTANT
-- **Detection**: `(?:echo|console\.log|print).*(?:\$SECRET|\$TOKEN|\$PASSWORD|process\.env)`
+- **Detection**: `(?:echo|printf|console\.log|print)\b[^\n]*(?:\$\{?[A-Z_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|KEY|CREDENTIAL)|process\.env|\$\{\{\s*secrets\.)`
 - **OWASP**: A09
+
+Generalized from four hardcoded variable names to any `$UPPER_CASE` name containing a secret-ish
+word, and extended to `${{ secrets.* }}` so a GitHub Actions step that echoes a secret is caught.
 
 Use masked secrets in CI. Never echo environment variables containing secrets.
 
 ### S6: Sensitive Data in Error Responses / Stack Traces
 
 - **Severity**: IMPORTANT
-- **Detection**: `(?:stack|trace|query|sql).*(?:res\.json|res\.send|c\.JSON)`
+- **Detection**: `(?:res\.(?:json|send)|c\.JSON|reply\.send)\s*\([^)\n]*\b(?:stack|trace|sqlMessage|sqlState|\bsql\b)\b|\b(?:err|error|e)\.stack\b[^\n]*(?:res\.(?:json|send)|c\.JSON|reply\.send)`
 - **OWASP**: A10
+
+Order-agnostic: the response sink comes before the tainted field far more often than after it
+(`res.json({ stack: err.stack })`), which the previous `(?:stack|...).*(?:res\.json|...)` could
+never match.
 
 ```typescript
 // GOOD — generic error to client, details only in logs
@@ -540,8 +591,15 @@ Value: `camera=(), microphone=(), geolocation=(), payment=()`
 ### H8: CORS Wildcard with Credentials
 
 - **Severity**: CRITICAL
-- **Detection**: `(?:cors|Access-Control-Allow-Origin).*\*`
+- **Detection**: `Access-Control-Allow-Origin['"\s:,]*['"]?\*|\borigin\s*:\s*(?:['"]\*['"]|true\b)`
+- **Then confirm**: whether `credentials: true` (or `Access-Control-Allow-Credentials`) is also set —
+  a wildcard origin *with* credentials is CRITICAL; without credentials it is a design smell to
+  review, not an exploit.
 - **OWASP**: A02
+
+The previous `(?:cors|Access-Control-Allow-Origin).*\*` matched any line mentioning `cors` that
+happened to contain an asterisk — including `import cors from 'cors'` followed by a `/* */` comment.
+This anchors on the wildcard *value* instead.
 
 ```typescript
 // GOOD
@@ -574,7 +632,10 @@ Use structured data parsers (JSON.parse) instead.
 ### FE3: postMessage Without Origin Validation
 
 - **Severity**: IMPORTANT
-- **Detection**: `addEventListener\s*\(\s*['"]message['"].*(?!.*origin)`
+- **Detection (locator)**: `addEventListener\s*\(\s*['"]message['"]`
+- **Then confirm**: each handler body checks `event.origin` against an allowlist **before** touching
+  `event.data`. The locator matches every `message` listener, compliant ones included — that is
+  intended, since the guard sits in the callback body and cannot be proven absent by a line regex.
 - **OWASP**: A01
 
 ```typescript
@@ -587,7 +648,7 @@ window.addEventListener('message', (event) => {
 ### FE4: Prototype Pollution
 
 - **Severity**: IMPORTANT
-- **Detection**: `(?:__proto__|constructor\.prototype|Object\.assign)\s*.*(?:req\.|body\.|query\.)`
+- **Detection**: `(?:__proto__|constructor\.prototype|Object\.assign\s*\(|\{\s*\.\.\.)[^\n]*(?:req\.|body\.|query\.|params\.)|(?:req|body|query|params)\.[\w.]*[^\n]*(?:Object\.assign\s*\(|\{\s*\.\.\.)`
 - **OWASP**: A05
 
 Validate and filter keys from user input before merging into objects.
@@ -595,8 +656,12 @@ Validate and filter keys from user input before merging into objects.
 ### FE5: Open Redirect
 
 - **Severity**: IMPORTANT
-- **Detection**: `(?:window\.location|location\.href|router\.push)\s*=\s*(?:req\.|params\.|query\.)`
+- **Detection**: `(?:(?:window\.)?location(?:\.href)?\s*=|location\.(?:replace|assign)\s*\(|router\.(?:push|replace)\s*\(|res\.redirect\s*\()[^\n;]*(?:searchParams\.get|req\.|params\.|query\.|body\.|redirect|returnUrl|returnTo|next|continue)`
 - **OWASP**: A01
+
+`router.push(...)` and `location.replace(...)` are calls, not assignments, so the previous
+`\s*=\s*` form could never match them; browser code also reads the target from
+`searchParams.get('redirect')` rather than `req.*`.
 
 ```typescript
 // GOOD — relative paths only
@@ -671,7 +736,8 @@ ALWAYS validate on server too. Use zod, joi, or class-validator.
 ### AP1: New Endpoint Without Rate Limiting
 
 - **Severity**: IMPORTANT
-- **OWASP**: A05
+- **OWASP**: A06 (Insecure Design) — resource exhaustion, not injection. For login/reset endpoints
+  specifically, see AU5 (A07).
 
 ### AP2: GraphQL Without Depth Limiting
 
@@ -715,14 +781,18 @@ Always verify webhook signatures (Stripe, GitHub HMAC, etc.).
 ### AP5: API Exposing Internal Info
 
 - **Severity**: IMPORTANT
-- **Detection**: `(?:stack|trace|query|sql).*(?:res\.json|res\.send)`
+- **Detection**: same locator as S6 — `(?:res\.(?:json|send)|c\.JSON|reply\.send)\s*\([^)\n]*\b(?:stack|trace|sqlMessage|sqlState|\bsql\b)\b`
 - **OWASP**: A10
 
 ### AP6: Missing Request Body Size Limit
 
 - **Severity**: IMPORTANT
-- **Detection**: `express\.json\(\)` without `limit`
-- **OWASP**: A05
+- **Detection**: `express\.(?:json|urlencoded|raw|text)\s*\(\s*(?:\)|\{(?![^}]*\blimit\b))`
+- **OWASP**: A06 (Insecure Design) — an unbounded body is a memory-exhaustion vector, not injection
+
+The bounded `(?![^}]*\blimit\b)` lookahead is safe here: it cannot escape the options object, so
+`express.json({ limit: '100kb' })` is correctly skipped while `express.json()` and
+`express.json({ strict: true })` both match.
 
 ```typescript
 app.use(express.json({ limit: '100kb' }));
@@ -731,6 +801,15 @@ app.use(express.json({ limit: '100kb' }));
 ---
 
 ## AI/LLM Security Anti-Patterns (AI1-AI3)
+
+> **These three cover a single-turn LLM feature: one prompt, one completion.** If the system is
+> **agentic** — the model calls tools, runs code, holds credentials, retains memory across sessions,
+> retrieves documents, or delegates to other agents — read
+> [ai-agent-security.instructions.md](./ai-agent-security.instructions.md) instead. It is
+> authoritative for that surface and covers what AI1–AI3 do not: excessive tool agency, MCP and
+> third-party tool trust, agent identity and delegation, memory/RAG poisoning, inter-agent
+> authentication, human-approval gates, and token/cost ceilings (OWASP ASI01–ASI10). Everything else
+> in *this* file still applies to agent code — an agent's HTTP handler is still an HTTP handler.
 
 ### AI1: Prompt Injection via User Input
 

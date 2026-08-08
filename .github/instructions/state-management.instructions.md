@@ -5,10 +5,14 @@ applyTo: '**/*.tsx,**/*.jsx,**/*.ts'
 
 # State Management & Data Libraries Instructions
 
-Conventions for state, data fetching, routing, and forms in the React 19 + Vite SPA. Use the right
+Conventions for state, data fetching, routing, and forms in a React 19 application. Use the right
 tool for each kind of state, and keep concerns separated. Complements
 [reactjs.instructions.md](./reactjs.instructions.md) — the React performance and component rules
 there apply on top of everything below.
+
+These rules assume the TanStack + Zustand stack named below. Where the project has already
+standardized on an equivalent (Redux Toolkit + RTK Query, SWR, Formik, React Router), apply the same
+separation-of-concerns principles to those libraries instead of introducing a second one.
 
 ## Choosing the Right State Tool
 

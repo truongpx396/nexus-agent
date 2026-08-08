@@ -1,15 +1,24 @@
 ---
-description: 'Production practices for backing services: PostgreSQL, Redis, NATS JetStream, Qdrant, MinIO/S3, Casdoor, and Caddy. Configuration, resilience, security, and operational standards for the AISAT-STUDIO stack.'
+description: 'Production practices for backing services: PostgreSQL, Redis, NATS JetStream, Qdrant, MinIO/S3, Casdoor/OIDC, and Caddy. Configuration, resilience, security, and operational standards for migrations, infra config, deployment manifests, and the code that connects to them.'
 applyTo: '**/*.sql,**/migrations/**,**/Caddyfile,**/Caddyfile.*,**/*.Caddyfile,**/docker-compose*.yml,**/docker-compose*.yaml,**/compose*.yml,**/compose*.yaml,**/*.env,**/.env.*,**/k8s/**,**/deploy/**,**/config/**,**/*natsstore*,**/*jetstream*,**/*qdrant*,**/*redis*,**/*casdoor*'
 ---
 
 # Backing Services — Production Practices
 
-Standards for provisioning, configuring, and operating the backing services used by
-AISAT-STUDIO: **PostgreSQL** (with RLS), **Redis**, **NATS JetStream**, **Qdrant**,
-**MinIO / S3**, **Casdoor** (OIDC), and **Caddy** (edge). These rules apply to
+Standards for provisioning, configuring, and operating common backing services:
+**PostgreSQL**, **Redis**, **NATS JetStream**, **Qdrant**, **MinIO / S3**,
+**Casdoor** (or any OIDC provider), and **Caddy** (edge). These rules apply to
 migrations, infra config, deployment manifests, and any application code that connects
 to these services.
+
+**Scope:** apply only the sections for services the project actually uses — this is a per-service
+reference, not a required stack. Where a section describes a topology ("primary + read replica",
+"payload-isolated shared collections"), read it as *"when you use this pattern, these are the
+rules"*, not as a mandate to adopt it.
+
+**Tenancy:** examples use `workspace_id` as the tenant key and a credit/usage ledger as the worked
+example of correctness-critical state. Substitute the project's own tenant column (`tenant_id`,
+`org_id`, …) and its own critical invariant; the isolation and atomicity rules are what transfer.
 
 Complements [security-and-owasp.instructions.md](./security-and-owasp.instructions.md)
 (secrets, TLS, headers), [go.instructions.md](./go.instructions.md), and
@@ -21,7 +30,7 @@ Apply these to **every** backing service before service-specific rules:
 
 - **No hardcoded credentials.** All connection strings, passwords, and keys come from
   environment variables or a secret manager — never committed. See secrets anti-patterns
-  S1–S4.
+  S1–S6 in [security-and-owasp.instructions.md](./security-and-owasp.instructions.md).
 - **TLS in transit.** Encrypt every connection between app and service in staging/prod
   (Postgres `sslmode=verify-full`, `rediss://`, NATS TLS, HTTPS to Qdrant/MinIO/Casdoor).
   Plaintext is acceptable only on an isolated local dev network.
@@ -45,8 +54,9 @@ Apply these to **every** backing service before service-specific rules:
 
 ## PostgreSQL
 
-Primary system of record. Uses Row-Level Security (RLS) for workspace isolation, partitioned
-tables by `created_at`, and a primary + read-replica topology.
+Relational system of record. The rules below assume the common production shape: Row-Level Security
+(RLS) for tenant isolation, time-partitioned tables, and a primary + read-replica topology. Skip
+what does not apply.
 
 ### Connections & Pooling
 
@@ -104,8 +114,8 @@ CREATE POLICY workspace_isolation ON documents
 
 - Partition large, time-series tables (`created_at`) and attach a retention/detach job for
   old partitions rather than mass `DELETE`.
-- Add a UNIQUE constraint for every idempotency key (`idem_key`) — this is the correctness
-  backstop for credit ledger and event processing, not the queue.
+- Add a UNIQUE constraint for every idempotency key (`idem_key`) — for ledger-style writes and
+  event processing this constraint, not the queue, is the correctness backstop.
 - Route read-only, replica-safe queries to the read replica; keep the primary for writes and
   read-after-write consistency. Guard against replica lag for flows that read their own writes.
 - Index foreign keys and RLS predicate columns (`workspace_id`). Avoid `SELECT *`.
@@ -114,33 +124,33 @@ CREATE POLICY workspace_isolation ON documents
 
 - Continuous WAL archiving + point-in-time recovery (PITR); test restores on a schedule — an
   untested backup is not a backup.
-- Document RPO/RPO targets; monitor replication lag and backup freshness with alerts.
+- Document RPO **and RTO** targets; monitor replication lag and backup freshness with alerts.
 
 ---
 
 ## Redis
 
-Used for credit balances, LangGraph checkpoints, cache, rate limiting, the billing outbox,
-opaque session records, and SSE pub/sub. Correctness-critical data lives here, so treat it as
-more than a cache.
+Typically used for counters/balances, agent or workflow checkpoints, cache, rate limiting, an
+outbox, opaque session records, and pub/sub fan-out. As soon as *any* correctness-critical data
+lives here, Redis stops being "just a cache" and the durability rules below apply.
 
 ### Topology & Persistence
 
 - Separate concerns by logical DB or key prefix, and know each key's durability class:
-  - **Durable** (credit balances, outbox, sessions, checkpoints): enable AOF
+  - **Durable** (balances, outbox, sessions, checkpoints): enable AOF
     (`appendfsync everysec`) so a restart doesn't lose committed state.
   - **Ephemeral** (cache, rate-limit counters): TTL-bounded; loss is tolerable.
-- For HA, run **Redis Sentinel or Cluster** — a single node is a single point of failure for
-  billing and sessions. Clients must reconnect through Sentinel/Cluster topology, not a fixed IP.
+- For HA, run **Redis Sentinel or Cluster** — a single node is a single point of failure for any
+  durable class. Clients must reconnect through Sentinel/Cluster topology, not a fixed IP.
 - Enable `rediss://` TLS and require AUTH (ACL user with a scoped command set) in staging/prod.
 
 ### Correctness & Atomicity
 
 - Mutate shared counters atomically: `INCRBY`/`DECRBY`, or a **Lua script**/`MULTI`+`WATCH`
   for read-modify-write. Never `GET` then `SET` a balance across two round-trips.
-- Credit deduction is `DECRBY` (fast path) backed by the Postgres ledger + outbox; Redis is
-  the accelerator, Postgres is the source of truth. On divergence, Postgres wins
-  (hourly reconcile).
+- Pattern for balance-style counters: `DECRBY` as the fast path, backed by a relational ledger +
+  outbox. Redis is the accelerator, the database is the source of truth, and on divergence the
+  database wins — schedule a periodic reconcile rather than trusting the cache.
 - Use `SET key val NX EX <ttl>` for locks/idempotency guards, and always set a TTL so a
   crashed holder cannot deadlock. Release with a compare-and-delete Lua script (check the
   token you own before `DEL`).
@@ -151,7 +161,7 @@ more than a cache.
   the most common Redis outage.
 - Set `maxmemory` and choose an eviction policy deliberately:
   `allkeys-lru`/`volatile-lru` for caches; **`noeviction`** for instances holding durable
-  billing/session data (evicting a balance is data loss — fail the write instead).
+  state such as balances or sessions (evicting a balance is data loss — fail the write instead).
 - Never store durable and evictable data on the same instance with an `allkeys-*` policy.
 - Namespace keys (`session:{hash}`, `credit:{ws}`, `ratelimit:{ws}:{route}`); avoid `KEYS` in
   production — use `SCAN` with a cursor.
@@ -167,9 +177,9 @@ more than a cache.
 
 ## NATS JetStream
 
-Async event bus. Uses **durable pull consumers** with **per-subject queue groups** (not core
-NATS) so events survive restarts and scale horizontally. DLQs exist for `ingestion.dlq` and
-`notify.email.dlq`.
+Async event bus. Prefer **durable pull consumers** with **per-subject queue groups** over core NATS
+so events survive restarts and scale horizontally, and give every stream that can poison-loop a
+dead-letter subject (`<domain>.dlq`).
 
 ### Streams & Consumers
 
@@ -184,19 +194,21 @@ NATS) so events survive restarts and scale horizontally. DLQs exist for `ingesti
     long-horizon agent runs) or messages redeliver mid-flight.
   - `max_deliver` — cap redeliveries, then route to a DLQ subject. Infinite redelivery of a
     poison message is an outage.
-- Long-running consumers send **`InProgress` (AckProgress)** heartbeats (~10s) to extend
-  `ack_wait` while work is legitimately in flight; a janitor re-queues genuinely stuck runs.
+- Long-running consumers send **`InProgress` (AckProgress)** heartbeats (well inside `ack_wait`) to
+  extend the deadline while work is legitimately in flight; a janitor job re-queues genuinely stuck
+  runs.
 
 ### Delivery Semantics
 
-- JetStream is **at-least-least-once** — consumers **must be idempotent**. Deduplicate with the
+- JetStream is **at-least-once** — consumers **must be idempotent**. Deduplicate with the
   message `Nats-Msg-Id` (publisher-set) and/or a data-layer unique key. The queue group is not
   the correctness guarantee; the idempotent write is.
 - Ack **after** successful processing, not before. Use `AckExplicit`. On a handled failure,
   `Nak` with a backoff delay; on an unrecoverable error, `Term` and publish to the DLQ.
-- Scheduled/background work is single-owner: an external k8s CronJob publishes a tick subject
-  (`billing.reconcile.tick`, `agent.janitor.tick`, `usage.matview.refresh`) → one queue-group
-  worker claims it via a data-layer atomic guard. No in-process `time.Ticker` in request tiers.
+- Scheduled/background work is single-owner: an external scheduler (k8s CronJob or equivalent)
+  publishes a tick subject (`<domain>.<job>.tick`) → one queue-group worker claims it via a
+  data-layer atomic guard. No in-process tickers/timers in request-serving tiers, where every
+  replica would fire its own copy.
 
 ### Operations
 
@@ -209,8 +221,10 @@ NATS) so events survive restarts and scale horizontally. DLQs exist for `ingesti
 
 ## Qdrant
 
-Vector store for hybrid (dense + sparse) retrieval. Uses **payload-isolated shared
-collections** with a documented re-shard/replication trigger.
+Vector store for dense and hybrid (dense + sparse) retrieval. The rules below assume
+**payload-isolated shared collections** — the usual multi-tenant choice. A collection-per-tenant
+design trades the filter discipline below for collection-count limits; either way, document the
+re-shard/replication trigger before you need it.
 
 ### Isolation & Data Model
 
@@ -242,8 +256,8 @@ collections** with a documented re-shard/replication trigger.
 
 ## MinIO / S3
 
-Object storage for uploads. Uses **direct-to-storage presigned uploads** to keep payloads off
-the app servers.
+Object storage for uploads. Prefer **direct-to-storage presigned uploads** to keep large payloads
+off the app servers.
 
 ### Access & Security
 
@@ -271,8 +285,9 @@ the app servers.
 
 ## Casdoor (OIDC / Identity)
 
-Identity provider for browser auth. Browser flow is **OIDC Authorization Code + PKCE (S256)**;
-the BFF verifies `id_token` via JWKS.
+Identity provider for browser auth. The rules below are written against Casdoor but apply to any
+OIDC provider: the browser flow is **Authorization Code + PKCE (S256)** and the server side (BFF or
+equivalent confidential client) verifies `id_token` via JWKS.
 
 ### Protocol & Verification
 
@@ -280,10 +295,10 @@ the BFF verifies `id_token` via JWKS.
   client secret in the SPA.
 - Always send and validate the **`state`** parameter (CSRF) and the PKCE `code_verifier`/
   `code_challenge`; reject callbacks with a missing or mismatched `state`.
-- The BFF verifies every `id_token` against Casdoor's **JWKS**: check signature with the
+- The server verifies every `id_token` against the provider's **JWKS**: check signature with the
   expected algorithm (`RS256`/`ES256`, never `none`), and validate `iss`, `aud`, `exp`, `iat`,
   and `nonce`. Cache JWKS with rotation handling; refetch on unknown `kid`.
-- Use exact, allowlisted `redirect_uri` values registered in Casdoor — no wildcards, no
+- Use exact, allowlisted `redirect_uri` values registered with the provider — no wildcards, no
   open-redirect via the return URL.
 
 ### Sessions After Login
@@ -291,22 +306,22 @@ the BFF verifies `id_token` via JWKS.
 - After verifying the token, mint an **opaque server-side session** in Redis (see Redis §)
   rather than storing the JWT in the browser. This gives instant revocation and no stale
   claims. Tokens are never placed in `localStorage`.
-- Local agents authenticate with a **scoped device PAT** (user + workspace, 90-day, revocable)
-  issued via `POST /devices/authorize`; the `workspace_id` derives from the PAT, never the
-  request body.
+- Non-browser clients (CLIs, local agents, devices) authenticate with a **scoped, revocable,
+  expiring PAT** rather than a password or a long-lived JWT. Derive the tenant from the token
+  itself, never from the request body — a client-supplied tenant id is a tenancy bypass.
 
 ### Operations
 
-- Casdoor's own admin credentials, DB, and signing keys are secrets managed outside the repo;
-  rotate signing keys periodically and handle `kid` rollover gracefully on the verifier side.
-- Run Casdoor behind TLS; restrict its admin console to internal networks / SSO.
+- The provider's own admin credentials, database, and signing keys are secrets managed outside the
+  repo; rotate signing keys periodically and handle `kid` rollover gracefully on the verifier side.
+- Run the provider behind TLS; restrict its admin console to internal networks / SSO.
 
 ---
 
 ## Caddy (Edge / Reverse Proxy)
 
-Edge reverse proxy (in front of the BFF, ahead of CloudFront). Handles TLS termination,
-routing, and security headers.
+Edge reverse proxy in front of the application (and typically behind a CDN). Handles TLS
+termination, routing, and security headers.
 
 ### TLS & HTTP
 
@@ -334,7 +349,7 @@ routing, and security headers.
 - **SSE/long-lived streams:** disable response buffering (`flush_interval -1`) and set generous
   read/idle timeouts on those routes so query/ingest/notification streams aren't cut off.
 - Add health-check upstreams (`health_uri`, `health_interval`) so Caddy stops routing to an
-  unhealthy BFF replica.
+  unhealthy upstream replica.
 - Apply **rate limiting** at the edge for auth and public endpoints (defense in depth with the
   app's own limiter).
 - Reload configuration gracefully (`caddy reload`) — zero-downtime; validate with
@@ -365,7 +380,7 @@ Before merging changes that touch a backing service, verify:
 - [ ] Durable data uses AOF; HA via Sentinel/Cluster
 - [ ] Counter mutations atomic (INCR/DECR/Lua); locks use `SET NX EX` + owner-checked delete
 - [ ] Every key has a TTL or is intentionally durable; `maxmemory` + correct eviction policy
-- [ ] `noeviction` on instances holding billing/session state
+- [ ] `noeviction` on instances holding durable state (balances, sessions, checkpoints)
 
 ### NATS JetStream
 - [ ] Stream retention/`max_age`/`max_bytes` set; `storage=file`

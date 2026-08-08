@@ -5,7 +5,7 @@ applyTo: '**/*.tsx,**/*.jsx,**/*.ts,**/*.js'
 
 # React Development Instructions
 
-Write idiomatic, performant React 19 + TypeScript for the Vite SPA. These instructions follow the
+Write idiomatic, performant React 19 + TypeScript. These instructions follow the
 official [React docs](https://react.dev/) and the
 [Vercel React Best Practices](https://vercel.com/blog/introducing-react-best-practices)
 ([rules source](https://github.com/vercel-labs/agent-skills/tree/main/skills/react-best-practices/rules)).
@@ -14,9 +14,10 @@ official [React docs](https://react.dev/) and the
 > Zustand, React Hook Form + Zod), see
 > [state-management.instructions.md](./state-management.instructions.md).
 
-> **Note on scope:** This project is a Vite SPA, not Next.js. Apply the client-side, bundle,
-> re-render, rendering, and JavaScript rules below. The Server Components / Server Actions rules
-> are referenced for completeness but only apply if/when SSR is introduced.
+> **Note on scope:** the client-side, bundle, re-render, rendering, and JavaScript rules apply to any
+> React app. Section 3 (Server-Side Performance) and the Server Components / Server Actions rules
+> apply only to SSR/RSC frameworks such as Next.js or Remix — skip them in a client-only SPA (Vite,
+> CRA) and revisit if SSR is introduced later.
 
 ## Core Principle: Optimize by Impact, Not by Instinct
 
@@ -67,7 +68,7 @@ Priority order (CRITICAL → LOW):
 - Keep import paths analyzable (static, literal) so the bundler can tree-shake
 - Audit bundle size when adding dependencies; prefer lighter alternatives and native APIs
 
-## 3. Server-Side Performance (only if SSR is added)
+## 3. Server-Side Performance (SSR / React Server Components only)
 
 - Parallelize data fetching across and within components; avoid nested sequential fetches
 - Deduplicate identical requests (e.g., React `cache`) instead of refetching per component

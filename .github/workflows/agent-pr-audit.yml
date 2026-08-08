@@ -65,7 +65,7 @@ env:
   META_PATHS_RE: '^(\.github/(skills|workflows|instructions|hooks)/|README\.md$|CHANGELOG\.md$|CLAUDE\.md$|\.gitignore$|install\.sh$)'
   # The subset of tooling that IS the enforcement. A waived PR touching these is weakening
   # the gates while exempt from them, so the waiver names it explicitly.
-  GATE_PATHS_RE: '(track-audit\.sh|track-report\.sh|track-compact\.sh|track-evidence-gate\.sh|track-guard\.sh|agent-pr-audit\.yml)'
+  GATE_PATHS_RE: '(track-audit\.sh|track-report\.sh|track-compact\.sh|track-brief\.sh|track-evidence-gate\.sh|track-guard\.sh|agent-pr-audit\.yml)'
 
 jobs:
   # ── Is this an agent PR? Decided from signals the agent does not all control. ──────────
@@ -121,7 +121,7 @@ jobs:
             mark "PR author '$AUTHOR' is a bot"
           fi
 
-          # 4 — an agent branch prefix (executing-parallel-tracks worktrees and similar).
+          # 4 — an agent branch prefix (sso-executing-parallel-tracks worktrees and similar).
           if printf '%s' "${HEAD_REF:-}" | grep -qiE "$AGENT_BRANCH_RE"; then
             mark "head branch '$HEAD_REF' matches the agent branch pattern"
           fi
