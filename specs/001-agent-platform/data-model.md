@@ -382,8 +382,12 @@ per-tenant, RBAC-scoped catalog (FR-012).
 | `scope` | jsonb | RBAC scope, per calling user |
 | `auth_kind` | enum | `tenant_service` (admin-configured) / `per_user_oauth` (personal, FR-052) |
 | `token_audience` | string (nullable) | Resource indicator / audience the `tenant_service` token is minted for (FR-114); NULL only when the provider's token model has no separable audience and the narrowest available scope is used instead — a connector with neither MUST fail registration |
+| `transport` | enum | `http` / `stdio` — decides whether the FR-178 authorization flow applies; `stdio` still takes vaulted credentials at launch (FR-178e) |
+| `allowed_issuers` | jsonb | Governance-signed set of authorization-server issuer URLs acceptable for this server (FR-178a). **Never populated from the server's own discovery metadata**; an issuer discovered outside this set fails closed as unadmitted |
+| `dcr_enabled` | bool | Dynamic Client Registration opt-in, default `false` (FR-178c); settable only for a server already admitted under FR-078/FR-113 |
 
 - **Audience restriction (FR-114)**: a connector whose provider cannot issue an audience-/resource-restricted token (or the narrowest equivalent scope) is rejected at the same governance gate as an over-broad permission scope (FR-078) — never registered with a tenant-wide credential as a fallback.
+- **Issuer admission (FR-178)**: `allowed_issuers` is tenant configuration under governance sign-off (FR-096) on the same footing as the FR-147 alias map — a server that could write it would be naming the party that mints the token used against it, which is FR-113's argument applied to the authorization path.
 
 ### Connector Authorization
 A per-user OAuth grant binding a `User` to a `Connector`, stored only in the

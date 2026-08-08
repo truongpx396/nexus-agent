@@ -91,6 +91,24 @@ prefix and a **deferred** tier advertised as name + description until loaded.
   registration rather than issued a tenant-wide credential as a fallback, because a
   vaulted-but-unrestricted token still lets a compromised connector replay it
   against a different upstream resource once injected at step 9.
+- **How that token is obtained (FR-178)**: for an HTTP-transport MCP server the
+  platform runs the client-side flow — `WWW-Authenticate` on `401` → RFC 9728
+  protected-resource metadata → RFC 8414 authorization-server metadata → PKCE
+  authorization-code with the RFC 8707 `resource` parameter on both requests.
+  **Discovery is advisory, never authority**: the acceptable issuer set per server
+  is tenant config under governance sign-off (FR-096) and an advertised issuer
+  outside it fails closed, because a server naming its own authorization server is
+  naming the party that mints the token used against it — FR-113's argument on the
+  authorization path. Dynamic client registration is **off by default** (an unvetted
+  FR-078 admission wearing an OAuth hat). A stdio server is exempt from the *flow*,
+  not from credential handling: its environment credentials still come from the
+  vault under the same audience restriction.
+- **Authorization is a precondition to this pipeline, not a substitute for it**
+  (FR-178f). A resource server validates a token; it cannot see the session's taint
+  state, the run's pinned autonomy level, or the digest an approver read. An MCP call
+  that is authenticated, audience-valid, and correctly scoped still walks every layer
+  below — which is the case a prompt-injected agent produces, and the one an
+  edge-only authorization design is structurally blind to.
 
 ## The three gates (fail-closed)
 
