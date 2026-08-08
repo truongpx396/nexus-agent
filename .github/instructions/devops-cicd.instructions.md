@@ -1,14 +1,17 @@
 ---
-description: 'Production practices for DevOps and CI/CD: Docker, multi-stage builds, Docker Compose, Makefiles, and GitHub Actions. Build, test, security-scan, and release standards for the AISAT-STUDIO stack (Go, Python/UV, React/Vite).'
+description: 'Production practices for DevOps and CI/CD: Docker, multi-stage builds, Docker Compose, Makefiles, and GitHub Actions. Build, test, security-scan, and release standards, with worked examples for Go, Python/UV, and Node/React toolchains.'
 applyTo: '**/Dockerfile,**/Dockerfile.*,**/*.Dockerfile,**/.dockerignore,**/docker-compose*.yml,**/docker-compose*.yaml,**/compose*.yml,**/compose*.yaml,**/Makefile,**/*.mk,**/.github/workflows/*.yml,**/.github/workflows/*.yaml,**/.github/actions/**'
 ---
 
 # DevOps & CI/CD — Production Practices
 
-Standards for containerizing, building, testing, and releasing AISAT-STUDIO. Applies to
-Dockerfiles, `.dockerignore`, Compose files, Makefiles, and GitHub Actions workflows across
-the three toolchains: **Go 1.23** (BFF/gateway/kernel, multi-entrypoint `cmd/{api,relay,worker}`),
-**Python 3.12 + UV** (LangGraph RAG, ingestion, MCP), and **React 19 + Vite** (SPA).
+Standards for containerizing, building, testing, and releasing a service. Applies to
+Dockerfiles, `.dockerignore`, Compose files, Makefiles, and GitHub Actions workflows.
+
+The principles are toolchain-independent; the worked examples use **Go**, **Python + UV**, and
+**Node/React** because those cover the compiled-binary, interpreted-with-lockfile, and
+static-asset build shapes respectively. Adapt the example to whichever toolchains the project
+actually uses, and ignore the sections for languages it does not.
 
 Complements [backing-services.instructions.md](./backing-services.instructions.md) (the
 services these images connect to), [security-and-owasp.instructions.md](./security-and-owasp.instructions.md)
@@ -100,12 +103,13 @@ ENTRYPOINT ["python", "-m", "app"]
   orchestrator/env at run time.
 - Add a `.dockerignore` (`.git`, `node_modules`, `.env*`, `__pycache__`, `dist`, `*.log`, test
   fixtures) so the build context stays small and secrets can't leak into the context.
-- Set a `HEALTHCHECK` (or rely on the orchestrator probe) that hits the app's `/livez`/`/readyz`.
+- Set a `HEALTHCHECK` (or rely on the orchestrator probe) that hits the app's liveness/readiness
+  endpoints (e.g. `/livez` and `/readyz`).
 - Make the root filesystem read-only where possible (`--read-only` + explicit writable
   `tmpfs`); drop Linux capabilities not needed.
-- Pin a specific `EXPOSE` port and run one concern per image. For the multi-entrypoint Go image,
-  build once and select `cmd/api`, `cmd/relay`, or `cmd/worker` via the entrypoint/command — one
-  image, N roles (mirrors the Python one-image/N-roles pattern).
+- Pin a specific `EXPOSE` port and run one concern per image. Where several roles share a codebase
+  (api / worker / relay), prefer **one image, N roles**: build once and select the role via the
+  entrypoint or command rather than maintaining a Dockerfile per role.
 - **Scan every image** in CI (Trivy/Grype) for OS + dependency CVEs; fail on HIGH/CRITICAL with a
   triaged allowlist. Generate an SBOM (Syft) and attach provenance/attestations for releases.
 - Build multi-arch (`linux/amd64,linux/arm64`) with `docker buildx` when targets require it.
@@ -116,9 +120,9 @@ ENTRYPOINT ["python", "-m", "app"]
 
 - Compose is for **local development and CI integration tests**, not production orchestration
   (that's k8s). Keep prod concerns (autoscaling, secrets manager) out of it.
-- Pin service image tags; don't use `latest`. Mirror the backing services from
-  [backing-services.instructions.md](./backing-services.instructions.md): Postgres, Redis,
-  NATS (JetStream enabled), Qdrant, MinIO, Casdoor, Caddy.
+- Pin service image tags; don't use `latest`. Compose should mirror the real backing services the
+  app talks to — see [backing-services.instructions.md](./backing-services.instructions.md) for the
+  per-service configuration rules.
 - Add **healthchecks** to every backing service and gate app startup with
   `depends_on: { condition: service_healthy }` so the app doesn't race a not-ready database.
 - Never hardcode credentials — use an `.env` file (gitignored) with a committed `.env.example`
@@ -166,6 +170,9 @@ volumes:
   `down`, `migrate`, `ci`. `make ci` runs the full gate locally = what the pipeline runs.
 - Prefer real dependencies (prerequisites) over manual ordering; use variables for versions/tags
   (`IMAGE_TAG ?= $(shell git rev-parse --short HEAD)`).
+
+Example — the directory names and per-language commands are illustrative; keep the structure and
+substitute the project's own layout and tools:
 
 ```makefile
 SHELL := bash

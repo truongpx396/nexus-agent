@@ -1,11 +1,38 @@
 ---
-description: 'Guidelines for creating high-quality Agent Skills for GitHub Copilot'
-applyTo: '**/skills/**/SKILL.md'
+description: 'Authoring guide for Agent Skills (SKILL.md) — structure, frontmatter, progressive disclosure, bundled resources, validation checklist. Read on demand when a human is designing or authoring a skill; carries no applyTo, so it is never auto-injected and G2 never requires it.'
 ---
 
 # Agent Skills File Guidelines
 
 Instructions for creating effective and portable Agent Skills that enhance GitHub Copilot with specialized capabilities, workflows, and bundled resources.
+
+## Scope — When This File Is Loaded
+
+**This is a design-time authoring guide, invoked explicitly. It is not a standing constraint on any
+diff that happens to touch a `SKILL.md`.** It carries **no `applyTo` glob** — the second file in
+`.github/instructions/` deliberately in that category, alongside
+[code-review-generic.instructions.md](./code-review-generic.instructions.md) — so it is never
+auto-injected by an editor, never part of the `applyTo`-matched governance bundle, and never required
+by `track-audit.sh` check **G2**.
+
+**Read it when you are designing or authoring a skill** — a human asking for a new skill, a
+restructure of an existing one, or a review of whether a skill's shape is right. That is a deliberate
+act: name this file, read it, then build. Do not expect it to arrive on its own.
+
+Why it is scoped this way:
+
+- **The trigger is the intent, not the path.** Most diffs that touch a `SKILL.md` are ordinary edits —
+  fixing a step, correcting a command, updating a version. Those need the surrounding repo's
+  conventions, not ~19k tokens of guidance on how to structure a skill from scratch.
+- **It is a manual, not a rule set.** Directory layouts, frontmatter templates, bundling patterns, and
+  a validation checklist are reference material you consult while designing. In an implementation
+  brief for an unrelated change they are pure context pressure — the same reasoning that keeps the
+  review rubric out of the maker phase.
+
+**Related:** [ai-agent-engineering.instructions.md](./ai-agent-engineering.instructions.md) (how the
+agent around the skill should be built) and
+[ai-agent-security.instructions.md](./ai-agent-security.instructions.md) (both **do** carry `applyTo`
+globs that match `**/skills/**/SKILL.md`, and both remain in scope for skill work).
 
 ## What Are Agent Skills?
 
@@ -19,14 +46,20 @@ Key characteristics:
 
 ## Directory Structure
 
-Skills are stored in specific locations:
+Skills are stored in specific locations. **Which path is canonical depends on the agent surface, not
+on recency** — `.claude/skills/` is the primary location for Claude Code, while `.github/skills/` is
+the primary location for Copilot:
 
-| Location | Scope | Recommendation |
-|----------|-------|----------------|
-| `.github/skills/<skill-name>/` | Project/repository | Recommended for project skills |
-| `.claude/skills/<skill-name>/` | Project/repository | Legacy, for backward compatibility |
-| `~/.github/skills/<skill-name>/` | Personal (user-wide) | Recommended for personal skills |
-| `~/.claude/skills/<skill-name>/` | Personal (user-wide) | Legacy, for backward compatibility |
+| Location | Scope | Primary for |
+|----------|-------|-------------|
+| `.github/skills/<skill-name>/` | Project/repository | GitHub Copilot (VS Code, CLI, coding agent) |
+| `.claude/skills/<skill-name>/` | Project/repository | Claude Code |
+| `~/.github/skills/<skill-name>/` | Personal (user-wide) | GitHub Copilot |
+| `~/.claude/skills/<skill-name>/` | Personal (user-wide) | Claude Code |
+
+Copilot also reads `.claude/skills/` for backward compatibility, so a single skill directory can
+serve both surfaces. For a skill that must work on both, install to both paths (or symlink one to the
+other) rather than assuming either agent will find the other's directory.
 
 Each skill **must** have its own subdirectory containing at minimum a `SKILL.md` file.
 
@@ -37,6 +70,7 @@ Each skill **must** have its own subdirectory containing at minimum a `SKILL.md`
 ```yaml
 ---
 name: webapp-testing
+version: 0.2.0
 description: 'Toolkit for testing local web applications using Playwright. Use when asked to
 verify frontend functionality, debug UI behavior, capture browser screenshots,
 check for visual regressions, or view browser console logs. Supports Chrome,
@@ -49,7 +83,12 @@ license: Complete terms in LICENSE.txt
 |-------|----------|-------------|
 | `name` | Yes | Lowercase, hyphens for spaces, max 64 characters (e.g., `webapp-testing`) |
 | `description` | Yes | 10–1024 characters, clear capabilities AND use cases, wrapped in single quotes |
+| `version` | No | Semver (`MAJOR.MINOR.PATCH`). Recommended for any skill that is distributed or installed into other repos — it is the only way a consumer can tell which revision they have |
 | `license` | No | Reference to LICENSE.txt (e.g., `Complete terms in LICENSE.txt`) or SPDX identifier |
+
+Unrecognized front-matter keys are ignored by the agent rather than rejected, so a field like
+`version` is safe to add. Only `name` and `description` affect discovery — everything else is metadata
+for humans and installers.
 
 ### Description Best Practices
 
@@ -362,6 +401,7 @@ Before publishing a skill:
 
 - [ ] `SKILL.md` has valid frontmatter with `name` and `description`
 - [ ] `name` is lowercase with hyphens, ≤64 characters
+- [ ] `version` set (semver) if the skill is distributed or installed into other repos
 - [ ] `description` clearly states **WHAT** it does, **WHEN** to use it, and relevant **KEYWORDS**
 - [ ] `description` is concise and keyword-dense (respects context budget)
 - [ ] Body focuses on information Copilot wouldn't know from training data

@@ -1,18 +1,35 @@
 ---
-description: 'Generic code review instructions that can be customized for any project using GitHub Copilot'
-applyTo: '**'
-excludeAgent: ["coding-agent"]
+description: 'Code review rubric — priorities, quality/security/testing/architecture checks, and comment format. Loaded on demand by the code-review step (requesting-code-review); not an authoring-time instruction file.'
 ---
 
 # Generic Code Review Instructions
 
-Comprehensive code review guidelines for GitHub Copilot that can be adapted to any project. These instructions follow best practices from prompt engineering and provide a structured approach to code quality, security, testing, and architecture review.
+Comprehensive code review guidelines that can be adapted to any project. These instructions provide a structured approach to code quality, security, testing, and architecture review.
+
+## Scope — When This File Is Loaded
+
+**This is a reviewer rubric, not an authoring rule set.** It is deliberately the one file in
+`.github/instructions/` with **no `applyTo` glob**, so it is *not* auto-injected while code is being
+written. It is read on demand at the review step — `requesting-code-review` and the stage-2
+reviewer — and its content is passed into that reviewer's brief.
+
+Why it is scoped this way:
+
+- **It duplicates the authoring files.** The language and framework instructions
+  (`go`, `python`, `reactjs`, `state-management`) already carry the same quality rules in
+  language-specific form, and `security-and-owasp.instructions.md` is authoritative on security.
+  Loading this file during authoring pays ~3.7k tokens to restate them generically.
+- **A rubric is for judging finished work.** Its output format (severity prefixes, comment
+  templates) applies to review comments and is noise in an implementation brief.
+
+**Precedence:** on any security question, `security-and-owasp.instructions.md` wins over the Security
+Review section below. On language specifics, the matching language file wins. This file governs
+review *process* — priorities, comment structure, what to systematically check — and fills gaps the
+others leave.
 
 ## Review Language
 
-When performing a code review, respond in **English** (or specify your preferred language).
-
-> **Customization Tip**: Change to your preferred language by replacing "English" with "Portuguese (Brazilian)", "Spanish", "French", etc.
+When performing a code review, respond in **English** unless the project specifies otherwise.
 
 ## Review Priorities
 
@@ -409,10 +426,16 @@ When performing a code review, apply these prompt engineering principles from th
 
 ## Project Context
 
-This is a generic template. Customize this section with your project-specific information:
+This section is intentionally empty in the shipped file.
 
-- **Tech Stack**: [e.g., Java 17, Spring Boot 3.x, PostgreSQL]
-- **Architecture**: [e.g., Hexagonal/Clean Architecture, Microservices]
-- **Build Tool**: [e.g., Gradle, Maven, npm, pip]
-- **Testing**: [e.g., JUnit 5, Jest, pytest]
-- **Code Style**: [e.g., follows Google Style Guide]
+**Do not treat the fields below as facts about the project** — they are prompts for a human to fill
+in once, per repository. Until they are filled in, derive the project's real stack from the
+repository itself (lockfiles, build config, CI workflows) rather than assuming anything here.
+
+Fill in and commit:
+
+- **Tech Stack**: _(languages, runtime versions, primary frameworks, datastores)_
+- **Architecture**: _(e.g. layered, hexagonal, modular monolith, microservices)_
+- **Build Tool**: _(the command a reviewer runs to build and test)_
+- **Testing**: _(frameworks, where tests live, coverage expectations)_
+- **Code Style**: _(formatter/linter that is authoritative, so review does not relitigate style)_

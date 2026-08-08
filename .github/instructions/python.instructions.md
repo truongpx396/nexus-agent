@@ -9,8 +9,11 @@ Follow idiomatic, modern Python practices when writing Python code. These instru
 target Python 3.12+ and are based on [PEP 8](https://peps.python.org/pep-0008/),
 [PEP 20 (The Zen of Python)](https://peps.python.org/pep-0020/), the
 [official typing docs](https://docs.python.org/3/library/typing.html), and current
-community standards. This project uses [UV](https://docs.astral.sh/uv/) for environment
-and dependency management.
+community standards.
+
+The environment/dependency section assumes [UV](https://docs.astral.sh/uv/). If the project already
+uses Poetry, pip-tools, or plain pip, follow the tool it uses — do not migrate a working project as
+a side effect of an unrelated change — and apply every other section unchanged.
 
 ## General Instructions
 
@@ -118,10 +121,20 @@ and dependency management.
 - Attach contextual fields (request ID, trace ID, user ID) instead of formatting them into the message
 - Choose appropriate levels (`debug`, `info`, `warning`, `error`); reserve `error` for actionable failures
 - Never log secrets, tokens, passwords, or PII
-- Use OpenTelemetry / Langfuse / Opik instrumentation for tracing LLM and pipeline operations, consistent with the project's observability stack
+- Trace LLM and pipeline operations with the project's existing observability stack (OpenTelemetry, and Langfuse or similar for LLM-specific spans); match what is already wired up rather than adding a second tracer
 - Either log an error or raise it — avoid doing both at every layer
 
-## LLM, RAG, and MCP (project-specific)
+## LLM, RAG, and MCP
+
+Apply this section only when the project builds LLM-backed features; skip it otherwise.
+
+> For the security half of this surface — tool scoping, MCP trust, agent identity, memory/RAG
+> poisoning, approval gates, token/cost ceilings — follow
+> [ai-agent-security.instructions.md](./ai-agent-security.instructions.md), which is authoritative
+> on agentic security. For the engineering half — control loop, durable state, context budgets, tool
+> design, evals, telemetry — follow
+> [ai-agent-engineering.instructions.md](./ai-agent-engineering.instructions.md). The rules below are
+> the Python mechanics.
 
 - Validate all LLM inputs and outputs at the boundary; treat model output as untrusted (see Security)
 - Use `pydantic` schemas to parse and validate structured LLM responses; reject non-conforming output
