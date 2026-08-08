@@ -221,7 +221,7 @@ principles). Every design decision maps back to one of them:
   egress route, not an optimization.
 - 🔌 **Optional ecosystem adapters, one authority boundary** — model gateways
   (LiteLLM, OpenRouter, vLLM/Ollama), LLM-observability backends (Langfuse,
-  Arize/Phoenix, Braintrust, Grafana, Datadog), eval/dataset platforms, and
+  Opik, Arize/Phoenix, Braintrust, Grafana, Datadog), eval/dataset platforms, and
   durable-execution engines (Temporal, Restate, Inngest) all attach through
   existing ports by configuration — and the platform runs complete with every one
   of them off. Each may supply transport, capacity, storage, or presentation;
@@ -233,7 +233,7 @@ principles). Every design decision maps back to one of them:
   subject-level deletion rather than on cache breakpoints, and a proxy that
   quietly stops reporting cache-read tokens withdraws the cache-read claim
   instead of faking it. Evaluation tooling attaches in two shapes and never one:
-  a **hosted platform** (Langfuse, Braintrust) is an adapter that stores corpora
+  a **hosted platform** (Langfuse, Opik, Braintrust) is an adapter that stores corpora
   and receives scores; a **grader library** (DeepEval, Promptfoo, Ragas) is a
   pinned in-tree dependency supplying metrics *beneath* the platform's trial
   statistics — because no such library implements k-trial intervals or a
@@ -270,7 +270,7 @@ principles). Every design decision maps back to one of them:
 | 🔐 **Secrets & keys** | External secrets vault (injection at tool-execution time; the model sees a handle) + KMS/HSM — per-tenant content-encryption keys with BYOK, and a **sign-only** audit-chain signing key the data plane cannot read |
 | 🌍 **Web fetch & documents** | crawl4ai for web, a MarkItDown-class converter for PDF/DOCX/PPTX/XLSX — both **in-sandbox**, both returning clean chunked markdown, both taint-declared untrusted |
 | 🧮 **Retrieval (when files stop being enough)** | pgvector by default — it inherits RLS, region pinning, PITR, and the erasure path; Qdrant/Weaviate attach as optional `retrieval` adapters that must re-earn all four |
-| 🔭 **Observability** | OpenTelemetry SDK — OTLP is the single write path; Langfuse / Arize / Braintrust / Grafana / Datadog are optional export targets (content-free) |
+| 🔭 **Observability** | OpenTelemetry SDK — OTLP is the single write path; Langfuse / Opik / Arize / Braintrust / Grafana / Datadog are optional export targets (content-free) |
 | 🔗 **Connectors** | MCP client for external systems of record |
 | 🚢 **Packaging** | OCI images + Helm chart / Terraform module; KEDA/HPA autoscale on queue depth |
 

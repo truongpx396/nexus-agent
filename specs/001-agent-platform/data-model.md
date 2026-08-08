@@ -280,7 +280,7 @@ recorded capability matrix (FR-131, FR-133). Configuration, never a kernel fork.
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `adapter_id` | string (PK) | e.g. `litellm`, `temporal`, `langfuse-otlp`, `pgvector`, `qdrant`, `braintrust`, `agui`, `skillhub` |
+| `adapter_id` | string (PK) | e.g. `litellm`, `temporal`, `langfuse-otlp`, `opik-otlp`, `pgvector`, `qdrant`, `braintrust`, `agui`, `skillhub` |
 | `port` | enum | `provider` / `queue` / `plan_runner` / `telemetry_export` / `sandbox` / `connector` / `retrieval` / `prompt_source` / `vault` / `eval` / `surface` / `skill_source` — the **closed, normative** set of FR-131; a framework with no port here has no admission path |
 | `version` | string | Pinned; a bump is an eval-gated dependency deploy (FR-078) |
 | `capabilities` | jsonb | Per contract feature: `supported` / `degraded` / `unsupported`, on the dimensions declared **for this `port`** (FR-133) — see below |
