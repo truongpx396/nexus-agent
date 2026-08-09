@@ -36,7 +36,7 @@ type Plan = {
   version: int                       // immutable; a change is a new version
   status: "draft" | "gated" | "enabled" | "retired"
   steps: Step[]
-  cost_envelope_usd: numeric         // reserved before step 1 (FR-099, FR-083)
+  cost_envelope_amount: numeric      // reserved before step 1 (FR-099, FR-083)
 }
 
 type Step = {
@@ -95,7 +95,7 @@ through the same gates; in-flight runs finish on the version they started with
 
 ## Execution semantics
 
-- **Cost**: the plan reserves `cost_envelope_usd` before step 1 (FR-083); steps
+- **Cost**: the plan reserves `cost_envelope_amount` before step 1 (FR-083); steps
   and any fan-out children draw from that envelope (FR-099). Envelope exhaustion
   terminates `cost_exhausted` with the partial artifact (FR-067).
 - **Delegation**: a `delegate_fanout` step calls `Delegation.delegate` per

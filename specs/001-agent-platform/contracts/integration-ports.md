@@ -291,8 +291,19 @@ An adapter is enabled for a tenant only when:
   dimensions are undeclared admits no adapters — one provider-shaped list says
   nothing about a store or a gate;
 - no claimed success criterion depends on a capability recorded as degraded or
-  unsupported; and
-- governance sign-off exists, as for any new tool or connector (FR-096).
+  unsupported;
+- governance sign-off exists, as for any new tool or connector (FR-096); and
+- the tenant's **plan entitles** the adapter (FR-184). This is a bound, not an
+  authority: an entitlement resolves only `DENY` or `DEFER`, never `ALLOW`. A
+  plan upgrade makes an adapter *eligible* and enables nothing on its own — the
+  four criteria above still hold — and no plan tier substitutes for a passing
+  conformance run, because a capability matrix is a measurement and a plan is a
+  contract.
+
+A plan downgrade that removes an entitlement **disables** the adapters it covered,
+as a typed, audited configuration change. An entitlement enforced on the way in
+and ignored on the way out is advisory, and the tenant keeps a capability it no
+longer holds.
 
 A capability regression on an adapter version bump is a **failed dependency
 deploy** (FR-078): revert to the pinned prior version. Undeclared partial support

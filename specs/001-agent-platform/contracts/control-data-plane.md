@@ -18,8 +18,10 @@ older data plane during a rainbow rollout — FR-026).
 | AuthN (SSO/OIDC), RBAC (FR-029, FR-035) | Kernel loop execution (FR-001) |
 | Rate limiting, admission control (FR-041, FR-049) | Sandbox pool, tool execution (FR-047) |
 | Budget **reservation** + ceilings (FR-017, FR-083) | Local hard per-run budget enforcement (FR-083) |
+| Credit ledger, balance, period close, restatement (FR-182, FR-183) | Emits usage + cost records upstream; never posts to the ledger itself |
+| Plan / entitlement resolution — ceilings, quotas, included credit (FR-184) | Enforces the resolved ceilings and quotas locally |
 | Model routing decision (FR-037, FR-076) | Provider/model calls (FR-027) |
-| Price book distribution (FR-084) | Memory read/write (FR-019) |
+| Price book + meter registry distribution (FR-084, FR-179, FR-181) | Memory read/write (FR-019) |
 | Eval / skill / MCP catalog (FR-042) | Event-log append, checkpoints (FR-024) |
 | Approval policy + approver identity/authz (FR-105, FR-109) | Approval **enforcement** at the tool boundary; digest re-verify (FR-103) |
 | Approval routing, reminder, escalation — **filtered by surface capability** (FR-108, FR-155) | Approval context rendering under `local` mode (FR-104) |
@@ -38,7 +40,7 @@ leaves it, and nothing else:
 | Leaves the boundary | Never leaves |
 |---------------------|--------------|
 | Identifiers (`tenant_id`, `session_id`, `user_id`, `tool_id`, `model_id`) | Prompts, model output, tool arguments, tool results |
-| Counts and measures (token classes, latency, cost) | Memory content, retrieved documents, artifacts |
+| Counts and measures (token classes, meter quantities, latency, cost) | Memory content, retrieved documents, artifacts |
 | Digests and signatures (audit chain, approved-input digests) | Any plaintext an event payload contains |
 | Typed reasons (terminal reason, failure class, reclaim reason) | Secrets, connector tokens (never leave the vault at all) |
 | **Approval context package — only when `approval_context_mode = upstream`** | The approval context package under `local` mode (default for BYOC) |
@@ -94,10 +96,12 @@ Request:
     submitting_principal_id,                         // THIS turn's authority — not the thread's (FR-156)
     audience_ref?,                                   // shared conversation: bounds delivery + memory (FR-156)
     catalog_manifest_digest,                         // the resolvable tool universe (FR-148)
-    input, budget: { per_task_usd }, autonomy_level }
+    input, budget: { per_task_amount, currency }, autonomy_level }
 Response 202:
   { session_id, status: "queued" }
-Errors: 402 budget_exhausted | 429 at_capacity(Retry-After) | 403 rbac_denied
+Errors: 402 budget_exhausted   // the safety ceiling (FR-083)
+      | 402 insufficient_credit // the commercial balance (FR-182) — distinct
+      | 429 at_capacity(Retry-After) | 403 rbac_denied
       | 409 region_conflict   // placement outside the tenant's pinned region (FR-091)
       | 403 principal_kind_not_admitted   // agent ingress on a surface not declared for it (FR-158)
       | 403 identity_unverified           // no verified Surface Identity for the submitter (FR-055, FR-156)
@@ -181,31 +185,98 @@ Emits: { seq, schema_version, type, tool_id?, terminal_reason?, ts }
 ### `ReserveBudget(v1)` (FR-083) — **called before every model call**
 ```
 POST /v1/budget/reservations
-  { session_id, tenant_id, turn_seq, estimated_input_tokens,
+  { session_id, tenant_id, turn_seq, chunk_seq, estimated_input_tokens,
     reserved_output_tokens, model_id, price_book_version }
-Response 200: { reservation_id, granted_usd, ttl_seconds }
-Errors: 402 would_exceed_ceiling   // refuse BEFORE the tokens are spent
+Response 200: { reservation_id, granted_amount, currency, counter_epoch,
+                ttl_seconds, decision_id }
+Errors: 402 would_exceed_ceiling      // safety ceiling  -> cost_exhausted
+                { deciding_budget_id, resolved_scope }   // WHICH budget refused
+        402 insufficient_credit       // credit balance  -> credit_exhausted
+        503 counter_unavailable       // fail closed, see below
 ```
+- **Every resolution emits a `budget_decision`** (FR-188) — `allow` / `refuse_ceiling`
+  / `refuse_credit` / `degrade` / `skip` — carrying its reason, the resolved scope
+  tuple, and the deciding budget. A `refuse_ceiling` **names which budget refused**,
+  selected by `precedence` among those breached, because an operator handed an
+  arbitrary one of several simultaneously-breached budgets cannot tell which
+  constraint to change (FR-190).
+- **A `skip` is a decision, not an absence.** Where no budget matches the scope,
+  enforcement is disabled, the price is unresolvable, or the provider is exempt,
+  the gate records `skip` with that reason. It produces neither a cost record nor
+  a refusal, so without this record an unenforced ceiling is indistinguishable
+  from a ceiling with room — and the skip rate alerts on its own signal, since
+  FR-186 requires the gate to fail closed and this is what proves it does.
+- **Every applicable budget binds** (FR-190): the reservation is admitted only when
+  it satisfies *all* budgets whose scope tuple matches, so the most restrictive wins
+  by construction and a narrow permissive budget can never widen a broad restrictive
+  one.
 - Held against an **atomic** per-tenant and per-task counter, so concurrent
   sessions in one tenant cannot collectively overshoot in the window before usage
-  is reported. A `402` terminates the run with `cost_exhausted`.
+  is reported.
+- **Two independent refusals that must both pass** (FR-182): `would_exceed_ceiling`
+  is the operator's safety ceiling (FR-083) and terminates `cost_exhausted`;
+  `insufficient_credit` is the customer's balance and terminates
+  `credit_exhausted`. Neither is derived from the other — collapsing them makes a
+  ceiling adjustment a billing event and a credit grant a safety-control change.
 - The worker additionally enforces a **local hard per-run budget synchronously**,
   so enforcement never depends on this round trip completing.
 - Reservations are TTL-bounded: a crashed worker's hold is released, not stranded.
+- `chunk_seq` allows a reservation to be taken as a **slice** of the worst case
+  and re-reserved as consumption approaches it, so a tenant near its ceiling is
+  not refused work that would have fit (FR-187). A chunk exhausted mid-stream
+  re-reserves or terminates — it never continues unreserved.
+- `counter_epoch` is the atomic counter's generation, validated by the caller on
+  every reservation. An unrecognized epoch means the counter restarted **empty**
+  and reads as "no spend yet"; it is treated as `counter_unavailable`, never as
+  zero. While unavailable, new calls for a tenant with a finite ceiling are
+  refused and in-flight runs continue under the worker-local budget (FR-186).
 
 ### `ReportCost(v1)` (FR-016, FR-084) — reconciles a reservation
 ```
 POST /v1/telemetry/cost
   { session_id, tenant_id, user_id, agent_id, surface, turn_seq,
-    reservation_id,
+    reservation_id, outcome, usage_unreported,
     input_tokens_uncached, input_tokens_cache_read, input_tokens_cache_write,
-    output_tokens, price_book_version, cost_usd, latency_ms, model_id,
-    parent_session_id? }
+    output_tokens, price_book_version, override_version?, currency, cost_amount,
+    list_amount, is_cash, latency_ms, model_id, parent_session_id?,
+    root_session_id, depth }
 ```
 - Token counts are **split by class** — the FR-014/SC-003 cache-read rate is
   derived from these measurements, not estimated.
 - Actuals replace the hold; the unused remainder is released. Rolling sums are a
   reconciliation and reporting path, **not** the enforcement path.
+- **Every call that reached the provider is reported**, with `outcome` typed
+  (`completed` / `failed` / `truncated` / `cancelled` / `timed_out`) — a provider
+  bills a stream that errored after emitting tokens, and retried attempts are
+  distinct reports rather than folded into the one that succeeded (FR-185).
+  `usage_unreported: true` reconciles at the reserved worst case rather than
+  releasing the hold, and its rate is a per-adapter health signal (FR-133).
+- `cost_amount` is carried at the **rate's** scale and is an estimate for control
+  purposes; the authoritative figure for a period is recomputed from raw
+  quantities at close (FR-180, FR-183). `list_amount` + `is_cash: false` carries
+  entitlement-billed usage so showback does not depend on which backend served
+  the call (FR-165, FR-181).
+
+### `ReportUsage(v1)` (FR-179) — non-token meters
+```
+POST /v1/telemetry/usage
+  { meter_id, meter_version, quantity, resource_ref,
+    window_start, window_end, session_id?, tenant_id, user_id?, agent_id?,
+    surface?, root_session_id?, depth?, price_book_version, currency,
+    cost_amount, list_amount, is_cash, reservation_id? }
+```
+- Sandbox CPU- and wall-clock-seconds, stored byte-months, egress, tool and
+  connector invocations. `quantity` is an **exact integer** in the meter's unit;
+  money is derived from it, never the reverse (FR-180).
+- `reservation_id` is set only for a `reservable` meter. A `duration` or `level`
+  meter is bounded by the hard limits it already carries (FR-047, FR-059) and
+  reconciled into the ceiling at release — the ceiling is **post-hoc for those
+  meters by declaration**, rather than claiming a pre-spend guarantee it cannot
+  keep (FR-179).
+- Same outbox, same idempotency key, same attribution dimensions, and the same
+  posting to the ledger as `ReportCost` — a meter recorded outside that contract
+  is the blind spot FR-165 closes for model calls, arriving under an
+  infrastructure component's name.
 - **This call is a shipper, not the record** (FR-124). The cost record is appended
   to the event log in the same transaction as the turn and delivered from a
   **durable outbox**: at-least-once, idempotent on
