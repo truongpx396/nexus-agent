@@ -389,6 +389,12 @@ not measurable from the designed data.
   caps are not dollars across a routing fleet); optimistic accounting with
   after-the-fact billing correction (rejected — a hard ceiling is a safety
   control, not an invoice).
+- **Still true after §34**: FR-182's credit ledger does **not** reverse this. The
+  ceiling stays a safety control and the balance is a second, independent
+  commercial control beside it — both must pass, they refuse with different typed
+  reasons (`cost_exhausted` vs `credit_exhausted`), and neither is computed from
+  the other. What §34 adds is the invoice this section correctly declined to make
+  the ceiling into.
 
 ## 17. Cost measurement granularity and price stability
 
@@ -1065,6 +1071,88 @@ model call on every event, the exact hot-path cost FR-165 exists to bound); and
 sourcing hook definitions from descriptor contents (rejected — it is the FR-113
 tool-poisoning surface arriving through the governance door).
 
+## 33. Domain portability of the permission and approval vocabularies
+
+- **Decision**: The two vocabularies the permission chain is *written in* are
+  tenant data, not platform enums. The Gate-1 permission set is a **named,
+  versioned, tenant-scoped `Tool Profile`** naming fully-qualified tool identities
+  (FR-176), and the **effect class** an approval scopes on, an approval policy
+  tiers on, and a context package leads with is a **named, versioned,
+  tenant-extensible taxonomy** (FR-177). Both are admitted under governance
+  sign-off, and neither can widen what the per-invocation safety check or the Rule
+  of Two already refused — extensibility is in the *naming*, never in the
+  authority. The MCP **client-side authorization flow** that mints the
+  audience-restricted tokens FR-114 demands is specified end to end (FR-178).
+- **Rationale**: A fixed enum of platform-shaped capability categories
+  (`read`/`write`/`exec`) or effect classes (`payment`/`delete`/`external_send`/
+  `prod_change`/`other`) makes the vocabulary a platform-code constant, so a new
+  domain cannot be expressed without a kernel change — which is precisely the
+  per-customer fork the constitution's "configuration, not forks" rule forbids. And
+  FR-114 stated the *property* a token must hold while FR-150 stated that protocol
+  change must not weaken it; neither stated how the token is acquired, leaving the
+  acquisition path — where the trust decisions actually are — unspecified.
+- **Alternatives considered**: A wider fixed enum (rejected — it postpones the
+  fork rather than removing it, and every widening is a kernel release); free-form
+  tenant strings with no versioning (rejected — an approval scope written against
+  an unversioned class name cannot be re-verified at execute, which is FR-103's
+  whole mechanism); letting a tenant taxonomy grant capability rather than only
+  name it (rejected — it would make a tenant-editable row a path around Gate 3).
+
+## 34. Billing: credit ledger, non-token metering, and the money contract
+
+- **Decision**: Split the cost path into a **safety** half and a **commercial**
+  half that must both pass and never merge. The safety half is unchanged —
+  reserve-then-reconcile against an atomic counter (FR-083), now epoch-marked and
+  treated as a **cache over durable truth** rebuildable from committed cost records
+  plus open reservations (FR-186), with every resolution recorded as a typed
+  `budget_decision` including the `skip` where the gate declined to enforce
+  (FR-188). The commercial half is new: an **append-only credit ledger** of
+  immutable typed entries over dated **lots** consumed in a declared deterministic
+  order, balance computed as a fold, corrections posted as compensating entries
+  (FR-182); a versioned effective-dated **`Billing Plan`** naming billable meters,
+  ceilings, quotas, included credit, and entitlements (FR-184); and **billing
+  periods that close and stay closed**, late records posting as adjustments in the
+  open period (FR-183). Underneath both: metering generalized to
+  **`(meter, quantity, unit)`** with a declared accrual mode and only `reservable`
+  meters enforceable pre-spend (FR-179); money **derived** from exact integer
+  quantities with an explicit currency, a declared scale, and rounding **once at
+  the boundary the amount is asserted at** (FR-180); a price book keyed
+  `(meter, priced subject, effective range)` carrying banded rates, modifiers,
+  surcharges, and list-vs-effective pricing (FR-181) with versioned per-tenant
+  overrides under governance sign-off (FR-189); budgets resolved over a **scope
+  tuple** where every applicable budget binds and precedence only decides which is
+  *named* in the refusal (FR-190); a cost record for **every call that reached the
+  provider** carrying a typed outcome, retries as distinct records (FR-185); and
+  reservation pessimism **bounded** by chunking, envelope draw-down, and an
+  interactive minimum slice (FR-187).
+- **Rationale**: §16's conclusion — "a hard ceiling is a safety control, not an
+  invoice" — remains correct and is **not** reversed here; FR-182 does not turn the
+  ceiling into a balance, it adds a second, independent control beside it, which is
+  why a tenant at zero balance refuses `credit_exhausted` and a tenant at its
+  ceiling refuses `cost_exhausted`. Collapsing them would make an operator's
+  ceiling adjustment a billing event. The seams are the expensive part: a balance
+  retrofitted onto spend already settled is the mutable-column failure the event
+  log already refuses, and a cost record that never carried a currency, an outcome,
+  or the plan version that made it billable cannot be repaired later. Comparative
+  control: GoClaw's `usage_cap_*` subsystem independently arrived at the same
+  atomic reserve-then-reconcile shape, which makes it useful evidence for what was
+  *missing* here — individual gate-decision records, tenant price overrides, and
+  budget scopes beyond per-task/per-tenant.
+- **Alternatives considered**: A mutable `balance` column (rejected — unauditable,
+  unreplayable, and lost under a concurrent debit); collapsing ceiling and balance
+  into one control (rejected — see above); rounding per cost record and summing
+  (rejected — a per-1k-token rate carries more decimal places than any settlement
+  currency's minor unit, so the sum over millions of records diverges from the same
+  period recomputed from raw quantities and FR-093's reconciliation then fails
+  against the platform's own data; FR-093 was amended accordingly); mutating a
+  tenant override in place (rejected — it re-breaks the reproducibility FR-084
+  establishes even where the catalog beneath it is versioned); a highest-precedence
+  budget that wins *alone* (rejected — a narrow permissive budget would silently
+  override a broad restrictive one, which is how a per-agent exception becomes a
+  tenant-wide one); treating `enforcement_disabled` as a supported deployment
+  posture (rejected — recording an unenforced gate is not permission to have one,
+  so the skip reasons are bounded in configuration rather than merely observed).
+
 ## Resolved unknowns summary
 
 | Technical Context item | Resolution |
@@ -1101,5 +1189,8 @@ tool-poisoning surface arriving through the governance door).
 | Harness context / metering / failover | Non-destructive live-context pruning distinct from condensation (outlier-guard → soft-trim → hard-clear), media-exempt, `context_pruned`-recorded and eval-gated; every billable model call metered and ceilinged with degraded-fallback under pressure; adjudicating models fed delimited data + circuit breaker; typed failover taxonomy bounded by the routing floor and stream-commit (§30) |
 | Orchestration scheduling / delegation-target / memory ordering | Concurrency partitioned into independently-bounded class pools (interactive / child / background / auxiliary) keyed off `execution_class`, orthogonal to the fan-out cost reservation; delegation-target selection given FR-148's deferred-search-plus-accuracy discipline, roster pinned into the harness digest, every candidate pre-satisfying FR-098; memory consolidation ordered before lossy compaction, metered under FR-165 with a no-model extractive fallback, and passive channel mining gated as consent-bounded per-principal ingestion (§31) |
 | Hook layer | `PreToolUse`/`PostToolUse` made a governed subsystem: tighten-only authority with `hook_stopped` as sole producer, `command`/`http`/`prompt` handlers, matcher-or-CEL `if_expr` firing, Gate-3-hardened prompt hooks metered under FR-165, fail-closed timeout + chain budget + per-turn cap + decision cache + tenant token budget, input rewrite re-binding the step-8a digest, and definitions as harness-pinned governed config; modeled on GoClaw + OpenHands' analyzer/hook split (§32) |
+
+| Permission / approval vocabularies | Tenant-scoped versioned tool profile + tenant-extensible effect-class taxonomy, both governance-admitted and authority-free; MCP client-side authorization flow specified (§33) |
+| Billing / non-token metering | Safety ceiling and commercial balance as two controls that must both pass; append-only credit ledger over dated lots; `(meter, quantity, unit)` with declared accrual mode; money derived from exact quantities, rounded once at the asserted boundary; periods that close and stay closed; every gate resolution recorded (§34) |
 
 **No `NEEDS CLARIFICATION` remain.** Proceed to Phase 1.

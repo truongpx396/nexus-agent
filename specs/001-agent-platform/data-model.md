@@ -44,9 +44,10 @@ erDiagram
     TENANT ||--o{ MEMORY : owns
     TENANT ||--o{ CONNECTOR : configures
     TENANT ||--o{ BUDGET : bounded_by
-    TENANT ||--o| PLAN : subscribes_to
-    PLAN ||--o{ BUDGET : seeds
-    PLAN ||--o{ CREDIT_LOT : includes
+    TENANT ||--o| BILLING_PLAN : subscribes_to
+    BILLING_PLAN ||--o{ BUDGET : seeds
+    BILLING_PLAN ||--o{ CREDIT_LOT : includes
+    BILLING_PLAN ||--o{ BILLING_PERIOD : prices
     TENANT ||--o{ CREDIT_LOT : holds
     TENANT ||--o{ BILLING_PERIOD : accrues_over
     CREDIT_LOT ||--o{ LEDGER_ENTRY : drawn_down_by
@@ -306,7 +307,7 @@ recorded capability matrix (FR-131, FR-133). Configuration, never a kernel fork.
 | `capabilities` | jsonb | Per contract feature: `supported` / `degraded` / `unsupported`, on the dimensions declared **for this `port`** (FR-133) — see below |
 | `conformance_run_id` | UUID | The suite run that produced `capabilities`; absent ⇒ not enablable |
 | `governance_signoff` | jsonb | Recorded approver + timestamp, as for any new tool or connector (FR-096) |
-| `enabled_for_tenants` | UUID[] | Per-tenant enablement; disabled everywhere is the default. **The single authoritative enablement record** — a `Plan` entitlement bounds what may be written here and never writes it (FR-184) |
+| `enabled_for_tenants` | UUID[] | Per-tenant enablement; disabled everywhere is the default. **The single authoritative enablement record** — a `Billing Plan` entitlement bounds what may be written here and never writes it (FR-184) |
 
 **Conformance dimensions are per port** (FR-133), because a provider-shaped list
 says nothing about a store or a gate. A port whose dimensions are undeclared
@@ -348,14 +349,19 @@ only what it buys from a provider under-reports every run that does real work
 - **One posting contract for every meter**: the attribution dimensions of `Cost Record`, the outbox and idempotency key of FR-124, and a posting to `Ledger Entry`. A meter recorded outside it is the blind spot FR-165 closes for model calls, arriving under an infrastructure component's name instead of a utility's.
 - **Token classes stay typed columns** on `Cost Record` rather than collapsing into a generic quantity bag: the FR-014/SC-003 cache-read gate reads them as columns, and the platform's headline metric must remain a projection rather than a parse.
 
-### Plan
+### Billing Plan
 The tenant's versioned, effective-dated commercial configuration — one reviewable
 artifact in place of independently-drifting per-tenant settings (FR-184).
 
+**Named `Billing Plan`, never `Plan`.** `Orchestration Plan` (FR-102) is a
+different entity that already owns `Session.plan_id` / `plan_version`; two
+entities keyed `plan_id` in one schema is an ambiguity a Go type and a SQL join
+both resolve wrongly and silently.
+
 | Field | Type | Notes |
 |-------|------|-------|
-| `plan_id` | string (PK) | |
-| `plan_version` | int (PK) | Immutable per version |
+| `billing_plan_id` | string (PK) | |
+| `billing_plan_version` | int (PK) | Immutable per version |
 | `currency` | char(3) | ISO 4217; every amount derived under this plan carries it (FR-180) |
 | `price_book_ref` | string (FK) | Which price book prices this plan's meters (FR-181) |
 | `billable_meters` | string[] | Meter identities charged under this plan |
@@ -366,7 +372,7 @@ artifact in place of independently-drifting per-tenant settings (FR-184).
 | `effective_from` / `effective_to` | timestamptz | |
 
 - **A quota is not a ceiling**: a quota bounds rate and concurrency and is enforced by admission control — exceeding it throttles a caller who retries; a ceiling bounds spend and is enforced by reservation — exceeding it terminates the run. Implementing one and calling it the other either throttles a customer who has budget or bills a customer who should have been queued.
-- **Effective-dated, never retroactive**: a plan change prices work performed after it takes effect. It cannot re-price a closed `Billing Period` (FR-183).
+- **Effective-dated, never retroactive**: a plan change prices work performed after it takes effect. It cannot re-price a closed `Billing Period` (FR-183). Because `billable_meters` decides *what is charged at all*, a period's recompute at close is only reproducible if the plan version that governed it is recorded — so `Billing Period`, `Cost Record`, and `Usage Record` each name the `billing_plan_version` in effect, exactly as they name the price-book version (FR-183, FR-184).
 - **`entitlements` bounds enablement; `IntegrationAdapter.enabled_for_tenants` *is* enablement.** The entitlement resolves only `DENY` or `DEFER`, never `ALLOW` — the same posture `Tool Profile` holds at the permission chain (FR-176). A plan upgrade makes an adapter *eligible* and enables nothing: the passing `conformance_run_id`, the absence of a degraded capability a claimed criterion depends on, and the `governance_signoff` of FR-133 are still required, so a commercial transaction is never a path to an unvetted dependency. Conversely no plan tier substitutes for that evidence — a capability matrix is a measurement and a plan is a contract. A downgrade removing an entitlement **disables** the adapters it covered as a typed, audited change; an entitlement enforced on the way in and ignored on the way out is advisory (FR-184, FR-131).
 
 ### Price Book
@@ -662,7 +668,9 @@ log alone, and identical to the externally published event contract (FR-085):
 | Human (push) | `user_message` (the mid-run steering input of FR-005) |
 | Human (pull) | `input_requested` · `input_answered` · `input_expired` · `input_invalidated` (FR-110) |
 | Approval | `approval_requested` · `approval_notified` · `approval_reminded` · `approval_escalated` · `approval_granted` · `approval_granted_modified` · `approval_denied` · `approval_expired` · `approval_invalidated` · `approval_resolution_refused` · `approval_mismatch` (FR-036, FR-103–FR-108) |
+| Cost & budget | `budget_decision` (every resolution of the pre-spend gate — `allow` / `refuse_ceiling` / `refuse_credit` / `degrade` / `skip` — with its typed reason, resolved scope, and deciding budget, so a replay reconstructs not only what was spent but what the gate decided and where it declined to enforce, FR-188/FR-085) |
 | Catalog | `tool_loaded` (a deferred schema materialized into the volatile zone — what lets a replay reconstruct the visible catalog turn by turn while `harness_digest` stays fixed, FR-148) |
+| Memory | `memory_loaded` (an on-demand L1/L2 tier load into the **volatile** zone, never the prefix — what lets a replay reconstruct which memory a turn actually saw while the resolvable set stays pinned by `harness_digest`, FR-173) |
 | Skills | `skill_activated` (identity, version, `bundle_digest`, and whether the trigger was a match, an explicit request, or configuration) · `skill_capability_ignored` (a declared tool the run does not hold — recorded, never honoured, FR-153) |
 | Delivery | `delivery_enqueued` · `delivery_delivered` · `delivery_failed` · `delivery_suppressed` (FR-157) — the enqueue precedes the send, so a permanently undelivered approval request is separable from an unanswered one |
 | Safety | `taint_transition` · `sanitization_boundary` (FR-087) |
@@ -831,6 +839,7 @@ exhaustion reason (FR-016, FR-017).
 | `usage_unreported` | bool | The provider never reported usage (errored before reporting, stream severed, CLI-subprocess path); the reservation reconciled at worst case rather than being released. A reported signal, and an adapter-health measure (FR-185, FR-133) |
 | `price_book_version` | string (FK) | Which price table produced `cost_amount` (FR-084) |
 | `override_version` | string (FK, nullable) | The tenant `Price Override` that re-rated it, where one applied. A record naming only the base book cannot be recomputed under an override (FR-189) |
+| `billing_plan_version` | int (FK) | The `Billing Plan` version in effect. Price versions say what a unit *cost*; this says whether the meter was billable at all, and FR-183's recompute needs both (FR-184) |
 | `currency` | char(3) | ISO 4217. No amount is currency-less (FR-180) |
 | `cost_amount` | numeric(20,10) | Derived from tokens × price book, carried at the **rate's** scale. An **estimate held for control purposes** — the authoritative period figure is recomputed from quantities at close (FR-180, FR-183) |
 | `list_amount` | numeric(20,10) | Priced at `list_rate`. Equals `cost_amount` on a metered path; on an entitlement-billed path `cost_amount` is 0 and this is the non-cash showback figure (FR-165, FR-181) |
@@ -868,6 +877,7 @@ already enforces and that token accounting cannot see (FR-179).
 | `resource_ref` | string (nullable) | The sandbox, artifact, or connector the quantity accrued against |
 | `window_start` / `window_end` | timestamptz | The accrual interval; equal for a `discrete` meter |
 | `price_book_version` / `override_version` | string (FK) | As `Cost Record` (FR-084, FR-189) |
+| `billing_plan_version` | int (FK) | As `Cost Record` — which plan's `billable_meters` decided this row is charged at all (FR-184) |
 | `currency` / `cost_amount` / `list_amount` / `is_cash` / `fx_version` | — | As `Cost Record` (FR-180, FR-181) |
 | `reservation_id` | UUID (FK, nullable) | Set only for a `reservable` meter; null for `duration` and `level` meters, whose ceiling contribution is **post-hoc by declaration** (FR-179) |
 | `outbox_state` | enum | `pending` / `shipped` / `acked`, idempotent on the same key (FR-124) |
@@ -898,7 +908,7 @@ balance (see `Ledger Entry`).
 - **Every applicable budget binds** (FR-190). A reservation is admitted only when it satisfies *all* budgets whose scope tuple matches, so the most restrictive wins by construction. A resolution where the highest-`precedence` match wins **alone** is explicitly rejected: it lets a narrow permissive budget silently override a broad restrictive one, which is how a per-agent exception becomes a tenant-wide one.
 - **`precedence` names, it does not decide.** Its only job is to pick which of several simultaneously-breached budgets appears in the refusal and in the `Budget Decision` record — an operator handed an arbitrary one of five cannot tell which constraint to change.
 - **A budget matching no traffic is reported, not silently inert** (FR-190): an intended control that binds nothing is indistinguishable from an absent one.
-- **A ceiling is not a balance and a quota is not a ceiling.** This row bounds *spend* and is enforced by reservation — breaching it terminates the run `cost_exhausted`. A `Plan`'s quotas bound *rate and concurrency* and are enforced by admission control — breaching those throttles a caller who retries. `Credit Lot` bounds what the customer has *paid for* — exhausting it terminates `credit_exhausted`. All three must pass, and none is derived from another (FR-182, FR-184).
+- **A ceiling is not a balance and a quota is not a ceiling.** This row bounds *spend* and is enforced by reservation — breaching it terminates the run `cost_exhausted`. A `Billing Plan`'s quotas bound *rate and concurrency* and are enforced by admission control — breaching those throttles a caller who retries. `Credit Lot` bounds what the customer has *paid for* — exhausting it terminates `credit_exhausted`. All three must pass, and none is derived from another (FR-182, FR-184).
 
 ### Budget Decision
 One resolution of the pre-spend gate, recorded individually rather than counted
@@ -912,15 +922,17 @@ here for query (FR-188).
 | `session_id` / `turn_seq` | — | The causing run; set for every decision, since every billable call has one (FR-165) |
 | `reservation_key` | string (nullable) | The reservation this decision produced, where it produced one |
 | `outcome` | enum | `allow` / `refuse_ceiling` / `refuse_credit` / `degrade` / `skip` |
-| `reason` | string | Typed. For `skip`: `no_matching_budget` / `enforcement_disabled` / `price_unresolved` / `provider_exempt` / `counter_unavailable` |
+| `reason` | string | Typed. For `skip`: `no_matching_budget` / `enforcement_disabled` / `price_unresolved` / `provider_exempt` / `counter_unavailable`. **Each is bounded, not merely observed** — see below |
 | `resolved_scope` | jsonb | The tuple the gate evaluated — tenant, agent, model, provider, execution class (FR-190) |
 | `deciding_budget_id` | UUID (FK, nullable) | Which budget refused, selected by `precedence` among those breached |
 | `call_class` | enum | As `Cost Record` — for a `degrade`, **which** auxiliary call was dropped (FR-165) |
-| `estimated_quantity` / `estimated_amount` | bigint / numeric(20,10) | What the gate was asked to admit |
+| `currency` | char(3) | ISO 4217, qualifying `estimated_amount`. A gate decision compared against a ceiling in another currency is not a decision (FR-180) |
+| `estimated_quantity` / `estimated_amount` | bigint / numeric(20,10) | What the gate was asked to admit; the amount is in `currency` |
 | `counter_epoch` | bigint (nullable) | The counter generation evaluated against (FR-186) |
 | `created_at` | timestamptz | |
 
 - **`skip` is why this table exists.** A rate over refusals is silent about the decisions where the gate **declined to enforce at all** — no budget matched, enforcement was off, the price was unresolvable, the provider was exempt. Those paths produce neither a cost record nor a refusal, so an unenforced ceiling reads exactly like a ceiling with room. The **`skip` rate alerts on its own signal** (FR-095): FR-186 requires the gate to fail closed, and this is the measurement proving it does.
+- **A `skip` is a recorded defect state, never a supported configuration** (FR-188). Recording it is not permission to have it. `no_matching_budget` and `price_unresolved` fail closed — the call is refused, since a call that cannot be priced cannot be reserved against a ceiling; `counter_unavailable` resolves under FR-186. `enforcement_disabled` is not settable for a tenant with a finite ceiling and not settable at all in a multi-tenant topology; `provider_exempt` is restricted to calls the platform does not pay for (a tenant's own credential, a self-hosted model) and still writes the usage record at list as non-cash. A deployment setting either declares it on the go-live checklist.
 - **`degrade` makes FR-165's droppable set observed rather than declared**: naming which auxiliary call was dropped under which pressure turns a policy statement into a measurement.
 - **Refusal-while-underutilized (FR-187) is computed from here**, joined against the period's actual spend — it is a relationship between a refusal and a total, and neither number alone expresses it.
 - **Not the cost record.** A decision is what the gate resolved; a cost record is what was spent. A `refuse_*` or `skip` produces a decision and no cost record, and an `allow` produces both.
@@ -1002,8 +1014,10 @@ customer stays given (FR-183).
 | `period_start` / `period_end` | timestamptz | |
 | `state` | enum | `open` / `closing` / `closed` |
 | `closed_at` | timestamptz (nullable) | |
-| `asserted_total` | numeric(20,10) (nullable) | Recomputed from raw quantities × referenced price-book versions at close — **not** a sum of per-record rounded amounts (FR-180) |
-| `late_arrival_count` / `late_arrival_value` | int / numeric | Records that arrived after this period closed and posted as adjustments elsewhere. Reported signals (FR-095) |
+| `currency` | char(3) | ISO 4217. **No amount here is currency-less** — `asserted_total` and `late_arrival_value` are money and FR-180 admits no bare numeric |
+| `billing_plan_version` | int (FK) | The `Billing Plan` version that governed the period. `billable_meters` decides what is charged at all, so a recompute without it is not reproducible across a mid-period plan change (FR-184) |
+| `asserted_total` | numeric(20,10) (nullable) | In `currency`. Recomputed from raw quantities × referenced price-book (and override) versions at close — **not** a sum of per-record rounded amounts (FR-180) |
+| `late_arrival_count` / `late_arrival_value` | int / numeric(20,10) | Records that arrived after this period closed and posted as adjustments elsewhere; the value is in `currency`. Reported signals (FR-095) |
 
 - **Close is blocked** while the outbox holds unshipped records dated in the period, a reservation opened in it is neither reconciled nor expired, or a usage row in it has no resolved price. Closing over an incomplete pipeline asserts a figure the platform knows is wrong.
 - **A closed period is immutable.** Because FR-124 delivery is at-least-once with an expiry sweep, records dated inside a closed period *will* arrive after close — each posts as an **adjustment in the currently open period** carrying a reference to the one it belongs to. Silently amending a statement of record is worse than restating it.

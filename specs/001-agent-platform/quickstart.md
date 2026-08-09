@@ -235,6 +235,67 @@ make verify-online-scoring            # production quality score with zero conte
   cases enter the corpus only through the consented, redacted, governance-signed
   export — never by reading telemetry (FR-125).
 
+## Scenario 4b — Metering, credit, and billing integrity (User Story 4, P2)
+
+**Goal**: the commercial half of the cost path — non-token meters, an append-only
+credit balance, exact money, closed periods, and a recorded decision for every
+pre-spend resolution (FR-179–FR-190).
+
+```bash
+make meters-report SESSION=<session_id>   # token + sandbox + storage + egress + invocation meters
+make credit-balance TENANT=<tenant_id>    # fold over ledger entries; never a stored column
+make budget-decisions TENANT=<id> --since 1h   # every allow / refuse / degrade / skip
+make period-close TENANT=<id> PERIOD=<yyyy-mm>
+make verify-money-exactness PERIOD=<yyyy-mm>   # recompute vs asserted total over ≥10^6 rows
+make verify-counter-rebuild TENANT=<id>   # rebuild from cost records + open reservations
+```
+
+**Expected**:
+- `meters-report` shows a code-executing run's sandbox CPU/wall-clock seconds,
+  stored byte-months, egress bytes, and third-party invocations **alongside** its
+  token classes, under identical tenant/user/agent/surface attribution — a run
+  whose sandbox cost rivals its token cost no longer reports as cheap (FR-179,
+  SC-075).
+- `credit-balance` is a fold over immutable entries. A correction appears as a
+  compensating entry referencing the original; no entry is ever updated or deleted;
+  lots are consumed soonest-expiring-first by declared configuration so the same
+  balance is reproducible on replay. A tenant at zero refuses `credit_exhausted`
+  while its safety ceiling still has room, and one at its ceiling refuses
+  `cost_exhausted` — an operator can tell an unpaid balance from a budget control
+  (FR-182, FR-184, SC-077).
+- `verify-money-exactness` recomputes the period from raw integer quantities × the
+  price-book, override, and billing-plan versions each record names, and reproduces
+  the asserted total **exactly**. The naive sum of per-record rounded amounts is
+  asserted to **diverge**, so the forbidden implementation cannot pass. Every stored
+  amount names a currency and a scale; every converted amount names its `fx_version`
+  and re-reads to the same number a month later (FR-180, FR-093, SC-076).
+- `period-close` is **refused** while the outbox holds records dated in the period,
+  a reservation opened in it is unreconciled and unexpired, or a usage row has no
+  resolved price. After close, a late record posts as an adjustment in the **open**
+  period referencing the closed one, and the closed period's total is byte-identical
+  before and after. Late-arrival count and value are reported (FR-183, SC-078).
+- `budget-decisions` shows one record per pre-spend resolution — outcome, typed
+  reason, resolved scope tuple, deciding budget, estimated quantity and amount with
+  its currency, and `counter_epoch`. A call matching no budget or whose price cannot
+  be resolved is **refused**, not admitted unmetered; `enforcement_disabled` is
+  rejected at configuration load for a tenant with a finite ceiling and in any
+  multi-tenant topology; a `skip` alerts on its own signal, because an unenforced
+  ceiling must never look like a ceiling with room (FR-188, SC-082).
+- With a tenant, an agent, and a model-scoped budget all matching one call, the
+  reservation is admitted only if it satisfies **all three**; the refusal names the
+  binding budget rather than an arbitrary match (FR-190, SC-084).
+- `verify-counter-rebuild` reconstructs the atomic counter from committed cost
+  records plus open reservations within its measured recovery time; a counter
+  restarted empty presents an unrecognized epoch and is treated as **unavailable**
+  rather than as zero, refusing new calls against a finite ceiling while in-flight
+  runs continue under the worker-local per-run budget (FR-186, SC-080).
+- Every call that reached the provider has a cost record with a typed outcome —
+  including a cancelled stream, a truncation retry, and a failed-over attempt, each
+  a distinct record rather than folded into the one that succeeded. A call whose
+  usage the provider never reported reconciles at worst case flagged
+  `usage_unreported` rather than being released as though it had not happened
+  (FR-185, SC-079).
+
 ## Scenario 5 — Memory & skills (User Story 5, P3)
 
 **Goal**: per-tenant memory injected immutably at session start, progressive-
