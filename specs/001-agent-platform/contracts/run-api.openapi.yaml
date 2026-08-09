@@ -531,9 +531,14 @@ components:
         priority:
           type: integer
           description: Scheduling weight within the execution class
-        budget_per_task_usd:
+        budget_per_task_amount:
           type: number
           description: Optional override under the tenant ceiling (FR-017)
+        budget_currency:
+          type: string
+          description: >
+            ISO 4217. Required with budget_per_task_amount — an amount without a
+            currency is not an amount (FR-180).
     RunAccepted:
       type: object
       properties:
@@ -562,16 +567,26 @@ components:
             - completed
             - max_turns
             - cost_exhausted
+            - credit_exhausted
             - error
             - aborted
             - prompt_too_long
             - hook_stopped
             - approval_expired
             - input_expired
-        cost_usd: { type: number }
+        currency:
+          type: string
+          description: ISO 4217. No amount on this contract is currency-less (FR-180)
+        cost_amount:
+          type: number
+          description: >
+            Derived from metered quantities x price book, carried at the rate's
+            scale. An estimate held for control purposes — the authoritative
+            figure for a period is recomputed from raw quantities at close
+            (FR-180, FR-183).
         price_book_version:
           type: string
-          description: Price table used to compute cost_usd; makes it reproducible (FR-084)
+          description: Price table used to compute cost_amount; makes it reproducible (FR-084)
     RunEvent:
       type: object
       description: >
@@ -780,7 +795,8 @@ components:
         taint_legs_engaged:
           type: array
           items: { type: string, enum: [untrusted_input, private_data, external_effect] }
-        cost_so_far_usd: { type: number }
+        cost_so_far_amount: { type: number }
+        cost_so_far_currency: { type: string, description: ISO 4217 (FR-180) }
         delegation_chain:
           type: array
           items: { type: string, format: uuid }

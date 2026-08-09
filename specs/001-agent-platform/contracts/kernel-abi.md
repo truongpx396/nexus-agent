@@ -110,7 +110,7 @@ type DelegationSpec = {
   acceptance: AcceptanceCriterion    // checked before folding in (FR-044, FR-100)
   max_summary_tokens: int            // default ~1-2k / ~8 KB; platform truncates
   max_iterations: int                // per-child loop bound
-  ceiling_usd: numeric               // per-child draw from the parent envelope
+  ceiling_amount: numeric            // per-child draw from the parent envelope (currency from Budget)
 }
 
 type DelegationResult = {
@@ -438,7 +438,7 @@ type InvalidationReason = "run_cancelled" | "run_terminal" | "reaped"
 type Classification = TOOL_CALLS | CONTENT | EMPTY   // dispatch on this, not text
 
 type TerminalReason =
-  | completed | max_turns | cost_exhausted | error
+  | completed | max_turns | cost_exhausted | credit_exhausted | error
   | aborted | prompt_too_long | hook_stopped | approval_expired | input_expired
 ```
 
@@ -448,27 +448,61 @@ type TerminalReason =
   histories** and is therefore property-tested over generated event sequences,
   not by examples alone (FR-097).
 - Every terminal reason maps to a producer: `aborted` ← `RunControl.cancel`;
-  `cost_exhausted` ← a refused budget reservation (FR-083); `approval_expired` ←
-  an approval TTL the run could not proceed without (FR-036); `input_expired` ←
-  an `Oversight.requestInput` with `on_expiry = terminate` that went unanswered
-  (FR-110); the rest from the loop's own guards.
+  `cost_exhausted` ← a refused budget reservation (FR-083); `credit_exhausted` ←
+  an insufficient credit balance on the same pre-spend path (FR-182);
+  `approval_expired` ← an approval TTL the run could not proceed without
+  (FR-036); `input_expired` ← an `Oversight.requestInput` with
+  `on_expiry = terminate` that went unanswered (FR-110); the rest from the loop's
+  own guards.
 - `approval_expired` and `input_expired` stay distinct because they mean different
   things to a caller: nobody *authorized* an action, versus nobody *answered* a
   question. Collapsing them would either fail runs that could have proceeded on a
   declared default or hide an assumption nobody recorded.
+- `cost_exhausted` and `credit_exhausted` stay distinct for the same reason: the
+  first is an operator's safety ceiling, the second a customer's unpaid balance.
+  A caller that cannot tell them apart cannot decide whether to raise a limit or
+  take a payment, and an operator's ceiling change would read as a billing event.
 
 ## Budget reservation — the pre-spend gate (FR-083)
 
 ```
 interface BudgetGate {
-  // Called BEFORE every Provider.stream; refusal terminates `cost_exhausted`.
-  reserve(session_id, est_input_tokens, reserved_output_tokens, model_id) -> Reservation
-  reconcile(reservation_id, actual_usage: Usage) -> void   // releases the remainder
+  // Called BEFORE every Provider.stream. Two independent refusals:
+  //   ceiling breach  -> `cost_exhausted`   (FR-083, a safety control)
+  //   balance at zero -> `credit_exhausted` (FR-182, a commercial control)
+  // Every resolution — allow / refuse_ceiling / refuse_credit / degrade / skip —
+  // emits a BudgetDecision naming its reason, resolved scope, and the budget
+  // that refused. A `skip` (no matching budget, enforcement off, price
+  // unresolvable, provider exempt) is a recorded decision, never an absence:
+  // it produces no cost record, so without it an unenforced ceiling looks
+  // exactly like a ceiling with room (FR-188).
+  reserve(session_id, est_input_tokens, reserved_output_tokens, model_id,
+          chunk_seq?) -> Reservation
+          // { reservation_id, granted, counter_epoch, decision_id }
+          // refusal carries { deciding_budget_id, resolved_scope } (FR-190)
+  reconcile(reservation_id, actual_usage: Usage | UNREPORTED) -> void
+
+  // Non-token meters: sandbox seconds, stored bytes, egress, connector calls.
+  // `duration`/`level` meters are NOT reservable — bounded by their own hard
+  // limits and reconciled at release (FR-179).
+  record(meter_id, quantity, resource_ref, window) -> void
 }
 ```
 
 - The worker additionally enforces a **local hard per-run budget synchronously**,
   so a ceiling never depends on a round trip to another plane completing.
+- `reserve` MAY be called repeatedly within one call with an incrementing
+  `chunk_seq`, reserving a slice of the worst case rather than all of it, so a
+  tenant near its ceiling is not refused work that would have fit (FR-187). A
+  chunk exhausted mid-stream MUST re-reserve or terminate — never continue
+  unreserved.
+- `Reservation.counter_epoch` MUST be validated on every call. An unrecognized
+  epoch means the atomic counter restarted and reads as "no spend yet"; it MUST
+  be treated as **unavailable** (refuse new calls for a tenant with a finite
+  ceiling) rather than as zero (FR-186).
+- `reconcile` accepts `UNREPORTED`: a provider that errored before reporting
+  usage reconciles at the **full reserved worst case**, flagged, rather than
+  releasing the hold — otherwise an unreliable provider looks free (FR-185).
 
 ## `Persistence` — the three artifacts (FR-024, FR-126, FR-127)
 
