@@ -19,7 +19,7 @@ older data plane during a rainbow rollout — FR-026).
 | Rate limiting, admission control (FR-041, FR-049) | Sandbox pool, tool execution (FR-047) |
 | Budget **reservation** + ceilings (FR-017, FR-083) | Local hard per-run budget enforcement (FR-083) |
 | Credit ledger, balance, period close, restatement (FR-182, FR-183) | Emits usage + cost records upstream; never posts to the ledger itself |
-| Plan / entitlement resolution — ceilings, quotas, included credit (FR-184) | Enforces the resolved ceilings and quotas locally |
+| `Billing Plan` / entitlement resolution — ceilings, quotas, included credit (FR-184) | Enforces the resolved ceilings and quotas locally |
 | Model routing decision (FR-037, FR-076) | Provider/model calls (FR-027) |
 | Price book + meter registry distribution (FR-084, FR-179, FR-181) | Memory read/write (FR-019) |
 | Eval / skill / MCP catalog (FR-042) | Event-log append, checkpoints (FR-024) |

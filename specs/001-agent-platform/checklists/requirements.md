@@ -182,6 +182,100 @@ and had not been reconciled since the 2026-08-01 → 2026-08-06 design-review ba
   entities (missing Prompt Mode and Memory Tier / Resolvable Memory Set, added by
   FR-172/FR-173). Both added with their actual location in the schema
 
+### Cross-artifact consistency pass (`/speckit.analyze`, 2026-08-09)
+
+A read-only consistency analysis across spec / plan / tasks / data-model / contracts
+found **no CRITICAL issues, 100% FR coverage** (190/190), zero unmapped tasks, and
+zero dangling task references — but 16 defects, again the same class: spec.md,
+tasks.md, data-model.md, and contracts/ were reconciled on 2026-08-09 while plan.md,
+research.md, quickstart.md, and this checklist were last touched on 2026-08-06, so
+the three review batches after it (FR-176; FR-177–FR-178; FR-179–FR-190) had landed
+in four artifacts and not in four others. All 16 are now closed.
+
+- [x] **Conflicting requirement**: FR-093, US4 acceptance scenario 6, T092b, and
+  T092c all required chargeback to reconcile **to the sum of per-turn cost
+  records** — exactly what FR-180 forbids ("rounding MUST NOT be applied per record
+  and then summed"). T092c asserted it as an integration test while T092y1 asserted
+  the opposite, so the two tests could not both pass. FR-093 rewritten around
+  recompute-from-quantities, scenario 6 and SC-076 amended, T092b/T092c rewritten
+  (T092c now carries a control assertion that the naive sum **diverges**, so the
+  forbidden implementation cannot pass), T094g's delegation roll-up corrected the
+  same way
+- [x] **Entity name collision**: FR-184's commercial `Plan` and FR-102's
+  `Orchestration Plan` were two different entities both keyed `plan_id` /
+  `plan_version`, with `Session.plan_id` meaning the orchestration one — an
+  ambiguity a Go type and a SQL join both resolve silently and wrongly. Renamed
+  `Billing Plan` (`billing_plan_id` / `billing_plan_version`) in FR-184, Key
+  Entities, data-model.md, T011e, T092x, and control-data-plane.md, with the reason
+  recorded so it is not re-collapsed
+- [x] **Constitution tension**: FR-188 enumerated `enforcement_disabled` and
+  `provider_exempt` as `skip` reasons and required them to be *alerted*, but no
+  requirement said when — or whether — the pre-spend gate may be disabled, against
+  the constitution's unqualified "every turn MUST reserve … before the model call."
+  FR-188 now bounds every skip reason: `no_matching_budget` and `price_unresolved`
+  **refuse** rather than admit unmetered, `enforcement_disabled` is unsettable for a
+  tenant with a finite ceiling and in any multi-tenant topology, `provider_exempt`
+  is restricted to non-cash paths and still writes a list-priced usage record. A
+  `skip` is a recorded defect state, never a supported configuration
+- [x] plan.md stated "175 functional requirements" in three places against an actual
+  190 — the third recurrence of this exact defect (170→175 on 2026-08-06,
+  conflicting counts on 2026-07-31). All three corrected to 190
+- [x] FR-176–FR-190 appeared nowhere in plan.md: not in Constitution Check, not in
+  the MVP cut line, not in Technical Context, not in Project Structure. Added —
+  Principle IV row rewritten around the full cost/billing contract, Principle V row
+  extended with the tenant-scoped tool profile, extensible effect-class taxonomy,
+  and MCP authorization flow; an Increment-1 bullet for the money and metering
+  seams; five deferral rows (non-token emitters, period close, reservation chunking,
+  credit issuance, override administration) each stating what is deferred and what
+  seam is not; `internal/billing/` added to the tree and `internal/cost/` rewritten
+- [x] **Missing event types**: `budget_decision` (required by FR-085 and FR-188) and
+  `memory_loaded` (asserted by plan.md to be in the Foundational taxonomy) were both
+  absent from data-model.md's Event taxonomy table — the table that declares itself
+  "identical to the externally published event contract." Both added as new Cost &
+  budget / Memory groups, and T014's taxonomy list rewritten to match the table
+  group for group rather than paraphrasing a subset
+- [x] T014 specified a **9-value** `TerminalReason` enum against the 10 that FR-004,
+  kernel-abi.md, and run-api.openapi.yaml all define — `credit_exhausted` (FR-182)
+  was missing, so the Foundational task would have built the enum one value short of
+  the contract SC-020 requires it to match. Corrected to 10 and enumerated
+- [x] **Missing currency**: `Billing Period.asserted_total` / `late_arrival_value`
+  and `Budget Decision.estimated_amount` were bare `numeric(20,10)` against FR-180's
+  "every monetary amount MUST carry an explicit currency" — the only money-bearing
+  entities without one. `currency` added to both, plus to T092w/T026a6 and SC-076
+- [x] **Missing plan provenance**: FR-184 makes `billable_meters` decide what is
+  charged at all, but no record named the billing-plan version in effect, so
+  FR-183's recompute at close was not reproducible across a mid-period plan change.
+  `billing_plan_version` added to `Billing Period`, `Cost Record`, `Usage Record`,
+  FR-184, T011e, and T092w
+- [x] **Duplicate task ID**: two consecutive `T095d` lines (a stub and the full
+  task), both FR-175 — 439 unique ids across 440 task lines. Stub removed
+- [x] 13 same-phase `[P]` task pairs wrote the same file, contradicting tasks.md's
+  own `[P]` rule; two carried an explicit stated dependency (T010b "extends T010a",
+  T092y "extends T092b"). `[P]` dropped from the extending task in each pair
+  (T010b, T014b, T022a, T086a, T092d, T092y, T100d, T117b, T131a, T143) — zero
+  same-phase file collisions remain
+- [x] US4 owns all 12 billing FRs but its acceptance scenarios covered none of them.
+  Five scenarios added (credit exhaustion vs ceiling, non-token meters, closed-period
+  late arrival, gate-decision recording incl. skip, every-applicable-budget-binds),
+  and the Independent Test extended with the commercial half
+- [x] SC-068 was **still** the only success criterion with no task-level tag — the
+  2026-08-06 pass recorded adding it to T041q, but the tag did not survive the
+  FR-171 hook-layer batch. Re-added to T041q along with FR-166; SC coverage is now
+  84/84
+- [x] research.md stopped at §32 with no rationale or rejected alternatives for five
+  review batches. §33 (domain portability of the permission and approval
+  vocabularies) and §34 (billing, credit ledger, non-token metering) added, plus two
+  rows in the resolved-unknowns summary. §16's "a hard ceiling is a safety control,
+  not an invoice" annotated as **still true** — FR-182 adds a second control beside
+  the ceiling rather than reversing it, which is why `credit_exhausted` and
+  `cost_exhausted` stay distinct
+- [x] quickstart.md had no scenario for the commercial half. Scenario 4b added
+  (meters report, credit balance as a fold, money-exactness recompute, period close
+  refusal and late-arrival adjustment, budget-decision listing incl. bounded skips,
+  counter rebuild under a flushed epoch)
+- [x] spec.md's Key Entities omitted `FX Rate`, which data-model.md models as an
+  entity and FR-180 makes mandatory for multi-currency. Added
+
 ## Notes
 
 - Items marked incomplete require spec updates before `/speckit.clarify` or `/speckit.plan`
