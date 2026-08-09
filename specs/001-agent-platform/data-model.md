@@ -582,6 +582,7 @@ told" (FR-157).
 | `approval_id` | UUID (FK, nullable) | Set for oversight kinds, so an undelivered request is separable from an unanswered one |
 
 - **The log entry precedes the send** — the same write-ahead ordering FR-127 requires of tool effects, for the same reason: a message sent before it was recorded can be sent twice.
+- **The body is not stored here**: a delivery worker reads the message content from `Event.payload` at `seq`, the same source the pulled projection reads (FR-191) — `Delivery Record` carries only the routing and idempotency metadata, so the push and pull representations of one event cannot drift into two copies.
 - **`failed_permanent` is a signal, not a cleanup** (FR-095). On an approval or input request it MUST NOT be silently absorbed into the FR-036 expiry, because to a tenant those look identical and mean opposite things.
 - **`suppressed_by_audience`** records an FR-156 refusal: the content's redaction policy was resolved for a principal the conversation's audience does not cover.
 
@@ -681,6 +682,7 @@ log alone, and identical to the externally published event contract (FR-085):
 
 - **Invariant**: every `tool_use` has a paired `tool_result` (synthetic on cancel/error) before the next model call — a **total** invariant over all histories, therefore property-tested (FR-097).
 - **Replay completeness**: a run whose steering, approval outcome, or termination cannot be reconstructed from these events alone violates FR-006.
+- **External projection is audience-gated, not content-free** (FR-191): `payload` is the single source of truth for both the pulled projection (`GET /v1/runs/{id}/events`) and the pushed `Delivery Record` body, decrypted and included for a caller within the session's audience (`audience_ref`) or holding an FR-118 grant, and withheld (never emptied) for anyone else — the FR-117 content-free rule governs the separate telemetry export path, not this table or its external projection. `thought` payload is never projected externally to any caller (FR-064).
 
 ### Delegation
 The bounded parent→child record that makes a delegation tree attributable and

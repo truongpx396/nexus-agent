@@ -154,14 +154,29 @@ paths:
         '404': { description: No such sequence in the source run }
   /runs/{sessionId}/events:
     get:
-      summary: Stream structure-only run progress (SSE)
+      summary: Stream run progress and output (SSE)
       description: >
-        Emits typed event structure and per-turn spans WITHOUT requiring reads of
-        conversation content (FR-040). Conversation content is available only
-        through a scoped, expiring content-access grant that emits a hash-chained
-        receipt on grant and on every read under it (FR-118) — never through a
-        telemetry or debug flag, which do not exist (FR-117). Each event carries
-        the trace/span it was appended under, so a stream position resolves to a
+        Emits typed event structure and per-turn spans for every caller (FR-040).
+        For the turn's submitting principal, a principal the session's
+        `audience_ref` covers (FR-156), or a caller holding an active FR-118
+        content-access grant, a content-bearing event additionally carries its
+        egress-sanitized payload — `content` (model output text), `tool_input`/
+        `tool_output` (a tool call's resolved arguments and result),
+        `steering_message` (FR-005), `input_request`/`input_answer` (FR-110), and
+        `delegation_goal`/`delegation_summary` (a sub-agent's goal and returned
+        result, FR-098/FR-100) — because this endpoint is the run's own output
+        channel, not the telemetry export path, and FR-117's content-free rule
+        does not apply to it (FR-191). A delegated child is its own session; its
+        `child_session_id` is carried on the parent's delegation event so its own
+        live activity is reachable at its own `/v1/runs/{id}/events` — this
+        endpoint never fans out across a delegation tree implicitly. A `thought`
+        event NEVER carries content to any caller, on any path (FR-064). Any
+        other caller — an
+        operator without a grant, a dashboard — receives the structure-only
+        projection FR-117 already guarantees, with conversation content available
+        to them only through the FR-118 grant, which emits its own hash-chained
+        receipt on grant and on every read under it. Each event carries the
+        trace/span it was appended under, so a stream position resolves to a
         trace and back (FR-119). A dropped subscriber resumes from its last
         observed seq via Last-Event-ID (or ?from_seq=) with no loss or duplication.
       operationId: streamRunEvents
@@ -682,6 +697,69 @@ components:
         model_id: { type: string, nullable: true }
         terminal_reason: { type: string, nullable: true }
         ts: { type: string, format: date-time }
+        content:
+          type: string
+          nullable: true
+          description: >
+            Model output text for a `content` event. Present only when the caller
+            is the turn's submitting principal, a principal the session's
+            `audience_ref` covers, or a holder of an active FR-118 grant; absent
+            (never empty-string) for every other caller and for every other event
+            type — a `thought` event never populates this field, for any caller,
+            under any grant (FR-064, FR-191).
+        tool_input:
+          type: object
+          nullable: true
+          description: >
+            The `tool_use` event's resolved arguments, under the same audience
+            gate as `content` (FR-191). Never present on a `thought` event.
+        tool_output:
+          type: object
+          nullable: true
+          description: >
+            The `tool_result` event's result, under the same audience gate as
+            `content` (FR-191). Still UNTRUSTED content under the Rule of Two
+            (FR-033) — visibility to the audience does not change its trust class.
+        steering_message:
+          type: string
+          nullable: true
+          description: The human's own text on a `user_message` event (FR-005, FR-191).
+        input_request:
+          type: object
+          nullable: true
+          description: >
+            The elicitation's declared question/answer JSON schema on an
+            `input_requested` event (FR-110, FR-191).
+        input_answer:
+          type: object
+          nullable: true
+          description: >
+            The human's answer on an `input_answered` event (FR-110, FR-191);
+            UNTRUSTED-by-default content subject to the input guard (FR-069).
+        delegation_goal:
+          type: string
+          nullable: true
+          description: >
+            The child's instruction on a `delegation_requested` event (FR-098,
+            FR-191) — what a sub-agent was actually asked to do, not merely that
+            one was spawned.
+        delegation_summary:
+          type: string
+          nullable: true
+          description: >
+            The child's returned result on a `delegation_returned` event (FR-100,
+            FR-191). Still UNTRUSTED content regardless of what the child did
+            (FR-087) — visibility to the audience does not change its trust class.
+        child_session_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: >
+            On `delegation_requested`/`delegation_target_selected`, the child's own
+            `session_id` — subscribe to `GET /v1/runs/{child_session_id}/events` in
+            its own right to render that sub-agent's own live tool activity, since
+            this endpoint does not fan out across a delegation tree implicitly
+            (FR-191, FR-101).
     ApprovalRequest:
       type: object
       required: [session_id, tool_id, effect_class, approved_input_digest]

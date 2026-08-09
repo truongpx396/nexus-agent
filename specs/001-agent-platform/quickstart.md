@@ -57,10 +57,16 @@ curl -sX POST localhost:8080/v1/runs \
   -d '{"agent_id":"<id>","input":"triage this bug and propose a fix","data_label":"internal"}'
 # → 202 { session_id, status: "queued" }
 
-curl -N localhost:8080/v1/runs/<session_id>/events   # SSE, structure only
+curl -N localhost:8080/v1/runs/<session_id>/events   # SSE, audience-gated content (FR-191)
 ```
 
 **Expected outcomes**:
+- As the run's submitting principal, the stream's `content`/`tool_use`/`tool_result`
+  events carry the agent's actual reply text and each tool's actual arguments and
+  result — not just their structure — because this endpoint is the run's own
+  output channel, distinct from the content-free telemetry path of FR-117
+  (FR-191, SC-085). Re-issue the same request with a different tenant user's token
+  (no grant) and confirm those same fields come back absent rather than populated.
 - At least one `tool_use` event, each paired with a `tool_result` before the next
   model call (inspect `pair_ref`; synthetic result on any error path).
 - Terminal event carries a typed `terminal_reason` from the enum in

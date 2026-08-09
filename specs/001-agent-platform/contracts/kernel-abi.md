@@ -198,9 +198,14 @@ interface Surface {
   // Translates external input into a run submission; NO control-flow logic.
   // MUST resolve the SUBMITTING principal per message (FR-156).
   toRequest(external_input): RunRequest
-  // Streams or polls progress; never holds a blocked connection.
-  emit(event: Event): void
+  // Streams or polls progress; never holds a blocked connection. The projected
+  // Event is audience-gated per FR-191: content-bearing types (content, tool_use,
+  // tool_result) carry their decrypted, sanitized payload for a caller within the
+  // session's audience or holding an FR-118 grant, and the FR-117 structure-only
+  // shape otherwise. `thought` never carries content to any caller (FR-064).
+  emit(event: Event, forCaller: PrincipalRef): ProjectedEvent
   // Outbound to a human. Enqueues through the delivery outbox; never sends inline.
+  // The body is read from the same Event.payload emit() projects (FR-191, FR-157).
   deliver(msg: OutboundMessage) -> DeliveryId          // FR-157
   // Resolves the surface's native thread identity into the session key (FR-159).
   bindConversation(external_ref): SessionKey
@@ -218,11 +223,35 @@ type SurfaceCapability = {
   conformance_run_id: RunId                       // absent => not enablable
 }
 
+type ProjectedEvent = {
+  // Structure-only fields — present for every caller, every event (FR-117).
+  seq, schema_version, type, actor, tool_id, ts: ...
+  usage, latency_ms, model_id, terminal_reason: ...
+  // Content fields — present ONLY when forCaller is in the session's audience
+  // (FR-156) or holds an active content-access grant (FR-118), and ONLY on a
+  // content-bearing type. Absent (not empty-string) otherwise, so "no content"
+  // and "content withheld" are never confused (FR-191).
+  content: string?                      // final/incremental model output text
+  tool_input: json?                     // the tool_use event's resolved arguments
+  tool_output: json?                    // the tool_result event's result, still
+                                         // UNTRUSTED content under the Rule of Two
+  steering_message: string?             // the human's own FR-005 steering text
+  input_request: json?                  // FR-110 question schema
+  input_answer: json?                   // FR-110 human answer, untrusted-by-default
+  delegation_goal: string?              // FR-098 child instruction, on request
+  delegation_summary: string?           // FR-100 child result, still UNTRUSTED
+  child_session_id: SessionId?          // follow this to the child's OWN stream —
+                                         // this endpoint never fans out a tree (FR-101)
+}
+
 type OutboundMessage = {
   session_id, seq                       // the event this carries — APPENDED FIRST
   recipient_ref: string                 // idempotency: (session, seq, surface, recipient)
   kind: "reply" | "approval_request" | "reminder" | "escalation"
       | "input_request" | "completion"
+  body: string                          // read from Event.payload at seq, egress-
+                                         // sanitized (FR-068) — the FR-191 payload,
+                                         // never a second, independently-built copy
   audience_ref: string?                 // FR-156 — suppression, not truncation
 }
 ```
@@ -247,6 +276,15 @@ type OutboundMessage = {
   `(session_id, seq, surface, recipient)`, and the outcome is typed. A
   `failed_permanent` on an approval request MUST stay distinguishable from an
   unanswered one — to a tenant they look identical and mean opposite things.
+- **`emit` is content-bearing for the run's own audience, and only for it** (FR-191).
+  This is a different signal class from telemetry (FR-117): the shared internal
+  pub/sub plane that notifies a subscriber a new sequence exists MAY stay
+  content-free, but the surface-gateway's per-caller `emit` response enriches that
+  notification from the decrypted `Event.payload` before it reaches an
+  authenticated caller who is in-audience or holds an FR-118 grant — never for
+  anyone else, and never for a `thought` event regardless of audience (FR-064). A
+  surface polling or streaming this endpoint for its own submitting user IS the
+  product's reply channel, not a debugging affordance gated behind a grant.
 - **Output adaptation happens after the egress sanitizer** (FR-068): chunking,
   truncation, and attachment spilling reshape what was sanitized, never re-open it.
 - **`principal_kind = agent` is its own admission class** (FR-158): an external
