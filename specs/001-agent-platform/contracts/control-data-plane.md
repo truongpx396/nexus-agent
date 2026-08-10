@@ -167,7 +167,10 @@ Response 202: { status: "queued", resumed_from_seq }
 ```
 
 ### `StreamEvents(v1)`
-Subscribe to structure-only run progress (no conversation content required).
+Subscribe to run progress. The shape this contract governs — the leg that may
+cross to the control plane — is structure-only, matching this document's own
+egress rule that prompts, model output, tool arguments, and tool results never
+leave the data plane (row 42 above).
 
 ```
 GET /v1/runs/{session_id}/events            (SSE / WebSocket)
@@ -179,6 +182,19 @@ Emits: { seq, schema_version, type, tool_id?, terminal_reason?, ts }
   without loss or duplication; `seq` is monotonic per session.
 - The emitted `type` values are exactly the FR-085 taxonomy — the external
   contract and the internal log MUST NOT diverge.
+- **This is not the caller-facing response.** FR-191's content-bearing fields
+  (`content`/`tool_input`/`tool_output`) for an in-audience caller are produced
+  and served **inside the data plane** — the same place `approval_context_mode =
+  local` already renders an approval package and `Outbound delivery` (FR-157)
+  already lives in the responsibility table above — and MUST NOT be relayed
+  through the control plane as an egress class the way `approval_context_mode =
+  upstream` is. In a physically split deployment the client's stream connection
+  terminates at the data plane's surface-gateway; the control plane's role is
+  admission (`AdmitRun`) and policy, never rendering this content. In the
+  collapsed single-tenant topology Increment 1 ships (plan.md MVP cut line), the
+  distinction is inoperative — one deployment plays both roles — but the contract
+  names it now so the physical split (deferred) never needs the client-visible
+  behavior to change.
 
 ## Upstream calls (data plane → control plane)
 
