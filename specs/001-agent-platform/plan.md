@@ -125,7 +125,7 @@ named approver as a decision-ready package, resolvable only by an authorized hum
 classes), invalidated with the run it gates, and unanswered-after-escalation
 expiring as a denial (`approval_expired`)
 
-**Scale/Scope**: 190 functional requirements across 9 user stories (see the MVP cut
+**Scale/Scope**: 191 functional requirements across 9 user stories (see the MVP cut
 line below for what ships in Increment 1); single reusable
 kernel serving 9 surface classes (CLI, chat, web, REST/gRPC, email, cron, Telegram,
 Zalo, and agent-to-agent ingress — the last being its own `principal_kind`
@@ -188,9 +188,10 @@ with the ledger's append-only discipline mirroring Principle II for the same rea
 (a balance that can be overwritten cannot be audited, replayed, or made to survive a
 concurrent debit).
 
-**Result**: PASS on principles I–IX with **one recorded tension** (see Complexity
-Tracking): the constitution's "build for the current stage" rule versus a 190-FR,
-9-surface-class, 4-topology target architecture starting from zero code. This is
+**Result**: PASS on principles I–IX with **four recorded tensions** (see Complexity
+Tracking), the load-bearing one being the constitution's "build for the current
+stage" rule versus a 191-FR, 9-surface-class, 4-topology target architecture
+starting from zero code. This is
 resolved by sequencing, not by scope reduction — the spec remains the target
 architecture and the MVP cut line below states what actually ships first. The
 multi-service structure (control plane, runtime, eval helper, web) is mandated
@@ -227,6 +228,14 @@ rather than implicitly assumed.
 - A **content-free** telemetry export path: deny-by-default attribute allowlist,
   bounded value lengths, and no flag that admits content (FR-117) — cheap on day
   one, and the only way the erasure attestation stays true once telemetry exists.
+- The **two-zone prompt and its cache-read measurement** (FR-013, FR-014): a
+  byte-stable prefix with per-turn content structurally banned from it, a volatile
+  tail rebuilt each turn, and the steady-state cache-read rate computed from the
+  recorded per-class token counts. Principle III calls cache stability architecture
+  and "not a late optimization" — and a prefix whose stability is never measured is
+  a claim, not a property. Increment 1 measures and reports; the ≥90% *release gate*
+  is Polish (T144) and compaction is added to the same assembly in US5 (T100), but
+  neither introduces the zones.
 - Cost: token classes split, versioned price book, **reserve-then-reconcile**
   ceilings (FR-016, FR-083, FR-084).
 - The **money and metering seams** (FR-179–FR-190). Same rule as every other seam:
@@ -442,14 +451,15 @@ read at runtime — the kernel is never forked.
 
 ## Complexity Tracking
 
-No principle is violated, but three tensions are real enough to record rather than
+No principle is violated, but four tensions are real enough to record rather than
 declare away. Each is resolved by an explicit mechanism, not by assertion.
 
 | Tension | Why the complexity is needed | Simpler alternative rejected because | Resolution |
 |---------|------------------------------|--------------------------------------|------------|
-| **Target scope (190 FRs, 9 surface classes, 4 topologies) vs. "build for the current stage"** | The spec is a target architecture for a platform whose whole thesis is that the enterprise tax cannot be retrofitted; the schema, contract, and trust seams must be right before the first migration. | Writing a smaller spec would hide the retrofit cost rather than remove it — the expensive decisions (event envelope, encryption/erasure model, audit chain, tenant scoping) are *schema* decisions that cannot be deferred cheaply. | The **MVP cut line** above: seams and schema early, infrastructure late. Every deferred item is additive against Increment 1's schema. |
+| **Target scope (191 FRs, 9 surface classes, 4 topologies) vs. "build for the current stage"** | The spec is a target architecture for a platform whose whole thesis is that the enterprise tax cannot be retrofitted; the schema, contract, and trust seams must be right before the first migration. | Writing a smaller spec would hide the retrofit cost rather than remove it — the expensive decisions (event envelope, encryption/erasure model, audit chain, tenant scoping) are *schema* decisions that cannot be deferred cheaply. | The **MVP cut line** above: seams and schema early, infrastructure late. Every deferred item is additive against Increment 1's schema. |
 | **Three languages (Go / Python / TypeScript)** | Go for the concurrency-bound kernel and small BYOC-shippable binaries; Python only where the ML/eval ecosystem lives, and strictly **off the paying loop**; TypeScript only for the web surface. | A single-language stack would either lose the eval/judge ecosystem (Go-only) or the deployable-binary and concurrency properties the data plane needs (Python-only). | Python is confined to `ml-python/` (evals, judge, condenser) and reaches the runtime only through the queue/contract — it is never in the request path. |
 | **Control/data-plane split before any customer needs BYOC** | Principle-mandated, and "move the data plane into the customer VPC" is only a flag if the planes never bled together in the first place. | Building one plane and splitting later is the rewrite the constitution's Delivery section exists to prevent. | The **contract and package boundary** ship in Increment 1; the *physical* split is deferred until a BYOC customer exists (see cut line). |
+| **Principle III's >90% cache-read target vs. a model gateway that cannot report token classes (SC-042)** | An optional `provider` adapter (a third-party model gateway) may coalesce or omit the `input_cache_read` / `input_cache_write` / `input_uncached` split, leaving the platform unable to *compute* the rate on that path — not unable to preserve it. Refusing every such gateway would make Principle VII's adapter story unusable for the deployments most likely to want one. | Estimating the rate from a gateway's aggregate token count would report a number nobody measured, which SC-017 exists to forbid ("computed from recorded per-turn measurements, not estimated") — and a measured-looking estimate is worse than an acknowledged gap. Silently averaging the gateway path into the fleet figure would understate or overstate the gate with no way to tell which. | The gate is **not claimed** on that path rather than weakened for everyone: T144 computes and enforces ≥90% only over traffic whose adapter reports the classes, and the release report names the excluded path (SC-042). The cache-stable *prefix* is unchanged and still asserted on the bytes by T045f, which needs no provider cooperation — what is deferred is the measurement on one optional path, never the architecture. An adapter's conformance matrix records the limitation before it can be enabled (FR-133). |
 
 **Sub-agent policy divergence** (recorded, not a violation): FR-079 is
 deliberately stricter than the comparable systems — read-only context firewalls
