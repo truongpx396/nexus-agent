@@ -3,7 +3,7 @@ name: CI
 # Lint, test, build and security-scan every change. The repo is spec-stage today:
 # jobs detect whether a component actually has source yet and SKIP gracefully when
 # it does not, then light up automatically once code lands under backend-go/ or
-# backend-python/. Nothing here needs editing when the first real code is merged.
+# ml-python/. Nothing here needs editing when the first real code is merged.
 
 on:
   push:
@@ -39,7 +39,7 @@ jobs:
           has() { compgen -G "$1" > /dev/null 2>&1 && echo true || echo false; }
           {
             echo "go=$(has 'backend-go/**/*.go')"
-            echo "python=$(has 'backend-python/**/*.py')"
+            echo "python=$(has 'ml-python/**/*.py')"
             echo "docker=$(has 'deploy/**/Dockerfile*')"
             echo "terraform=$(has 'infra/terraform/**/*.tf')"
           } >> "$GITHUB_OUTPUT"
@@ -87,29 +87,48 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: backend-python
+        working-directory: ml-python
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install tooling
-        run: |
-          python -m pip install --upgrade pip
-          pip install ruff
-          if [ -f pyproject.toml ]; then pip install -e ".[dev]" || pip install -e . || true; fi
-          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "ml-python/uv.lock"
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev
       - name: Lint (ruff)
-        run: ruff check .
+        run: uv run ruff check .
       - name: Format check (ruff)
-        run: ruff format --check .
+        run: uv run ruff format --check .
       - name: Test (pytest)
         run: |
           if compgen -G "tests/**/*.py" > /dev/null || compgen -G "**/test_*.py" > /dev/null; then
-            pip install pytest && pytest -q
+            uv run pytest -q
           else
             echo "No tests found yet — skipping."
           fi
+
+  # ---------------------------------------------------------------------------
+  # Eval gate placeholder. The real statistical gate (k-trial verdicts, judge
+  # calibration, environment digest, integrity checks) is Foundational work —
+  # see tasks.md T026e-T026t — and is not part of Phase 1. This job exists so
+  # ci-gate has a named slot to require once that work lands.
+  # ---------------------------------------------------------------------------
+  eval-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Eval gate placeholder
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "eval gate placeholder — real implementation lands in Phase 2 Foundational (T026g)."
+          echo "See specs/001-agent-platform/tasks.md T026e-T026t for the statistical gate, judge calibration, and integrity checks this will wire in."
+          exit 0
 
   # ---------------------------------------------------------------------------
   # Validate every Dockerfile builds (no push here — that is the deploy workflow).
@@ -184,7 +203,7 @@ jobs:
   # actually ran ended in failure; skipped (absent-component) jobs pass the gate.
   # ---------------------------------------------------------------------------
   ci-gate:
-    needs: [go, python, docker-build, security]
+    needs: [go, python, eval-gate, docker-build, security]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -194,7 +213,8 @@ jobs:
           set -euo pipefail
           fail=0
           for r in "${{ needs.go.result }}" "${{ needs.python.result }}" \
-                   "${{ needs.docker-build.result }}" "${{ needs.security.result }}"; do
+                   "${{ needs.eval-gate.result }}" "${{ needs.docker-build.result }}" \
+                   "${{ needs.security.result }}"; do
             if [[ "$r" == "failure" ]]; then fail=1; fi
           done
           if [[ "$fail" == "1" ]]; then
