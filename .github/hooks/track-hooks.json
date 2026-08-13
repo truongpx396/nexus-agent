@@ -13,6 +13,11 @@
         "type": "command",
         "bash": "./.github/hooks/track-guard.sh",
         "timeoutSec": 5
+      },
+      {
+        "type": "command",
+        "bash": "./.github/hooks/track-brief.sh",
+        "timeoutSec": 5
       }
     ],
     "postToolUse": [
