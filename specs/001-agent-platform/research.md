@@ -1153,6 +1153,60 @@ tool-poisoning surface arriving through the governance door).
   posture (rejected — recording an unenforced gate is not permission to have one,
   so the skip reasons are bounded in configuration rather than merely observed).
 
+## 35. Runtime and dependency version pins (2026-08-14)
+
+- **Decision**: Fix the three surface runtimes at **go1.26.x** (backend),
+  **Python 3.13.15+** with `requires-python = ">=3.13.15"` (ML/eval helpers), and
+  **Node 22.x LTS** (web surface), and pin their dependencies exactly:
+  backend — golangci-lint 2.5.0 (v2 `linters:`/`formatters:` schema),
+  `go.opentelemetry.io/otel v1.45.0`, `google.golang.org/grpc v1.83.0`,
+  `github.com/redis/go-redis/v9 v9.22.0`, `github.com/jackc/pgx/v5 v5.10.0`;
+  frontend — react/react-dom 19.2.8, vite ^8.2.0, @vitejs/plugin-react ^6.0.4,
+  typescript ~6.0.2, oxlint 1.78.0 (exact, over the Vite template's ^1.75.0),
+  tailwindcss 4.3.3 + @tailwindcss/vite, @tanstack/react-query 5.101.4,
+  prettier 3.9.6; Python — uv 0.11.16, with ruff and pytest resolved at
+  generation time and frozen into `uv.lock`. The table in plan.md
+  ("Pinned toolchain") is the single normative copy; tasks.md T002-T006 and
+  quickstart.md's prerequisites defer to it rather than restating a second
+  baseline that can drift.
+- **Rationale**: This platform's correctness argument leans on reproducibility in
+  three places that a floating dependency quietly breaks. §23 makes test
+  determinism a property of the build, not just of the recorded provider; §28
+  pins an `eval_environment_digest` and treats resource configuration as a
+  measured confounder, which is only meaningful if the toolchain producing the
+  binary is itself fixed; and §26's harness digest exists to make a run's
+  determinants replayable. A `latest`-resolved lint or runtime version makes all
+  three unfalsifiable. The exact-vs-range split follows what each dependency can
+  actually break: application libraries whose behavior the build depends on are
+  pinned exactly, while build-plugin ranges (`^8.2.0`, `^6.0.4`, `~6.0.2`) stay as
+  the generator emitted them and are frozen by the committed lockfile — the
+  reproducibility boundary is `go.sum` / `uv.lock` / `package-lock.json`, not the
+  manifest range, which is also why `security-and-owasp.instructions.md` D2/D5
+  forbids `"*"` and `"latest"` in a manifest but permits a caret under a lock.
+  Ruff and pytest float at generation because they are dev-only tooling, absent
+  from the shipped artifact and off the paying loop, so an exact upstream pin buys
+  nothing `uv.lock` does not already buy. `oxlint` over ESLint is not a preference
+  but an observation: the current `npm create vite -- --template react-ts` output
+  ships `.oxlintrc.json` and `"lint": "oxlint"` with **no** ESLint dependency, so
+  the earlier `.eslintrc.cjs` task text would have meant installing a legacy
+  toolchain purely to satisfy a filename. golangci-lint 2.5.0 is called out with
+  its schema because v2 moved formatters out of `linters-settings:` — a v1-shaped
+  `.golangci.yml` fails to parse rather than degrading.
+- **Alternatives considered**: Floating every dependency and relying on lockfiles
+  alone (rejected — a lockfile records what a resolution *did*, so a regenerated
+  lock silently moves the eval baseline and `eval_environment_digest` compares
+  equal across genuinely different toolchains); pinning ruff/pytest exactly as
+  well (rejected — pure churn on tools that cannot reach the shipped artifact,
+  and it makes routine lint-rule adoption a spec amendment); keeping the earlier
+  Go 1.23 / Python 3.12 / Node 20 baseline (rejected — the Phase 1 scaffold run
+  showed `go get` on the declared deps raising the `go` directive on its own, so
+  the low pin was already fiction, and forcing it back down breaks
+  `go list -m all` against dependencies requiring newer stdlib); ESLint 8 +
+  `.eslintrc.cjs` to match the original task text (rejected — see above);
+  restating the pins inside each task line as the source of truth (rejected — four
+  copies of a version set is four things to forget, hence one table in plan.md
+  with the others deferring to it).
+
 ## Resolved unknowns summary
 
 | Technical Context item | Resolution |
@@ -1192,5 +1246,6 @@ tool-poisoning surface arriving through the governance door).
 
 | Permission / approval vocabularies | Tenant-scoped versioned tool profile + tenant-extensible effect-class taxonomy, both governance-admitted and authority-free; MCP client-side authorization flow specified (§33) |
 | Billing / non-token metering | Safety ceiling and commercial balance as two controls that must both pass; append-only credit ledger over dated lots; `(meter, quantity, unit)` with declared accrual mode; money derived from exact quantities, rounded once at the asserted boundary; periods that close and stay closed; every gate resolution recorded (§34) |
+| Runtime / dependency pins | go1.26.x, Python 3.13.15+ (uv 0.11.16), Node 22.x LTS; application deps pinned exactly, build-plugin ranges frozen by committed lockfiles; oxlint 1.78.0 over ESLint; golangci-lint 2.5.0 v2 schema; ruff/pytest float at generation then freeze; one normative table in plan.md (§35) |
 
 **No `NEEDS CLARIFICATION` remain.** Proceed to Phase 1.

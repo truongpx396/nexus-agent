@@ -192,6 +192,13 @@ jobs:
           FILES_N: ${{ needs.detect.outputs.files_n }}
         run: |
           marker='<!-- END track-report auto block -->'
+          # track-report.sh emits this EXACT opening comment — never just the END marker
+          # alone. A body that closes with the real END marker but opens with a shortened
+          # lookalike (missing " — machine-rendered, do not hand-edit") did not come from
+          # the script: a real run in this repo produced precisely that shape — the END
+          # marker copied verbatim from the docs, the BEGIN marker paraphrased — because
+          # nothing checked the BEGIN marker's exact text.
+          begin_marker='<!-- BEGIN track-report auto block — machine-rendered, do not hand-edit -->'
 
           # Meta-work exemption. Waives ONLY the requirement that the block be present; a
           # block that is present still goes through the consistency + no-blocking-failure
@@ -236,6 +243,18 @@ jobs:
             echo "the bundle was not active, so none of the gates were enforced."
             exit 1
           fi
+          if ! printf '%s' "$PR_BODY" | grep -qF "$begin_marker"; then
+            echo "::error::The Auto block's opening comment does not match track-report.sh's"
+            echo "exact output. The block closes with the real END marker but does not open"
+            echo "with:"
+            echo "    $begin_marker"
+            echo "A block assembled by hand rather than pasted from the script can get the"
+            echo "END marker right (it is documented) while paraphrasing the BEGIN one — that"
+            echo "is exactly what this catches. Re-run:"
+            echo "    bash .github/hooks/track-report.sh"
+            echo "and paste its output unmodified, start to finish."
+            exit 1
+          fi
           echo "✓ Auto block present."
 
       - name: Discipline audit is present, self-consistent, and non-blocking
@@ -250,12 +269,41 @@ jobs:
           # section, a clean audit with no rows), and a bare non-zero grep would abort the
           # step with a bare "exit code 1" instead of the verdict it exists to report. Hence
           # `|| true` on each: "found nothing" is data here, not an error.
+          # track-report.sh emits this literal heading and the "N passed · M warning(s) ·
+          # K failure(s)" summary line from the SAME printf, atomically — one cannot exist
+          # in a genuine render without the other. So a body that mentions an audit in some
+          # OTHER shape (a real run in this repo produced "#### Discipline audit: 16 passed,
+          # 2 warnings, 0 failures" — a hand-paraphrased heading and summary, right down to
+          # dropping the "(s)") is not a legacy pre-audit install missing the section — it
+          # is a fabricated stand-in for one, and the warning-only fallback below exists for
+          # a body that mentions NEITHER, not for a body that mentions audit findings in the
+          # wrong shape.
+          real_heading='Discipline audit — mechanical invariants (derived from artifacts, not claimed)'
           # The summary line track-report.sh renders, e.g.
           #   - **14 passed · 2 warning(s) · 0 failure(s)**  ⚠️ review the warnings below
           summary="$(printf '%s\n' "$body" \
             | grep -oE '[0-9]+ passed · [0-9]+ warning\(s\) · [0-9]+ failure\(s\)' | head -1 || true)"
 
           if [ -z "$summary" ]; then
+            if printf '%s' "$body" | grep -qF "$real_heading"; then
+              echo "::error::The Auto block's real discipline-audit heading is present, but its"
+              echo "summary line ('N passed · M warning(s) · K failure(s)') is missing. Both"
+              echo "render from the same track-report.sh call, so this heading cannot exist"
+              echo "genuinely without it — the summary was removed after rendering."
+              echo "Re-run 'bash .github/hooks/track-report.sh' and paste it unmodified."
+              exit 1
+            fi
+            if printf '%s' "$body" | grep -qiE 'discipline audit'; then
+              echo "::error::This PR body mentions a 'discipline audit' but not in the shape"
+              echo "track-report.sh renders (missing the literal heading:"
+              echo "    ### $real_heading"
+              echo "and/or its 'N passed · M warning(s) · K failure(s)' summary). That is not"
+              echo "how the real script writes it — this section looks hand-authored, which"
+              echo "is exactly what this check exists to catch. Re-run:"
+              echo "    bash .github/hooks/track-report.sh"
+              echo "and paste its output unmodified."
+              exit 1
+            fi
             echo "::warning::No discipline-audit summary in this agent PR body. Either the install predates track-audit.sh, or the section was removed after rendering. Every pipeline invariant here is UNVERIFIED — a reviewer must treat it as such."
             exit 0
           fi

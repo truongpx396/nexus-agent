@@ -533,7 +533,10 @@ T_DROP_CMD='DROP TABLE users'
 T_FLUSH_CMD="redis-cli FLUSHALL"
 T_RMRF_CMD="rm -rf /home/user/data"
 
-mk_term() { printf '{"tool_name":"run_in_terminal","tool_input":{"command":"%s"}}' "$1"; }
+# Built with jq, not printf: a multi-line command (a heredoc, a `cd` then a push) carries
+# raw newlines, which printf emits as literal control characters — invalid JSON. The hook
+# then dies in `jq -r`, produced no "deny", and the assertion PASSED for the wrong reason.
+mk_term() { jq -nc --arg c "$1" '{tool_name:"run_in_terminal",tool_input:{command:$c}}'; }
 
 assert_deny "guard: worker push blocked -> deny" \
   "$GUARD" "$(mk_term "$T_PUSH_CMD")" "TRACK_ALLOWED_PREFIXES=backend-go/"
@@ -582,6 +585,101 @@ pub "publish must not carry --force"               "git push --force origin feat
 ( cd "$PUB/work" && git push -q -u origin feat/mywork ) >/dev/null 2>&1
 pub "second push of a published branch -> deny"    "git push origin feat/mywork"         DENY
 rm -rf "$PUB"
+
+# --- first publish when the hook fires from the MAIN checkout ----------------------
+# The work lives in a linked worktree while the guard's CWD is the main checkout, where
+# HEAD is `main`. Reading HEAD there classified `git push -u origin feat/x` as an attempt
+# to publish the BASE branch and denied it — so the carve-out above evaporated in exactly
+# the isolation layout the skill defaults to, and the worker was again pushed toward
+# self-granting TRACK_ALLOW_FF_PUSH. The refspec names the branch; that must win.
+WTP="$(mktemp -d)"
+( cd "$WTP" && git init -q --bare remote.git && git clone -q remote.git main \
+  && cd main && git config user.email t@t && git config user.name t \
+  && git commit -q --allow-empty -m init && git branch -M main \
+  && git push -q origin main \
+  && git worktree add -q -b feat/wt .claude/worktrees/feat-wt ) >/dev/null 2>&1
+wtpub() { # wtpub <label> <cmd> <ALLOW|DENY> — hook CWD is the MAIN checkout
+  local out got
+  out="$( cd "$WTP/main" && printf '{"tool_name":"Bash","tool_input":{"command":"%s"}}' "$2" \
+          | TRACK_ALLOWED_PREFIXES="src/" TRACK_DEFAULT_BRANCH=main bash "$GUARD" 2>&1 )"
+  got=DENY; printf '%s' "$out" | grep -q '"deny"' || got=ALLOW
+  [ "$got" = "$3" ] && pass "guard: $1" || fail "guard: $1 (got $got, want $3)"
+}
+wtpub "worktree branch published from main checkout -> allow" "git push -u origin feat/wt"   ALLOW
+wtpub "…still refuses the base branch from there"             "git push origin main"          DENY
+wtpub "…still refuses a redirect to base"                     "git push origin feat/wt:main"  DENY
+wtpub "…bare HEAD from the main checkout is still the base"   "git push -u origin HEAD"       DENY
+rm -rf "$WTP"
+
+# --- destructive guard scans CODE, not heredoc DATA --------------------------------
+# A PR body carrying the word "truncated" was denied as an "irreversible schema op",
+# leaving no compliant way to write it — the rule shape that produces workarounds.
+assert_allow "guard: heredoc body containing 'truncated' -> allow" \
+  "$GUARD" "$(mk_term "cat > pr.md <<'EOF'
+Output was truncated to 50 lines.
+EOF")" "TRACK_GUARD_DESTRUCTIVE=1" "TRACK_ALLOWED_PREFIXES=src/"
+
+assert_allow "guard: coreutils 'truncate -s 0' -> allow" \
+  "$GUARD" "$(mk_term "truncate -s 0 build.log")" "TRACK_GUARD_DESTRUCTIVE=1" "TRACK_ALLOWED_PREFIXES=src/"
+
+# …but code AFTER a heredoc is still code, and SQL truncation is still denied.
+assert_deny "guard: DROP TABLE following a heredoc -> deny" \
+  "$GUARD" "$(mk_term "cat > n.md <<'EOF'
+notes
+EOF
+psql -c 'drop table t'")" "TRACK_GUARD_DESTRUCTIVE=1" "TRACK_ALLOWED_PREFIXES=src/"
+
+assert_deny "guard: TRUNCATE TABLE -> deny" \
+  "$GUARD" "$(mk_term "psql -c 'TRUNCATE TABLE users'")" "TRACK_GUARD_DESTRUCTIVE=1" "TRACK_ALLOWED_PREFIXES=src/"
+
+assert_deny "guard: bare TRUNCATE via a SQL client -> deny" \
+  "$GUARD" "$(mk_term "psql -c 'TRUNCATE users'")" "TRACK_GUARD_DESTRUCTIVE=1" "TRACK_ALLOWED_PREFIXES=src/"
+
+# --- the run's own bookkeeping dir is always writable -------------------------------
+# `runs/` held the governance bundle and the PR body but was absent from the approved
+# prefixes, so the model composed the bundle into `backend-go/.gov.tmp2.md` — an in-scope
+# DELIVERABLE path — and shell-`cp`'d it into place. Bookkeeping is not a deliverable.
+RUNS_ABS="$(mktemp -d)"
+assert_allow "guard: governance bundle in runs/ -> allow" \
+  "$GUARD" "$(jq -nc --arg p "$RUNS_ABS/x.governance.md" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
+  "TRACK_ALLOWED_PREFIXES=src/" "RUNS_DIR=$RUNS_ABS"
+
+assert_allow "guard: PR body in runs/ -> allow" \
+  "$GUARD" "$(jq -nc --arg p "$RUNS_ABS/pr-body.md" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
+  "TRACK_ALLOWED_PREFIXES=src/" "RUNS_DIR=$RUNS_ABS"
+
+# A relative RUNS_DIR means <repo-root>/runs — NOT a `runs/` dir under wherever the hook
+# happened to be invoked from, which would let any subtree name itself into scope.
+GIT_TOP="$(git rev-parse --show-toplevel)"
+assert_allow "guard: relative RUNS_DIR resolves against the repo root -> allow" \
+  "$GUARD" "$(jq -nc --arg p "$GIT_TOP/runs/x.governance.md" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
+  "TRACK_ALLOWED_PREFIXES=src/" "RUNS_DIR=runs"
+
+assert_deny "guard: a runs/ dir in some OTHER subtree is not the runs dir -> deny" \
+  "$GUARD" "$(jq -nc --arg p "$GIT_TOP/frontend/runs/x.md" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
+  "TRACK_ALLOWED_PREFIXES=src/" "RUNS_DIR=runs"
+
+assert_deny "guard: a runs-lookalike dir is NOT the runs dir -> deny" \
+  "$GUARD" "$(jq -nc --arg p "$GIT_TOP/runsomething/x.md" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
+  "TRACK_ALLOWED_PREFIXES=src/" "RUNS_DIR=runs"
+
+assert_deny "guard: runs/ allowance does not open the rest of the tree -> deny" \
+  "$GUARD" '{"tool_name":"Write","tool_input":{"file_path":"deploy/x.yml"}}' \
+  "TRACK_ALLOWED_PREFIXES=src/" "RUNS_DIR=runs"
+rm -rf "$RUNS_ABS"
+
+# --- out-of-worktree writes name an in-bounds move ---------------------------------
+# Scope is repo-relative, so a scratch/temp path can never match a prefix. The denial has
+# to say where the work belongs, or the agent routes around the guard via Bash heredocs.
+assert_deny "guard: write to a scratch dir outside every worktree -> deny" \
+  "$GUARD" '{"tool_name":"Write","tool_input":{"file_path":"/tmp/scratch-xyz/gen/src/main.go"}}' \
+  "TRACK_ALLOWED_PREFIXES=src/"
+if printf '%s' '{"tool_name":"Write","tool_input":{"file_path":"/tmp/scratch-xyz/gen/src/main.go"}}' \
+   | TRACK_ALLOWED_PREFIXES="src/" bash "$GUARD" 2>&1 | grep -q "outside every git worktree"; then
+  pass "guard: out-of-worktree denial explains where to write instead"
+else
+  fail "guard: out-of-worktree denial explains where to write instead"
+fi
 
 assert_deny "guard: DROP TABLE with TRACK_GUARD_DESTRUCTIVE -> deny" \
   "$GUARD" "$(mk_term "$T_DROP_CMD")" "TRACK_GUARD_DESTRUCTIVE=1"
@@ -646,6 +744,37 @@ kind_seen=$(jq -r '.evidence[-1].kind // empty' "$PROD_RUNS/$PROD_RID.json" 2>/d
 [ "$kind_seen" = "test" ] \
   && pass "evidence(producer): TEST_CMD_PATTERN match -> kind=test recorded" \
   || fail "evidence(producer): TEST_CMD_PATTERN match -> kind=test (got: $kind_seen)"
+
+# Vacuity: a green that verified NOTHING must not read as proof. Both fixtures below are
+# verbatim from the scaffold run whose PR reported 3/3 required evidence kinds passing
+# while the Go build compiled zero packages.
+PROD_VAC="vac-$(date +%s)"
+printf '%s' '{"tool_name":"run_in_terminal","tool_input":{"command":"go build ./..."},"tool_response":{"stdout":"go: warning: \"./...\" matched no packages\nexit=0"}}' \
+  | RUN_ID="$PROD_VAC" RUNS_DIR="$PROD_RUNS" TRACK_EVIDENCE_KINDS="go-build:go build" \
+    bash "$EVIDENCE" >/dev/null 2>&1 || true
+vac_seen=$(jq -r '.evidence[-1] | "\(.verdict)/\(.vacuous // false)"' "$PROD_RUNS/$PROD_VAC.json" 2>/dev/null)
+[ "$vac_seen" = "pass/true" ] \
+  && pass "evidence(producer): 'matched no packages' -> pass but flagged vacuous" \
+  || fail "evidence(producer): 'matched no packages' -> pass/true (got: $vac_seen)"
+
+PROD_REAL="real-$(date +%s)"
+printf '%s' '{"tool_name":"run_in_terminal","tool_input":{"command":"npm run build"},"tool_response":{"stdout":"vite building...\n67 modules transformed.\nbuilt in 108ms\nexit=0"}}' \
+  | RUN_ID="$PROD_REAL" RUNS_DIR="$PROD_RUNS" TRACK_EVIDENCE_KINDS="frontend-build:npm run build" \
+    bash "$EVIDENCE" >/dev/null 2>&1 || true
+real_seen=$(jq -r '.evidence[-1] | "\(.verdict)/\(.vacuous // false)"' "$PROD_RUNS/$PROD_REAL.json" 2>/dev/null)
+[ "$real_seen" = "pass/false" ] \
+  && pass "evidence(producer): a real build is NOT flagged vacuous" \
+  || fail "evidence(producer): a real build is NOT flagged vacuous (got: $real_seen)"
+
+# A FAILING capture is never relabelled as merely vacuous — failure outranks vacuity.
+PROD_VF="vacfail-$(date +%s)"
+printf '%s' '{"tool_name":"run_in_terminal","tool_input":{"command":"go build ./..."},"tool_response":{"stdout":"matched no packages","exit_code":1}}' \
+  | RUN_ID="$PROD_VF" RUNS_DIR="$PROD_RUNS" TRACK_EVIDENCE_KINDS="go-build:go build" \
+    bash "$EVIDENCE" >/dev/null 2>&1 || true
+vf_seen=$(jq -r '.evidence[-1] | "\(.verdict)/\(.vacuous // false)"' "$PROD_RUNS/$PROD_VF.json" 2>/dev/null)
+[ "$vf_seen" = "fail/false" ] \
+  && pass "evidence(producer): failure outranks vacuity" \
+  || fail "evidence(producer): failure outranks vacuity (got: $vf_seen)"
 
 # TRACK_EVIDENCE_KINDS label:pattern derivation (first match wins)
 PROD_RID2="prod2-$(date +%s)"
@@ -2975,6 +3104,96 @@ if [ -f "$AGENT_WF" ] \
   pass "struct: CI gate asserts the Auto block + no blocking audit on agent PRs"
 else
   fail "struct: CI gate asserts the Auto block + no blocking audit on agent PRs"
+fi
+
+# 10.28b — the gate's presence check requires the EXACT begin marker, not just the end
+# one, and its audit-format check has a fabrication branch distinct from the legacy-install
+# warning. Found on a real PR (#38 in a client repo): a hand-authored Auto block got the
+# documented END marker right, paraphrased the BEGIN one, and used its own audit summary
+# wording ("16 passed, 2 warnings, 0 failures" vs. the real "16 passed · 2 warning(s) · 0
+# failure(s)") — and the old gate's only fallback for "no summary found" was a soft warning
+# meant for pre-track-audit.sh installs, so it passed.
+if grep -qF 'BEGIN track-report auto block — machine-rendered, do not hand-edit' "$AGENT_WF" \
+   && grep -q "begin_marker" "$AGENT_WF" \
+   && grep -qF 'mentions a '"'"'discipline audit'"'"' but not in the shape' "$AGENT_WF"; then
+  pass "struct: CI gate requires the exact BEGIN marker and rejects a paraphrased audit summary"
+else
+  fail "struct: CI gate requires the exact BEGIN marker and rejects a paraphrased audit summary"
+fi
+
+# Behavioral: extract the two audit-job `run:` scripts this gate actually executes (not just
+# grep the YAML for phrases) and run them against real bodies — the exact fabricated PR #38
+# body that slipped through, a genuine track-report.sh render, and a true legacy body with no
+# audit section at all (which must still soft-warn, not break). awk keeps this dependency-free
+# (no yq/ruby) by reading between this step's `run: |` and the next `- name:` at the same
+# indent, stripping the block's fixed leading indentation.
+extract_step() { # extract_step <workflow.yml> <step-name-substring> -> script on stdout
+  awk -v step="$2" '
+    $0 ~ "- name:.*" step {found=1; next}
+    found && /run: \|/ {inrun=1; ind=index($0,"run:"); next}
+    found && inrun && /^      - name:/ {exit}
+    inrun {
+      line=$0
+      sub("^" substr("                              ",1,ind+1), "", line)
+      print line
+    }
+  ' "$1"
+}
+if [ -f "$AGENT_WF" ]; then
+  extract_step "$AGENT_WF" "PR body carries the machine-rendered Auto block" > /tmp/sbd-ci-step1.sh
+  extract_step "$AGENT_WF" "Discipline audit is present" > /tmp/sbd-ci-step2.sh
+
+  fab_body='<!-- BEGIN track-report auto block -->
+### Run `x`
+#### Discipline audit: 16 passed, 2 warnings, 0 failures
+- G6 (warning): something
+<!-- END track-report auto block -->'
+  real_body='<!-- BEGIN track-report auto block — machine-rendered, do not hand-edit -->
+### Run `x`
+
+---
+
+### Discipline audit — mechanical invariants (derived from artifacts, not claimed)
+
+- **16 passed · 2 warning(s) · 0 failure(s)**  ⚠️ review the warnings below
+
+| | Check | Finding | How to clear it |
+|---|---|---|---|
+| ⚠️ | `G6` | x | y |
+| ⚠️ | `P2` | x | y |
+<!-- END track-report auto block -->'
+  legacy_body='<!-- BEGIN track-report auto block — machine-rendered, do not hand-edit -->
+### Run `x`
+#### Evidence
+| Kind | Command | Result | Fingerprint |
+|---|---|---|---|
+| go-test | `go test` | pass | `abc` |
+<!-- END track-report auto block -->'
+
+  s1_fab=$(PR_BODY="$fab_body" META_ONLY=false TOUCHES_GATES=false FILES_N=1 bash /tmp/sbd-ci-step1.sh >/tmp/s1_fab.log 2>&1; echo $?)
+  s2_fab=$(PR_BODY="$fab_body" bash /tmp/sbd-ci-step2.sh >/tmp/s2_fab.log 2>&1; echo $?)
+  s1_real=$(PR_BODY="$real_body" META_ONLY=false TOUCHES_GATES=false FILES_N=1 bash /tmp/sbd-ci-step1.sh >/tmp/s1_real.log 2>&1; echo $?)
+  s2_real=$(PR_BODY="$real_body" bash /tmp/sbd-ci-step2.sh >/tmp/s2_real.log 2>&1; echo $?)
+  s2_legacy=$(PR_BODY="$legacy_body" bash /tmp/sbd-ci-step2.sh >/tmp/s2_legacy.log 2>&1; echo $?)
+
+  if [ "$s1_fab" != "0" ] || [ "$s2_fab" != "0" ]; then
+    pass "behavior: CI gate hard-fails a fabricated Auto block (real PR #38 shape)"
+  else
+    fail "behavior: CI gate hard-fails a fabricated Auto block (got: step1=$s1_fab step2=$s2_fab, expected at least one non-zero)"
+  fi
+  if [ "$s1_real" = "0" ] && [ "$s2_real" = "0" ]; then
+    pass "behavior: CI gate passes a genuine track-report.sh render"
+  else
+    fail "behavior: CI gate passes a genuine track-report.sh render (got: step1=$s1_real step2=$s2_real)"
+  fi
+  if [ "$s2_legacy" = "0" ]; then
+    pass "behavior: CI gate still soft-warns (not fails) a true legacy body with no audit section"
+  else
+    fail "behavior: CI gate still soft-warns a true legacy body with no audit section (got exit $s2_legacy)"
+  fi
+  rm -f /tmp/sbd-ci-step1.sh /tmp/sbd-ci-step2.sh /tmp/s1_fab.log /tmp/s2_fab.log /tmp/s1_real.log /tmp/s2_real.log /tmp/s2_legacy.log
+else
+  skip "behavior: CI gate scripts (agent-pr-audit.yml not found)"
 fi
 
 # Scoped to agent PRs only. A blanket rule would fail every hand-written PR and be

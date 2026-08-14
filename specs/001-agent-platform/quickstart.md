@@ -14,7 +14,9 @@ the Phase 0 (P1) kernel is independently testable before later slices exist.
 
 ## Prerequisites
 
-- Go 1.23, Python 3.12, Node 20+ (for the web surface)
+- **go1.26.x**, **Python 3.13.15+** (with `uv` 0.11.16), **Node 22.x LTS** (for
+  the web surface) — exact dependency pins in
+  [plan.md § Pinned toolchain](plan.md)
 - Docker (Postgres, Redis, sandbox images)
 - A configured provider credential in the vault (never in env/prompt — FR-034)
 
