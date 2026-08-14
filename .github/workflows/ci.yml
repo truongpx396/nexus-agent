@@ -2,8 +2,9 @@ name: CI
 
 # Lint, test, build and security-scan every change. The repo is spec-stage today:
 # jobs detect whether a component actually has source yet and SKIP gracefully when
-# it does not, then light up automatically once code lands under backend-go/ or
-# backend-python/. Nothing here needs editing when the first real code is merged.
+# it does not, then light up automatically once code lands under backend-go/,
+# ml-python/, or frontend/. Nothing here needs editing when the first real code
+# is merged.
 
 on:
   push:
@@ -30,18 +31,21 @@ jobs:
       python: ${{ steps.check.outputs.python }}
       docker: ${{ steps.check.outputs.docker }}
       terraform: ${{ steps.check.outputs.terraform }}
+      frontend: ${{ steps.check.outputs.frontend }}
     steps:
       - uses: actions/checkout@v4
       - id: check
         shell: bash
         run: |
           set -euo pipefail
+          shopt -s globstar
           has() { compgen -G "$1" > /dev/null 2>&1 && echo true || echo false; }
           {
             echo "go=$(has 'backend-go/**/*.go')"
-            echo "python=$(has 'backend-python/**/*.py')"
+            echo "python=$(has 'ml-python/**/*.py')"
             echo "docker=$(has 'deploy/**/Dockerfile*')"
             echo "terraform=$(has 'infra/terraform/**/*.tf')"
+            echo "frontend=$(has 'frontend/**/*.tsx')"
           } >> "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
 
@@ -68,7 +72,7 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v2.5.0
           working-directory: backend-go
       - name: Test
         run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
@@ -87,32 +91,56 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: backend-python
+        working-directory: ml-python
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
       - name: Install tooling
-        run: |
-          python -m pip install --upgrade pip
-          pip install ruff
-          if [ -f pyproject.toml ]; then pip install -e ".[dev]" || pip install -e . || true; fi
-          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+        run: uv sync
       - name: Lint (ruff)
-        run: ruff check .
+        run: uv run ruff check .
       - name: Format check (ruff)
-        run: ruff format --check .
+        run: uv run ruff format --check .
       - name: Test (pytest)
         run: |
+          shopt -s globstar
           if compgen -G "tests/**/*.py" > /dev/null || compgen -G "**/test_*.py" > /dev/null; then
-            pip install pytest && pytest -q
+            uv run pytest -q
           else
             echo "No tests found yet — skipping."
           fi
 
   # ---------------------------------------------------------------------------
-  # Validate every Dockerfile builds (no push here — that is the deploy workflow).
+  # Frontend (Node/React) web surface.
+  # ---------------------------------------------------------------------------
+  frontend:
+    needs: detect
+    if: needs.detect.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Build
+        run: npm run build
+      - name: Format check
+        run: npm run format:check
+
+  # ---------------------------------------------------------------------------
+  # Validate every Dockerfile builds (no push here -- that is the deploy workflow).
   # ---------------------------------------------------------------------------
   docker-build:
     needs: detect
@@ -180,11 +208,27 @@ jobs:
           soft_fail: true
 
   # ---------------------------------------------------------------------------
+  # Statistical eval gate placeholder. The real gate (pass^k over the
+  # regression class, baseline-interval comparison, judge calibration) lands
+  # in Phase 2 -- T026e-T026t. Declared as a real job now so ci-gate can depend
+  # on it from day one and Phase 2 only has to fill in its steps, never rewire
+  # ci-gate.
+  # ---------------------------------------------------------------------------
+  eval-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Eval gate placeholder
+        run: |
+          echo "eval gate placeholder -- real gate lands in Phase 2 (T026g)"
+          exit 0
+
+  # ---------------------------------------------------------------------------
   # Single gate the branch-protection rule can require. Fails only if a job that
   # actually ran ended in failure; skipped (absent-component) jobs pass the gate.
   # ---------------------------------------------------------------------------
   ci-gate:
-    needs: [go, python, docker-build, security]
+    needs: [go, python, docker-build, security, frontend, eval-gate]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -194,7 +238,8 @@ jobs:
           set -euo pipefail
           fail=0
           for r in "${{ needs.go.result }}" "${{ needs.python.result }}" \
-                   "${{ needs.docker-build.result }}" "${{ needs.security.result }}"; do
+                   "${{ needs.docker-build.result }}" "${{ needs.security.result }}" \
+                   "${{ needs.frontend.result }}" "${{ needs.eval-gate.result }}"; do
             if [[ "$r" == "failure" ]]; then fail=1; fi
           done
           if [[ "$fail" == "1" ]]; then

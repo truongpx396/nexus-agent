@@ -1,0 +1,50 @@
+# docker-compose.yml
+#
+# Local development backing services for the Nexus Agent Platform. Wraps only
+# third-party images (Postgres, Redis) — no Dockerfiles exist in this repo yet
+# (none are in scope this phase), so there is no `api`/app service defined
+# here. Service names are `postgres` and `redis` because quickstart.md
+# documents `docker compose up -d postgres redis` literally.
+#
+# Governance applied: devops-cicd.instructions.md + backing-services.instructions.md
+# — exact pinned image tags (never `latest`), healthchecks on every backing
+# service, credentials only via `${VAR:?...}` (fail loud, never hardcoded /
+# never defaulted), dev ports bound to 127.0.0.1 only, named volumes for state.
+
+services:
+  postgres:
+    image: postgres:16.4
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set in .env}"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    volumes:
+      - redisdata:/data
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+
+volumes:
+  pgdata:
+  redisdata:
