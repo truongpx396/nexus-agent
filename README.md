@@ -258,9 +258,9 @@ principles). Every design decision maps back to one of them:
 
 | Layer | Choice |
 |-------|--------|
-| 🔵 **Control plane, gateway, kernel, workers** | Go 1.23 (`net/http`/gRPC, `pgx`, `go-redis`) |
-| 🐍 **ML / eval helpers (off the paying loop)** | Python 3.12 (`pytest`, eval runner, LLM-as-judge, context condenser) |
-| 💻 **Web surface** | TypeScript 5.x · React 19 · Vite · Tailwind · React Query |
+| 🔵 **Control plane, gateway, kernel, workers** | go1.26.x (`net/http`/gRPC, `pgx/v5`, `go-redis/v9`, OpenTelemetry) |
+| 🐍 **ML / eval helpers (off the paying loop)** | Python 3.13.15+ via `uv` (`pytest`, eval runner, LLM-as-judge, context condenser) |
+| 💻 **Web surface** | Node 22.x LTS · TypeScript 6.x · React 19 · Vite · Tailwind 4 · TanStack Query |
 | 🗄️ **State store** | PostgreSQL — append-only event log + config/cost/audit tables, tenant isolation via **row-level security** with transaction-local (`SET LOCAL`) scope |
 | ⚡ **Cache / locks / reservations** | Redis — session-key serial locks, **atomic budget-reservation counters** (the pre-spend ceiling of FR-083), rate-limit token buckets, sandbox-pool metadata, hot session cache |
 | 📨 **Durable queue / event plane** | NATS JetStream (default adapter behind a swappable queue port; SQS/Redis Streams/Temporal-class alternates) |
@@ -321,7 +321,7 @@ backend-go/
 ├── migrations/               # Postgres schema incl. row-level security policies
 └── tests/                    # contract · integration · load · unit
 
-ml-python/                    # Python 3.12 helper service (off the paying loop)
+ml-python/                    # Python 3.13 helper service (off the paying loop)
 ├── src/
 │   ├── evals/                # corpus + suite classes (incl. retrieval), trial statistics,
 │   │                         #   pinned grader libraries beneath the statistics layer,
@@ -361,7 +361,9 @@ docs/diagrams/                # Excalidraw sources: architecture · kernel lifec
 
 ### Prerequisites
 
-- **Go 1.23**, **Python 3.12**, **Node 20+** (for the web surface)
+- **go1.26.x**, **Python 3.13.15+** (with `uv`), **Node 22.x LTS** (for the web
+  surface) — exact dependency pins in
+  [plan.md § Pinned toolchain](specs/001-agent-platform/plan.md)
 - **Docker** (Postgres, Redis, sandbox images)
 - A configured provider credential in the vault (never in env or prompt)
 

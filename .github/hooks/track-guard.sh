@@ -216,6 +216,42 @@ case "$tool" in
         case "$rel" in "$a"*) ok=1 ;; esac
       done
       IFS="$saved_ifs"
+
+      # The run's OWN bookkeeping directory is always writable, regardless of scope. It
+      # holds the governance bundle, the PR body and the run record — artifacts this skill
+      # REQUIRES the model to write, which are gitignored and never part of the reviewed
+      # diff. Scoping them as if they were deliverables is a category error, and the
+      # observed run shows what it costs: `runs/` was absent from the approved prefixes, so
+      # the model composed the governance bundle into `backend-go/.gov.tmp2.md` — an
+      # in-scope DELIVERABLE path — and shell-`cp`'d it across. The guard pushed a
+      # bookkeeping file into the very tree it exists to protect.
+      # Resolved as an ABSOLUTE path, never against the hook's CWD. A relative RUNS_DIR
+      # ("runs", the shipped default) means <repo-root>/runs — so a `runs/` directory that
+      # happens to sit under some subdirectory the hook was invoked from is a DIFFERENT
+      # directory and must stay denied. Both roots are checked because the bundle is
+      # written to the main checkout while the work lives in a linked worktree.
+      if [ "$ok" -ne 1 ]; then
+        _runs="${RUNS_DIR:-runs}"
+        case "$p" in /*) _abs="$p" ;; *) _abs="$PWD/$p" ;; esac
+        case "$_runs" in
+          /*) case "$_abs" in "${_runs%/}"/*) ok=1 ;; esac ;;
+          *)  for _base in "$TRACK_MAIN_ROOT" "${GIT_WT_ROOT:-}"; do
+                [ -n "$_base" ] || continue
+                case "$_abs" in "${_base%/}/${_runs%/}"/*) ok=1 ;; esac
+              done ;;
+        esac
+        unset _runs _abs _base
+      fi
+      # A path outside EVERY worktree gets its own message. It is not a scope dispute — no
+      # track owns it and no prefix can match it, because the scope is repo-relative and
+      # `_git_relpath` leaves such a path absolute. The generic "merge conflict at
+      # integration" wording named no in-bounds move for it, and the observed failure mode
+      # is precisely what that produces: an agent told to stage work in a scratch dir gets
+      # every Write denied, then reaches for `cat > … <<EOF` in Bash to route around the
+      # guard. Say where the work belongs instead.
+      if [ "$ok" -ne 1 ] && [ -z "$GIT_WT_ROOT" ]; then
+        deny "'$rel' is outside every git worktree, so no track owns it — this track's scope is repo-relative (${p_allowed:-<empty>}). Write into the worktree under an owned prefix instead of a scratch/temp directory: work written outside the repo never reaches the diff, the evidence gate, or the PR. If a scratch dir is genuinely needed, add it to TRACK_ALLOWED_PREFIXES as an ABSOLUTE path."
+      fi
       [ "$ok" -eq 1 ] ||
         deny "'$rel' is outside this track's ownership scope (set TRACK_ALLOWED_PREFIXES); editing it would become a merge conflict at integration${p_scoped_by:+ — scope for this path came from $p_scoped_by/.github/hooks/track-env.sh (that worktree's own track), not the session's}"
 
@@ -295,24 +331,56 @@ case "$tool" in
         *--delete*|*--mirror*|*--all*|*--tags*|*--prune*|*" -d "*) return 1 ;;
       esac
       _wt="${GIT_WT_ROOT:-$PWD}"
-      _cur="$(git -C "$_wt" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+      # Tokens after `git push`, flags and blanks dropped: [<remote>] [<refspec>].
+      _toks="$(printf '%s' "$_c" | sed -n 's/.*git push//p' | tr ' \t' '\n\n' \
+               | grep -v '^-' | grep -v '^$' || true)"
+      # The first token is the remote only if git actually knows it as one — otherwise a
+      # bare `git push mybranch` would have its BRANCH eaten as a remote name.
+      _rem=""
+      if [ -n "$_toks" ]; then
+        _t1="$(printf '%s\n' "$_toks" | head -1)"
+        if git -C "$_wt" remote 2>/dev/null | grep -Fqx "$_t1"; then
+          _rem="$_t1"; _toks="$(printf '%s\n' "$_toks" | sed 1d)"
+        fi
+      fi
+      _spec="$(printf '%s\n' "$_toks" | grep -v '^$' | tail -1 || true)"
+
+      # WHICH branch does this push publish? The REFSPEC's answer is authoritative, and is
+      # the only one that survives the hook firing from a different checkout than the work.
+      # Reading HEAD at the hook's CWD does not: under worktree isolation the guard's CWD is
+      # routinely the MAIN checkout, where HEAD is `main` — so `git push -u origin feat-x`
+      # was read as an attempt to publish the base branch and denied, making the skill's own
+      # documented handoff step (`gh pr create`) unreachable and pressuring the worker into
+      # self-granting TRACK_ALLOW_FF_PUSH. Fall back to HEAD only when no refspec names one.
+      case "$_spec" in
+        "" | HEAD) _src=""; _dst="" ;;
+        *:*)       _src="${_spec%%:*}"; _dst="${_spec#*:}" ;;
+        *)         _src="$_spec"; _dst="$_spec" ;;
+      esac
+      case "$_src" in
+        "" | HEAD) _src="$(git -C "$_wt" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")" ;;
+      esac
+      [ -n "$_dst" ] || _dst="$_src"
+      _cur="$_src"
       { [ -n "$_cur" ] && [ "$_cur" != "HEAD" ]; } || return 1
+      # No redirection: `HEAD:main` / `feat-x:main` publishes somewhere else, not this branch.
+      [ "$_dst" = "$_cur" ] || return 1
+      # It must be a real local branch here (worktrees of one repo share refs, so this
+      # resolves the sibling worktree's branch from the main checkout too).
+      git -C "$_wt" rev-parse --verify --quiet "refs/heads/$_cur" >/dev/null 2>&1 || return 1
       # Never publish the base/default branch — that is the merge gate's ref, not ours.
       _def="${TRACK_DEFAULT_BRANCH:-}"
       [ -n "$_def" ] || { _b="${TRACK_BASE_REF:-}"; _def="${_b##*/}"; }
       [ -n "$_def" ] || _def="main"
       [ "$_cur" != "$_def" ] || return 1
-      _rem="$(git -C "$_wt" config --get "branch.$_cur.remote" 2>/dev/null || echo origin)"
+      # A remote named on the command line wins; else the branch's own config; else origin.
+      if [ -z "$_rem" ]; then
+        _rem="$(git -C "$_wt" config --get "branch.$_cur.remote" 2>/dev/null || echo origin)"
+      fi
       [ -n "$_rem" ] || _rem=origin
       # Already on the remote → this is an update, not a first publish. Needs the opt-in.
-      ! git -C "$_wt" rev-parse --verify --quiet "refs/remotes/$_rem/$_cur" >/dev/null 2>&1 || return 1
-      # A refspec, if present, must name THIS branch — no `HEAD:main` style redirection.
-      _spec="$(printf '%s' "$_c" | sed -n 's/.*git push//p' | tr ' \t' '\n\n' \
-               | grep -v '^-' | grep -v "^${_rem}$" | grep -v '^$' | tail -1 || true)"
-      case "$_spec" in
-        ""|HEAD|"$_cur"|"HEAD:$_cur"|"$_cur:$_cur") return 0 ;;
-        *) return 1 ;;
-      esac
+      ! git -C "$_wt" rev-parse --verify --quiet "refs/remotes/$_rem/$_dst" >/dev/null 2>&1 || return 1
+      return 0
     }
     case "$cmd" in
       *"git push"*)
@@ -328,10 +396,50 @@ case "$tool" in
     # OPTIONAL destructive-infra guard — irreversible data/infra ops. Off unless
     # TRACK_GUARD_DESTRUCTIVE is set; case-insensitive; tune patterns per stack.
     if [ -n "${TRACK_GUARD_DESTRUCTIVE:-}" ]; then
+      # Scan the command's CODE, not the data it merely carries. A heredoc BODY is data:
+      # the run that motivated this had a routine
+      #   cat > pr-body.md <<'EOF' … "output was truncated to 50 lines" … EOF
+      # denied as an "irreversible schema op". That is both wrong and uncompliable — the
+      # only way to satisfy the rule was to stop writing the PR body — which is exactly the
+      # shape of rule that gets worked around rather than obeyed. So drop heredoc bodies
+      # before matching, keeping the command line that opens them.
+      scan=""; _delim=""
+      while IFS= read -r _l; do
+        if [ -n "$_delim" ]; then                  # inside a body: skip to the terminator
+          _t="${_l#"${_l%%[![:space:]]*}"}"        # left-trim (covers <<- style indenting)
+          [ "$_t" = "$_delim" ] && _delim=""
+          continue
+        fi
+        scan="$scan$_l
+"
+        case "$_l" in
+          *"<<"*)
+            _d="${_l##*<<}"; _d="${_d#-}"
+            _d="${_d#"${_d%%[![:space:]]*}"}"      # left-trim
+            _d="${_d%%[[:space:]]*}"; _d="${_d%%;*}"
+            _d="$(printf '%s' "$_d" | tr -d "\"'")"
+            case "$_d" in
+              "" | *"<"*) ;;                       # `<<<` herestring or malformed: no body
+              *) _delim="$_d" ;;
+            esac ;;
+        esac
+      done <<<"$cmd"
+      unset _l _t _d _delim
+
       shopt -s nocasematch
-      case "$cmd" in
-        *"drop table"* | *"drop database"* | *"drop schema"* | *truncate*)
+      case "$scan" in
+        # `truncate` is NOT matched bare: it is also coreutils (`truncate -s 0 f`) and, far
+        # more often, an ordinary English word ("truncated", "truncate the log"). Require
+        # the SQL spelling, or a SQL client on the same command line.
+        *"drop table"* | *"drop database"* | *"drop schema"* | *"truncate table"*)
           deny "blocked: irreversible schema op in '$cmd'. Express it as a reversible migration, not an ad-hoc DROP/TRUNCATE." ;;
+        *truncate*)
+          case "$scan" in
+            *psql* | *mysql* | *mariadb* | *sqlite3* | *cockroach* | *clickhouse-client* | *mongosh*)
+              deny "blocked: irreversible schema op in '$cmd'. Express it as a reversible migration, not an ad-hoc DROP/TRUNCATE." ;;
+          esac ;;
+      esac
+      case "$scan" in
         *flushall* | *flushdb*)
           deny "blocked: Redis FLUSHALL/FLUSHDB wipes shared state. Scope deletions to your own keys instead." ;;
         *"nats stream rm"* | *"nats stream delete"* | *"nats stream purge"* | *"nats consumer rm"* | *"nats consumer delete"*)
@@ -340,14 +448,15 @@ case "$tool" in
           deny "blocked: 'rm -rf' on an absolute or home path. Delete only within the repo/worktree." ;;
       esac
       # Unbounded DELETE (no WHERE) wipes a whole table.
-      case "$cmd" in
+      case "$scan" in
         *"delete from"*)
-          case "$cmd" in
+          case "$scan" in
             *where*) : ;;
             *) deny "blocked: 'DELETE FROM' with no WHERE clause wipes the whole table. Add a WHERE filter." ;;
           esac ;;
       esac
       shopt -u nocasematch
+      unset scan
     fi
     ;;
 esac

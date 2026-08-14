@@ -66,11 +66,13 @@ consumer surfaces/personal connectors).
 **Purpose**: Monorepo scaffolding, toolchains, and local dev harness
 
 - [ ] T001 Create the monorepo directory tree per plan.md (`backend-go/{cmd/control-plane,cmd/runtime-worker,cmd/surface-gateway,kernel,internal,migrations,tests}`, `ml-python/src`, `frontend/src`, `deploy/`) with a top-level `README.md` and `Makefile` stub
-- [ ] T002 Initialize the Go module and workspace in `backend-go/go.mod` (Go 1.23) with baseline deps (`net/http`, gRPC, `pgx`, `go-redis`, OpenTelemetry SDK)
-- [ ] T003 [P] Initialize the Python 3.12 helper project in `ml-python/pyproject.toml` (pytest, LLM-as-judge deps) with `ml-python/src/__init__.py`
-- [ ] T004 [P] Initialize the React 19 + Vite + Tailwind + React Query web surface in `frontend/package.json` and `frontend/vite.config.ts`
-- [ ] T005 [P] Configure Go linting/formatting in `backend-go/.golangci.yml` and `gofmt`/`goimports` via the `Makefile`
-- [ ] T006 [P] Configure Python lint/format (ruff + black) in `ml-python/pyproject.toml` and TS lint (eslint + prettier) in `frontend/.eslintrc.cjs`
+> **Version pins for T002-T006 are normative and come from plan.md "Pinned toolchain"** (rationale in research.md §35). Do not resolve `latest` for anything the table pins exactly; commit `go.sum`, `uv.lock`, and `package-lock.json` as generated, never hand-edited.
+
+- [ ] T002 Initialize the Go module and workspace in `backend-go/go.mod` (**go1.26.x**) with baseline deps pinned exactly: `net/http` (stdlib), `google.golang.org/grpc v1.83.0`, `github.com/jackc/pgx/v5 v5.10.0`, `github.com/redis/go-redis/v9 v9.22.0`, `go.opentelemetry.io/otel v1.45.0`
+- [ ] T003 [P] Initialize the **Python 3.13.15+** helper project in `ml-python/pyproject.toml` via **uv 0.11.16** (`requires-python = ">=3.13.15"`; pytest + LLM-as-judge deps, resolved at generation time and frozen into a committed `uv.lock`) with `ml-python/src/__init__.py`
+- [ ] T004 [P] Initialize the React 19 + Vite + Tailwind + TanStack Query web surface in `frontend/package.json` and `frontend/vite.config.ts` on **Node 22.x (LTS)**, pinned: `react`/`react-dom` 19.2.8, `vite ^8.2.0`, `@vitejs/plugin-react ^6.0.4`, `typescript ~6.0.2`, `tailwindcss 4.3.3` + `@tailwindcss/vite`, `@tanstack/react-query 5.101.4`
+- [ ] T005 [P] Configure Go linting/formatting in `backend-go/.golangci.yml` for **golangci-lint 2.5.0** (v2 schema — top-level `linters:` and `formatters:` blocks, not the v1 `linters-settings:` layout) and `gofmt`/`goimports` via the `Makefile`
+- [ ] T006 [P] Configure Python lint/format with **Ruff only** (`ruff check` + `ruff format`, no black — per `python.instructions.md`) in `ml-python/pyproject.toml`, and TS lint/format in `frontend/` with **`oxlint 1.78.0`** (exact pin over the Vite template's `^1.75.0`; config in `frontend/.oxlintrc.json`) plus **`prettier 3.9.6`** in `frontend/.prettierrc`. No ESLint and no `.eslintrc.cjs` — the current Vite `react-ts` template ships oxlint and carries no ESLint dependency
 - [ ] T007 [P] Author `docker-compose.yml` at repo root bringing up Postgres and Redis for local dev (referenced by quickstart.md)
 - [ ] T008 [P] Add `Makefile` targets (`migrate`, `seed-tenant`, `run-control-plane`, `run-worker`, `evals`, `evals-calibrate`, `evals-baseline`, `test`) as stubs wiring the quickstart commands
 - [ ] T009 [P] Add CI workflow skeleton in `.github/workflows/ci.yml` running Go tests, Python tests, and the eval gate placeholder

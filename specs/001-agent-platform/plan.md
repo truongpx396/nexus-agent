@@ -17,8 +17,8 @@ multi-tenant SaaS, single-tenant, self-hosted/BYOC, and hybrid topologies by
 configuration — the kernel is never forked per customer.
 
 **Technical approach**: A hard control-plane / data-plane split behind a versioned
-contract. Go 1.23 owns the control plane, gateway, and kernel loop for concurrency
-and small deployable binaries; Python 3.12 hosts ML/eval/condenser helpers.
+contract. Go 1.26 owns the control plane, gateway, and kernel loop for concurrency
+and small deployable binaries; Python 3.13 hosts ML/eval/condenser helpers.
 PostgreSQL is the append-only event log with row-level security (tenant isolation);
 Redis provides session locks, rate-limit counters, and ephemeral state. Agent runs
 execute as asynchronous jobs on a durable queue processed by stateless, disposable
@@ -30,12 +30,16 @@ increment.
 
 ## Technical Context
 
-**Language/Version**: Go 1.23 (control plane, gateway, kernel loop, workers);
-Python 3.12 (eval harness, LLM-as-judge, context condenser / summarizer helpers);
-TypeScript 5.x on React 19 (web surface)
+**Language/Version**: Go 1.26.x (control plane, gateway, kernel loop, workers);
+Python 3.13.15+ (eval harness, LLM-as-judge, context condenser / summarizer
+helpers); TypeScript 6.x on React 19 under Node 22.x LTS (web surface).
+Exact toolchain and dependency pins live in **Pinned toolchain** below — that
+table is the single source of truth for `go.mod`, `pyproject.toml`, and
+`package.json`, and task text defers to it.
 
-**Primary Dependencies**: Go stdlib + `net/http`/gRPC, `pgx` (Postgres),
-`go-redis`; NATS JetStream (`nats.go`) as the default durable-queue + event-plane
+**Primary Dependencies**: Go stdlib + `net/http`/`google.golang.org/grpc`,
+`github.com/jackc/pgx/v5` (Postgres), `github.com/redis/go-redis/v9`;
+NATS JetStream (`nats.go`) as the default durable-queue + event-plane
 adapter behind an abstract queue port (SQS/Redis Streams/Temporal-class swappable);
 a single internal provider-abstraction interface with adapters
 (Anthropic native, OpenAI-compatible, Bedrock/Vertex, CLI-subprocess fallback);
@@ -47,8 +51,8 @@ crawl4ai for LLM-friendly web fetch/crawl and a MarkItDown-class converter for
 documents (both **in-sandbox**, returning clean chunked markdown — they are not
 dependencies of the Go worker); pgvector as the default retrieval backend when
 the file-first tier stops being enough (a dedicated vector store attaches as an
-optional `retrieval` adapter); Python: eval runner + LLM-as-judge + pinned grader
-libraries; React 19 + Vite + Tailwind + React Query
+optional `retrieval` adapter); Python: `uv`-managed eval runner + LLM-as-judge +
+pinned grader libraries; React 19 + Vite + Tailwind + TanStack Query
 
 **Storage**: PostgreSQL (append-only, `schema_version`-stamped event log + cost
 records + hash-chained audit receipts + tenant/agent/skill config; tenant
@@ -134,6 +138,36 @@ plus per-user personal connectors (Gmail/Drive/Calendar/Notion, FR-053); startup
 enterprise (50,000 people) via
 configuration; four deployment topologies from one build; ~5,000+ concurrent
 sessions per production single-org deployment
+
+### Pinned toolchain
+
+Authoritative version pins for the three surfaces. Probed against the real
+generators during the Phase 1 scaffold run and confirmed as the intended
+baseline on 2026-08-14 (see research.md §35). Manifests (`go.mod`,
+`pyproject.toml`, `package.json`) must match this table; where task prose in
+tasks.md names a looser version, **this table wins**.
+
+| Surface | Runtime | Pinned dependencies |
+|---|---|---|
+| `frontend/` | **Node 22.x (LTS)** | react 19.2.8, react-dom 19.2.8, vite ^8.2.0, @vitejs/plugin-react ^6.0.4, typescript ~6.0.2, oxlint 1.78.0 (exact; the `npm create vite` template default is ^1.75.0), tailwindcss 4.3.3 + @tailwindcss/vite, @tanstack/react-query 5.101.4, prettier 3.9.6 |
+| `backend-go/` | **go1.26.x** | golangci-lint 2.5.0 (v2 `linters:` / `formatters:` schema), go.opentelemetry.io/otel v1.45.0, google.golang.org/grpc v1.83.0, github.com/redis/go-redis/v9 v9.22.0, github.com/jackc/pgx/v5 v5.10.0 |
+| `ml-python/` | **Python 3.13.15+** (`requires-python = ">=3.13.15"`) | uv 0.11.16; ruff and pytest resolved to latest at generation time and then frozen into `uv.lock` |
+
+Three notes on why the pins read the way they do:
+
+- **Exact vs. range is deliberate.** Application dependencies whose behavior the
+  build depends on are pinned exactly (react, tailwindcss, @tanstack/react-query,
+  prettier, oxlint, every Go module). Build-plugin ranges (`^8.2.0`, `^6.0.4`,
+  `~6.0.2`) are the generator's own defaults, kept as ranges but frozen by the
+  committed lockfile — `package-lock.json`, `go.sum`, and `uv.lock` are the
+  reproducibility boundary, not the manifest range.
+- **`oxlint`, not ESLint.** The current Vite `react-ts` template ships
+  `.oxlintrc.json` and `"lint": "oxlint"` with no ESLint dependency at all.
+  Prettier is added separately because formatting is orthogonal to linting and
+  the template does not ship it. No `.eslintrc.cjs` exists in this repo.
+- **`ruff` and `pytest` float at generation, then freeze.** Both are dev-only
+  tooling off the paying loop and out of the shipped artifact, so pinning an
+  exact upstream version buys nothing that `uv.lock` does not already buy.
 
 ## Constitution Check
 
@@ -408,7 +442,7 @@ backend-go/
     ├── load/                 # concurrency + endurance-soak harness, SC-008 SLA assertions
     └── unit/
 
-ml-python/                    # Python 3.12 helper service (off the paying loop)
+ml-python/                    # Python 3.13 helper service (off the paying loop)
 ├── src/
 │   ├── evals/                # corpus + suite classes (incl. retrieval), trial statistics,
 │   │                         #   pinned grader libraries beneath the statistics layer,
@@ -418,7 +452,7 @@ ml-python/                    # Python 3.12 helper service (off the paying loop)
 │   └── judge/                # rubric scoring, held-out grader protection, human-label calibration
 └── tests/
 
-frontend/                     # React 19 web surface (a thin surface adapter)
+frontend/                     # React 19 + Vite web surface (a thin surface adapter)
 ├── src/
 │   ├── components/
 │   ├── pages/

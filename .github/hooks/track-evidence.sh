@@ -177,6 +177,26 @@ else
   verdict="pass"; verdict_by="no-failure-signal"
 fi
 
+# --- vacuity: a green that verified NOTHING ----------------------------------
+# `go build ./...` on a module with no .go files prints "matched no packages" and exits
+# 0. Graded on failure signals alone that is indistinguishable from a build that
+# compiled the whole tree — and on the observed scaffold run it is exactly how the
+# `go-build` evidence floor was satisfied while nothing was compiled. The run's own PR
+# then reported 3/3 required kinds passing.
+#
+# NOT downgraded to a failure: during a scaffold an empty build is the honest state of
+# the world, and forcing it green is the "never edit the deliverable to make the gate
+# green" trap. The fix is to stop the capture from *reading* as proof — record the
+# vacuity so the gate, the report and the human all see "passed, verified nothing"
+# instead of a bare ✅.
+vacuous_re="${TRACK_VACUOUS_PATTERN:-}"
+[ -n "$vacuous_re" ] || vacuous_re='matched no packages|no packages to|\[no test files\]|no tests ran|No tests found|no tests to run|0 files? (checked|reformatted|inspected)|nothing to do|No files? (to lint|matching)|0 (problems|errors|warnings)( |$)|No sources? (found|to)'
+vacuous=false
+if [ "$verdict" = "pass" ] && printf '%s' "$resp" | grep -Eqi "$vacuous_re"; then
+  vacuous=true
+  verdict_by="vacuous-pass:nothing-verified"
+fi
+
 RUNS_DIR="${RUNS_DIR:-runs}"
 # Anchor a RELATIVE RUNS_DIR to the main working tree so the run record is
 # single-homed across the main checkout and any linked worktree — a bare "runs"
@@ -240,9 +260,10 @@ fingerprint="$(
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 tmp="$(mktemp)"
 jq --arg t "$ts" --arg k "$kind" --arg c "$cmd_display" --arg cf "$cmd" --arg r "$resp" --arg f "$fingerprint" \
-   --arg v "$verdict" --arg vb "$verdict_by" \
+   --arg v "$verdict" --arg vb "$verdict_by" --argjson vac "$vacuous" \
   '.evidence = ((.evidence // []) + [
       {t:$t, kind:$k, cmd:$c, response:$r, fingerprint:$f, verdict:$v, verdict_by:$vb}
       + (if $c != $cf then {cmd_full:$cf} else {} end)
+      + (if $vac then {vacuous:true} else {} end)
     ]) | .started_ts = (.started_ts // $t) | .last_ts = $t' "$rec" >"$tmp" && mv "$tmp" "$rec"
 exit 0
