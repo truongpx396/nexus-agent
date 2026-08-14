@@ -68,7 +68,24 @@ if [ -f "$__env_dir/track-env.sh" ]; then . "$__env_dir/track-env.sh"; fi
 if [ -f "$__env_dir/track-env.base.sh" ]; then . "$__env_dir/track-env.base.sh"; fi
 unset __env_dir
 
-[ -n "${RUN_ID:-}" ] || exit 0
+# Unlike the hooks, this is a CLI the skill calls deliberately — and the two things it
+# writes (phase, governance) are the run's resume anchors. A silent no-op here is the
+# worst possible failure: the caller believes it stamped the pipeline position, the
+# record shows the step was never taken, and nobody finds out until the audit reads the
+# gap as a skipped step. Costs nothing to say so; stays exit 0 so an inline call in a
+# compound command still behaves as documented.
+if [ -z "${RUN_ID:-}" ]; then
+  printf '%s\n' \
+    "track-note: RUN_ID is not set — this call recorded NOTHING." \
+    "  '${1:-<subcommand>}' was a no-op: every subcommand writes into \$RUNS_DIR/\$RUN_ID.json," \
+    "  so any phase/governance/status stamp you believe you just made is absent from the record." \
+    "  Fix: run track-preflight.sh --persist (it writes the managed RUN_ID block into the" \
+    "  installed .github/hooks/track-env.sh that this script sources), or export RUN_ID for" \
+    "  this call. If the block IS installed, the run has been retired — check for a" \
+    "  success/blocked status or a completed breadcrumb, and whether its branch is still" \
+    "  checked out in some worktree of this repo." >&2
+  exit 0
+fi
 
 sub="${1:-}"
 RUNS_DIR="${RUNS_DIR:-runs}"
@@ -144,7 +161,36 @@ case "$sub" in
     # The sha lets a reader tell whether the bundle changed after briefs were built.
     file="${2:-}"
     [ -n "$file" ] || { printf '%s\n' "track-note: 'governance' needs a file path." >&2; rm -f "$tmp"; exit 2; }
-    [ -f "$file" ] || { printf '%s\n' "track-note: governance bundle '$file' does not exist — persist it first." >&2; rm -f "$tmp"; exit 2; }
+    # Resolve to an ABSOLUTE path before recording it. A relative one is read back by
+    # whoever asks next — track-audit (G1), track-reconcile, track-compact — each from
+    # ITS own CWD, and those disagree the moment the work sits in a linked worktree:
+    # `runs/` is gitignored, so a worktree has its own private copy, and a bundle
+    # written there while the record lives in the main checkout's runs/ resolves to
+    # nothing from the main checkout ("recorded but MISSING from disk"). Prefer the
+    # file the caller actually points at; fall back to the same basename under the
+    # anchored RUNS_DIR so a path typed from the wrong CWD still finds its bundle.
+    if [ -f "$file" ]; then
+      _gov_dir="$(cd "$(dirname "$file")" 2>/dev/null && pwd || true)"
+      file="${_gov_dir:+$_gov_dir/}$(basename "$file")"
+      unset _gov_dir
+    elif [ -f "$RUNS_DIR/$(basename "$file")" ]; then
+      file="$RUNS_DIR/$(basename "$file")"
+    fi
+    [ -f "$file" ] || { printf '%s\n' "track-note: governance bundle '${2}' does not exist (looked in \$PWD and $RUNS_DIR) — persist it first." >&2; rm -f "$tmp"; exit 2; }
+    # The bundle belongs beside the record it is pinned into. Living elsewhere is not an
+    # error — the absolute path above keeps it findable — but it is how a run ends up
+    # with two divergent bundles, so say it out loud while there is still one.
+    _runs_abs="$(cd "$RUNS_DIR" 2>/dev/null && pwd || printf '%s' "$RUNS_DIR")"
+    case "$file" in
+      "$_runs_abs"/*) ;;
+      *) printf '%s\n' \
+           "track-note: WARNING — governance bundle is outside this run's records dir." \
+           "  bundle: $file" \
+           "  runs:   $_runs_abs  (where $RUN_ID.json lives)" \
+           "  The pin is absolute so it stays readable, but a bundle under a linked worktree's" \
+           "  gitignored runs/ is invisible to the main checkout and easily written twice." >&2 ;;
+    esac
+    unset _runs_abs
     sha="$( { if command -v shasum >/dev/null 2>&1; then shasum "$file"; else sha1sum "$file"; fi; } | cut -d' ' -f1)"
     # `governance_bundle` is the CURRENT pin (overwritten); `governance_stamps[]` is the
     # history (append-only). Both exist because a run legitimately re-pins mid-core: when a

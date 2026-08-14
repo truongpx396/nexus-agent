@@ -145,7 +145,7 @@ SUBAGENT_SEL='select(((.kind // "") == "subagent")
 # what would clear it — a finding with no next step just becomes noise everyone scrolls past.
 remediation_for() {
   case "$1" in
-    G1) printf 'Run governance discovery (references/governance.md), write the distilled bundle to runs/<RUN_ID>.governance.md, then: track-note.sh governance <path>' ;;
+    G1) printf 'Run governance discovery (references/governance.md), write the distilled bundle to <RUNS_DIR>/<RUN_ID>.governance.md (the anchored records dir preflight prints, NOT a bare runs/ — from a linked worktree that is a private, gitignored copy the main checkout cannot see), then: track-note.sh governance <path>' ;;
     G2) printf 'Read the missing .github/instructions/* file(s) and add their binding constraints to the bundle, then re-pin it.' ;;
     G3) printf 'Governance must be discovered and pinned BEFORE any subagent is dispatched. Re-run the affected dispatches with the bundle content embedded in each brief.' ;;
     G4) printf 'Read security-and-owasp.instructions.md, add its relevant constraints to the bundle, and re-review the trust-boundary diff against them.' ;;
@@ -186,6 +186,15 @@ changed="$(printf '%s\n%s\n%s\n' "$changed" \
 
 gov_path="$(j '.governance_bundle.path // ""')"
 gov_sha_rec="$(j '.governance_bundle.sha // ""')"
+# track-note.sh now pins an absolute path, but a record written before that (or by a
+# hand-rolled pin) carries a CWD-relative one, which resolves against wherever the
+# AUDIT happens to run — a different directory than the pinning session used whenever
+# the work sat in a linked worktree. Retry against the anchored RUNS_DIR before
+# declaring the bundle missing, so an older run is audited on its content rather than
+# failed on a path convention.
+if [ -n "$gov_path" ] && [ ! -f "$gov_path" ] && [ -f "$RUNS_DIR/${gov_path##*/}" ]; then
+  gov_path="$RUNS_DIR/${gov_path##*/}"
+fi
 # Pin HISTORY (track-note.sh appends one entry per `note governance`). Older records predate
 # the field, so fall back to the single current pin — a one-entry history behaves identically.
 n_stamps="$(j '.governance_stamps | length // 0')"; n_stamps="${n_stamps:-0}"
@@ -388,19 +397,52 @@ fi
 [ -n "$def_branch" ] || def_branch="$(git config --get init.defaultBranch 2>/dev/null || true)"
 [ -n "$def_branch" ] || def_branch="main"
 
+# Where is the RUN's work, as opposed to where this audit happens to be running? Those are
+# routinely different directories: the audit fires as a Stop hook from the session's root —
+# the MAIN checkout, still on the base branch — while Step 3 put the work in a sibling
+# worktree. Reading HEAD *here* then called a correctly-isolated run a Step-3 violation and
+# FAILED it (blocking, under TRACK_AUDIT=1) for doing precisely the right thing. So locate
+# the branch the breadcrumb approved and ask which worktree holds it; fall back to HEAD
+# here when there is no breadcrumb or the branch is checked out nowhere.
+bc_branch=""
+bc_file="$RUNS_DIR/$RUN_ID.dispatch"
+[ -f "$bc_file" ] && bc_branch="$(jq -r '.branch // empty' "$bc_file" 2>/dev/null || true)"
+
+_wt_path_for_branch() {  # echoes the worktree path holding refs/heads/$1, or nothing
+  git worktree list --porcelain 2>/dev/null | awk -v b="branch refs/heads/$1" '
+    /^worktree / { p = substr($0, 10) } $0 == b { print p; exit }'
+}
+_main_root=""
+_gcd_i="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+if [ -n "$_gcd_i" ]; then
+  case "$_gcd_i" in /*) ;; *) _gcd_i="$PWD/$_gcd_i" ;; esac
+  _main_root="$(cd "$_gcd_i/.." 2>/dev/null && pwd || true)"
+fi
+
+work_branch="$cur_branch"     # fallback: this checkout's HEAD
+in_worktree=0
+if [ "$(git rev-parse --git-dir 2>/dev/null || echo a)" != "$(git rev-parse --git-common-dir 2>/dev/null || echo b)" ]; then
+  in_worktree=1               # the audit itself is running inside a linked worktree
+fi
+audited_elsewhere=0
+if [ -n "$bc_branch" ] && [ "$bc_branch" != "$cur_branch" ]; then
+  _wt_path="$(_wt_path_for_branch "$bc_branch")"
+  if [ -n "$_wt_path" ]; then
+    work_branch="$bc_branch"
+    audited_elsewhere=1
+    if [ -n "$_main_root" ] && [ "$_wt_path" != "$_main_root" ]; then in_worktree=1; else in_worktree=0; fi
+  fi
+fi
+
 # I1 — worked on the default branch at all? That is the failure Step 3 exists to prevent.
 # A linked worktree is the expected form; branch-in-place is permitted ONLY as the
 # documented fallback, so it warns rather than fails.
-in_worktree=0
-if [ "$(git rev-parse --git-dir 2>/dev/null || echo a)" != "$(git rev-parse --git-common-dir 2>/dev/null || echo b)" ]; then
-  in_worktree=1
-fi
-if [ -n "$cur_branch" ] && [ "$cur_branch" = "$def_branch" ]; then
-  add I1 FAIL "work is on '$cur_branch', the default branch — the run never isolated (Step 3 exists to prevent exactly this)"
+if [ -n "$work_branch" ] && [ "$work_branch" = "$def_branch" ]; then
+  add I1 FAIL "work is on '$work_branch', the default branch — the run never isolated (Step 3 exists to prevent exactly this)"
 elif [ "$in_worktree" -eq 1 ]; then
-  add I1 PASS "isolated in a linked worktree on branch '$cur_branch'"
-elif [ -n "$cur_branch" ]; then
-  add I1 WARN "on branch '$cur_branch' but NOT in a linked worktree — branch-in-place is allowed only as the documented using-git-worktrees fallback, after surfacing it"
+  add I1 PASS "isolated in a linked worktree on branch '$work_branch'$([ "$audited_elsewhere" -eq 1 ] && printf ' (audited from the main checkout)')"
+elif [ -n "$work_branch" ]; then
+  add I1 WARN "on branch '$work_branch' but NOT in a linked worktree — branch-in-place is allowed only as the documented using-git-worktrees fallback, after surfacing it"
 else
   add I1 WARN "could not determine the current branch — isolation unverifiable"
 fi
@@ -408,15 +450,12 @@ fi
 # I2 — did the work land where the human approved? The breadcrumb records the branch that
 # was confirmed at preflight; drifting off it means the approved plan and the actual work
 # diverged silently.
-bc_branch=""
-bc_file="$RUNS_DIR/$RUN_ID.dispatch"
-[ -f "$bc_file" ] && bc_branch="$(jq -r '.branch // empty' "$bc_file" 2>/dev/null || true)"
 if [ -z "$bc_branch" ]; then
   add I2 WARN "no preflight breadcrumb for this run — the start gate was skipped, or RUNS_DIR differs from the one used at preflight"
-elif [ -n "$cur_branch" ] && [ "$bc_branch" != "$cur_branch" ]; then
-  add I2 WARN "breadcrumb approved branch '$bc_branch' but the work is on '$cur_branch'"
+elif [ -n "$work_branch" ] && [ "$bc_branch" != "$work_branch" ]; then
+  add I2 WARN "breadcrumb approved branch '$bc_branch' but the work is on '$work_branch'"
 else
-  add I2 PASS "work is on the branch confirmed at preflight ('$bc_branch')"
+  add I2 PASS "work is on the branch confirmed at preflight ('$bc_branch')$([ "$audited_elsewhere" -eq 1 ] && printf ' (checked out in its own worktree; this audit ran from the main checkout)')"
 fi
 
 # I3 — reconcile leaves a `last_reconcile` stamp. Absent means either it never ran (the

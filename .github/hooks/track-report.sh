@@ -346,10 +346,36 @@ if [ -n "$te" ]; then
   tm="$(jq -r '.token_estimate_method // ""' "$rec" 2>/dev/null || true)"
   printf -- '- **Token estimate (rough):** ~%s  *(method: %s)*\n' "$te" "$tm"
 fi
-if [ -f "$rec" ] && [ "$(jq -r '.trace | length' "$rec" 2>/dev/null || echo 0)" -gt 0 ]; then
-  printf -- '- **Subagent trace (in order):**\n'
-  jq -r '.trace[] | "  - \(.t): \(.event) \(.agent_type // .agent_display_name // "") \((.agent_id // "") | if . == "" then "" else "(\(.))" end)\((.reason // "") | if . == "" then "" else " — why: \(.)" end)"' \
+# Dispatches — WHAT each subagent was asked to do, and how much governance its brief
+# carried. This leads because the raw trace below answers "how many agents ran" and
+# nothing else: on a surface that leaves `agent_description` empty it degenerates into N
+# identical `SubagentStart general-purpose (a3c8254…)` rows, which tells a reviewer
+# nothing about what was delegated. track-brief.sh sees the dispatch tool's own
+# `description` at PreToolUse, so it is available even when the trace's reason is not.
+if [ -f "$rec" ] && [ "$(jq -r '.briefs | length' "$rec" 2>/dev/null || echo 0)" -gt 0 ]; then
+  printf -- '- **Subagent dispatches (what each was asked to do — brief text as the tool received it):**\n'
+  jq -r '.briefs[]
+         | "  - \(.t): \(.subagent_type // .tool // "dispatch")"
+           + ((.desc // "") | if . == "" then " — *(no description supplied)*" else " — \(.)" end)
+           + " · governance: "
+           + (if (.declared_na // false) then "declared n/a"
+              elif (.thin // false)      then "**NONE of \(.lines_total) constraint lines** ⚠️"
+              else "\(.lines_matched)/\(.lines_total) constraint lines"
+                   + ((.sections // []) | if length == 0 then "" else " (\(join(", ")))" end)
+                   + (if (.below_min // false) then " — thin ⚠️" else "" end)
+              end)' \
     "$rec" 2>/dev/null || true
+fi
+if [ -f "$rec" ] && [ "$(jq -r '.trace | length' "$rec" 2>/dev/null || echo 0)" -gt 0 ]; then
+  printf -- '- **Subagent lifecycle trace (in order):**\n'
+  jq -r '.trace[] | "  - \(.t): \(.event) \(.agent_type // .agent_display_name // "") \((.agent_id // "") | if . == "" then "" else "(\(.))" end)\((.reason // .stop_reason // "") | if . == "" then "" else " — \(.)" end)"' \
+    "$rec" 2>/dev/null || true
+  # An empty reason column is a WIRING fact, not an absence of purpose — say which, so
+  # nobody reads a bare trace as "the agents had no stated goal".
+  if [ "$(jq -r '[.trace[]? | select((.reason // "") != "")] | length' "$rec" 2>/dev/null || echo 0)" -eq 0 ] \
+     && [ "$(jq -r '.briefs | length' "$rec" 2>/dev/null || echo 0)" -eq 0 ]; then
+    printf -- '  - _No "why" recorded for any agent: this surface did not supply `agent_description` on `SubagentStart`, and `track-brief.sh` is not wired (run `install-hooks.sh --apply`). Wire it and the dispatch list above fills in._\n'
+  fi
 fi
 
 # Self-reported — clearly fenced off from the mechanical facts above.

@@ -247,6 +247,12 @@ fi
 # briefs built from it are unreproducible, so say so instead of pointing at a dead path.
 gov_present=false
 gov_path="$(printf '%s' "$gov" | jq -r 'if type=="object" then (.path // "") else "" end' 2>/dev/null || true)"
+# Same relative-path retry as track-audit's G1: a pin recorded before paths were
+# anchored resolves against the reconciling session's CWD, not the pinning one's.
+if [ -n "$gov_path" ] && [ ! -f "$gov_path" ] && [ -f "$RUNS_DIR/${gov_path##*/}" ]; then
+  gov_path="$RUNS_DIR/${gov_path##*/}"
+  gov="$(printf '%s' "$gov" | jq -c --arg p "$gov_path" '.path = $p' 2>/dev/null || printf '%s' "$gov")"
+fi
 [ -n "$gov_path" ] && [ -f "$gov_path" ] && gov_present=true
 
 # --- leave the one durable trace that proves this ran -------------------------------

@@ -1,6 +1,6 @@
 ---
 name: sso-single-branch-development
-version: 0.5.0
+version: 0.6.0
 description: 'Run a full end-to-end implementation pipeline on one branch/worktree in one of three execution cores — scaffold (non-behavioral bootstrap batch), story (TDD for new/changed behavior), or refactor (behavior-preserving keep-green) — with two-stage spec-compliance + code-quality verification, evidence capture, optional Copilot hooks, and draft-PR handoff. Use when asked to implement one feature, fix one bug, refactor existing code, or do foundation/scaffold setup with strong quality gates but without multi-track parallel orchestration.'
 ---
 
@@ -120,10 +120,12 @@ subagent vs ⚙️ script).
    - **Derive task-shaped config first** — the values whose correct setting depends on *this* task, not
      repo-wide policy: `TRACK_ALLOWED_PREFIXES` (+ any `TRACK_FROZEN_PATHS`),
      `PREFLIGHT_REQUIRE_TOOLCHAIN` (so a missing bin fails here, not mid-run), and
-     `TRACK_REQUIRED_EVIDENCE` (the evidence *floor*). Confirm them in the same proceed-confirm;
-     `--persist` stamps them into the breadcrumb as a faithful record of what was approved. **Never
-     hand-widen scope mid-run.** Repo-wide catalog/policy (`TRACK_EVIDENCE_KINDS`/`RULES`, sentinel,
-     ceilings, `RUNS_DIR`) stays in the committed `track-env.base.sh` — never regenerate it per run.
+     `TRACK_REQUIRED_EVIDENCE` (the evidence *floor*). **Export them for the `--persist` call**: it
+     stamps them into the breadcrumb *and* into the managed block in the installed `track-env.sh` —
+     the only channel that reaches the guard, since hooks are spawned by the agent surface and an
+     unset scope fails closed on the paths you just approved. **Never hand-widen scope mid-run.**
+     Repo-wide catalog/policy (`TRACK_EVIDENCE_KINDS`/`RULES`, sentinel, ceilings, `RUNS_DIR`) stays
+     in the committed `track-env.base.sh` — never regenerate it per run.
      Preflight also checks the optional dependency lock: a committed `skill-deps.json` beside the hooks
      makes it probe each declared tool and fail hard on a required lock violation (warn on a non-strict
      out-of-range version), the result cached `TRACK_DEPS_CACHE_TTL_HOURS` hours (default 72) in
@@ -170,8 +172,9 @@ subagent vs ⚙️ script).
    and follow it: discover (constitution · every `applyTo`-matching `.github/instructions/*`, matched
    by listing the directory rather than from a remembered list · design artefacts for frontend
    surfaces · `security-and-owasp` on any trust boundary · the task's scoped SpecKit spec/plan/
-   research/data-model/contracts slice, when present), **distil to binding constraints**, **persist
-   to `runs/<RUN_ID>.governance.md`**, then pin it with `track-note.sh governance <path>`.
+   research/data-model/contracts slice, when present), **distil to binding constraints**, **persist to
+   `<Runs dir>/<RUN_ID>.governance.md`** — the `Runs dir` preflight printed, never a bare `runs/` (from
+   a worktree that is a private, gitignored copy) — then pin it with `track-note.sh governance <path>`.
 
    Three rules the reference expands and this body will not restate:
    - **Persist it, don't just hold it.** The bundle lives in a file because this core spans many
@@ -195,11 +198,9 @@ subagent vs ⚙️ script).
 
    *Annotations via [`scripts/track-note.sh`](scripts/track-note.sh) — all self-reported
    (`self_reported:true`), never hook-observed:* `phase <mode> <step>` at every core-step boundary and
-   `governance <path>` once the bundle is persisted are **mandatory** — they are the resume anchor.
-   `skill <name>` and `loop <phase>` (the `skills[]`/`iterations` trace) stay optional. The
-   **mechanical** fields (`tool_calls`, `trace[]`, heartbeat) record automatically — preflight
-   `--persist` persists `RUN_ID` into the installed `track-env.sh`, so even a solo run populates the
-   record with no extra setup. See [references/hooks.md](references/hooks.md).
+   `governance <path>` once the bundle is persisted are **mandatory** (the resume anchor); `skill` and
+   `loop` stay optional. The **mechanical** fields (`tool_calls`, `trace[]`, heartbeat) record off the
+   same managed block, so even a solo run populates the record. See [references/hooks.md](references/hooks.md).
 5. **Freeze & verify-all** (the **convergence gate**) — once the last task's review passes, make **no further edits**, then run
    every required evidence kind (`go-test`, `pg`, `redis`, …) back-to-back so all captures share the
    **same** fingerprint. Any change after this — including a review-driven fix — invalidates the

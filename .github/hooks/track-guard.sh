@@ -60,16 +60,51 @@ __env_dir="${BASH_SOURCE[0]%/*}"
 # leave the guard with empty scope and deny every worktree write). git-common-dir
 # resolves to the main repo's .git from any worktree; its parent is the main root.
 __gcd="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+TRACK_MAIN_ROOT=""
 if [ -n "$__gcd" ]; then
   case "$__gcd" in /*) ;; *) __gcd="$PWD/$__gcd" ;; esac
-  __main_root="$(cd "$__gcd/.." 2>/dev/null && pwd || true)"
-  if [ -n "$__main_root" ] && [ -d "$__main_root/.github/hooks" ]; then __env_dir="$__main_root/.github/hooks"; fi
-  unset __main_root
+  TRACK_MAIN_ROOT="$(cd "$__gcd/.." 2>/dev/null && pwd || true)"
+  if [ -n "$TRACK_MAIN_ROOT" ] && [ -d "$TRACK_MAIN_ROOT/.github/hooks" ]; then __env_dir="$TRACK_MAIN_ROOT/.github/hooks"; fi
 fi
 unset __gcd
 if [ -f "$__env_dir/track-env.sh" ]; then . "$__env_dir/track-env.sh"; fi
 if [ -f "$__env_dir/track-env.base.sh" ]; then . "$__env_dir/track-env.base.sh"; fi
 unset __env_dir
+
+# --- per-worktree scope override (the parallel-wave layer) --------------------------
+# The bootstrap above resolves ONE env, from the main checkout. That is right for a solo
+# run — the session works in a sibling worktree while hooks fire from the main checkout,
+# and a worktree-local lookup would find nothing and deny everything. But it collapses the
+# layer a WAVE needs: N workers, each owning a disjoint slice of the tree, each requiring a
+# DIFFERENT TRACK_ALLOWED_PREFIXES.
+#
+# Nothing in the process can tell those N apart. `dispatching-parallel-agents` fans out
+# in-session subagents, so all of them share one process environment (a subagent cannot set
+# env for the hooks that fire on its own tool calls) and one CWD. The only signal that
+# distinguishes worker 2 from worker 3 is the TOOL CALL'S OWN TARGET PATH — which resolves
+# to a worktree, which can carry its own gitignored track-env.sh. That is what this reads:
+# the scope of the tree the write actually lands in, not the scope of the session.
+#
+# Read in a SUBSHELL with the three vars unset, for two reasons: the file's own
+# `${VAR:-default}` / `[ -n ... ] ||` idioms are no-ops against an already-set value (so a
+# plain `.` after the bootstrap would change nothing), and sourcing inside the path loop
+# would otherwise leak one path's override onto the next. Empty means "not declared here" —
+# fall back to the session value rather than fail closed on a file that merely exists.
+__wt_cache_root=""; __wt_cache_val=""
+_wt_scope() { # _wt_scope <worktree-root> — echoes "allowed<TAB>frozen<TAB>immutable"
+  [ -n "${1:-}" ] || return 0
+  [ -n "$TRACK_MAIN_ROOT" ] && [ "$1" = "$TRACK_MAIN_ROOT" ] && return 0   # already sourced
+  if [ "$1" = "$__wt_cache_root" ]; then printf '%s' "$__wt_cache_val"; return 0; fi
+  __wt_cache_root="$1"; __wt_cache_val=""
+  if [ -f "$1/.github/hooks/track-env.sh" ]; then
+    __wt_cache_val="$(
+      unset TRACK_ALLOWED_PREFIXES TRACK_FROZEN_PATHS TRACK_IMMUTABLE_PREFIXES
+      . "$1/.github/hooks/track-env.sh" 2>/dev/null || exit 0
+      printf '%s\t%s\t%s' "${TRACK_ALLOWED_PREFIXES:-}" "${TRACK_FROZEN_PATHS:-}" "${TRACK_IMMUTABLE_PREFIXES:-}"
+    )" || __wt_cache_val=""
+  fi
+  printf '%s' "$__wt_cache_val"
+}
 
 input="$(cat)"
 tool="$(jq -r '.tool_name // empty' <<<"$input")"
@@ -151,9 +186,24 @@ case "$tool" in
       # the tree the path actually lives in, not at whatever the hook's CWD happens to be.
       { IFS= read -r GIT_WT_ROOT; IFS= read -r rel; } <<<"$(_git_relpath "$p")"
 
+      # Resolve the scope that governs THIS path's tree (see _wt_scope). A worktree that
+      # declares nothing inherits the session's — the common case, and a solo run's only case.
+      p_allowed="${TRACK_ALLOWED_PREFIXES:-}"
+      p_frozen="${TRACK_FROZEN_PATHS:-}"
+      p_immutable="${TRACK_IMMUTABLE_PREFIXES:-}"
+      p_scoped_by=""
+      wt_scope="$(_wt_scope "$GIT_WT_ROOT")"
+      if [ -n "$wt_scope" ]; then
+        wt_a="${wt_scope%%	*}"; wt_rest="${wt_scope#*	}"
+        wt_f="${wt_rest%%	*}"; wt_i="${wt_rest#*	}"
+        [ -n "$wt_a" ] && { p_allowed="$wt_a"; p_scoped_by="$GIT_WT_ROOT"; }
+        [ -n "$wt_f" ] && p_frozen="$wt_f"
+        [ -n "$wt_i" ] && p_immutable="$wt_i"
+      fi
+
       # Frozen entrypoints: never editable by any track (tracks self-register).
       saved_ifs="$IFS"; IFS=:
-      for f in ${TRACK_FROZEN_PATHS:-}; do
+      for f in ${p_frozen:-}; do
         [ "$rel" = "$f" ] && { IFS="$saved_ifs";
           deny "frozen entrypoint '$rel' — self-register via your track's own file instead of editing the shared entrypoint"; }
       done
@@ -162,12 +212,12 @@ case "$tool" in
       # Deny-by-default: the path MUST match an allowed prefix.
       ok=0
       saved_ifs="$IFS"; IFS=:
-      for a in ${TRACK_ALLOWED_PREFIXES:-}; do
+      for a in ${p_allowed:-}; do
         case "$rel" in "$a"*) ok=1 ;; esac
       done
       IFS="$saved_ifs"
       [ "$ok" -eq 1 ] ||
-        deny "'$rel' is outside this track's ownership scope (set TRACK_ALLOWED_PREFIXES); editing it would become a merge conflict at integration"
+        deny "'$rel' is outside this track's ownership scope (set TRACK_ALLOWED_PREFIXES); editing it would become a merge conflict at integration${p_scoped_by:+ — scope for this path came from $p_scoped_by/.github/hooks/track-env.sh (that worktree's own track), not the session's}"
 
       # Generated files are never hand-edited — re-run the generator (always-on).
       # Test the ORIGINAL path ($p), which resolves regardless of $PWD vs worktree.
@@ -180,7 +230,7 @@ case "$tool" in
       # worktree the path lives in (GIT_WT_ROOT), not $PWD, so a sibling-worktree
       # branch's history is checked — falling back to $PWD when root is unknown.
       saved_ifs="$IFS"; IFS=:
-      for m in ${TRACK_IMMUTABLE_PREFIXES:-}; do
+      for m in ${p_immutable:-}; do
         case "$rel" in
           "$m"*)
             if git -C "${GIT_WT_ROOT:-$PWD}" log --oneline -1 -- "$rel" 2>/dev/null | grep -q .; then

@@ -99,7 +99,7 @@ model), so the wiring is tighter than the Copilot manifest:
 
 | Pipeline gate | Bundled script (event) | What it does |
 |---|---|---|
-| Start gate / mint-or-recover RUN_ID | `track-preflight.sh` (manual / skill Step 1) | **Start gate.** `inspect` mints a stable `RUN_ID` = `<UTC>_<track>` on a fresh start, or **recovers** it from an existing `runs/<id>.dispatch` breadcrumb (resume), then checks prerequisites (git tree, `runs/` writable, opt. `gh` auth + `PREFLIGHT_REQUIRE_TOOLCHAIN` bins). Prints a confirm summary + JSON; **hard-fails non-zero** on any unmet prereq — including under `--yes`, because a missing dep is not a preference. `--yes` (or `AUTO_CONFIRM=1`) waives **only** the interactive proceed-confirm and exists for one caller: an orchestrator-dispatched worker, which has no human to ask and whose human gate was taken upstream at the wave plan. The waiver is recorded (`auto_confirm:true` / `confirmed_by:"orchestrator-waiver"`) in both the JSON and the breadcrumb so an audit can tell an approved run from a waived one. `--persist` persists the breadcrumb (track, tasks, branch, base ref, plus the confirmed writable scope, frozen paths, required toolchain, and evidence floor with their `*_set` flags) so resume is self-recovering and the artifact records exactly what the human confirmed. `--persist` also persists `RUN_ID` as a managed block in the installed `.github/hooks/track-env.sh` (gated on the `track-env.base.sh` marker, so it never touches the skill's `scripts/` source mirror) — this **activates the recorder hooks for a solo run** with no manual export. The block is **self-retiring**: it adopts its id only while the run is **live** (no terminal `status` in the record, no `completed_utc` on the breadcrumb) **and** this checkout is on the run's own branch — an exported `RUN_ID` still outranks it. `--complete` removes the block outright, but completion is reached at draft-PR handoff *only*, so binding adoption to liveness is what retires a run that ended any other way (ceiling trip, `blocked`, crash, abandon). An unconditional `export RUN_ID=…` outlives the run it names and then governs **every later session in the checkout**: the meter re-reads a record whose `tool_calls` already exceeds the ceiling and halts every tool call, and the evidence gate demands the finished task's kinds against the new task's diff. `--complete` (at draft-PR handoff) stamps `completed_utc` + `duration_secs` (now − `created_utc`) onto the breadcrumb — write-once, the honest home for the run's total wall-clock. Run by the skill, not a hook, since it precedes RUN_ID. |
+| Start gate / mint-or-recover RUN_ID | `track-preflight.sh` (manual / skill Step 1) | **Start gate.** `inspect` mints a stable `RUN_ID` = `<UTC>_<track>` on a fresh start, or **recovers** it from an existing `runs/<id>.dispatch` breadcrumb (resume), then checks prerequisites (git tree, `runs/` writable, opt. `gh` auth + `PREFLIGHT_REQUIRE_TOOLCHAIN` bins). Prints a confirm summary + JSON; **hard-fails non-zero** on any unmet prereq — including under `--yes`, because a missing dep is not a preference. `--yes` (or `AUTO_CONFIRM=1`) waives **only** the interactive proceed-confirm and exists for one caller: an orchestrator-dispatched worker, which has no human to ask and whose human gate was taken upstream at the wave plan. The waiver is recorded (`auto_confirm:true` / `confirmed_by:"orchestrator-waiver"`) in both the JSON and the breadcrumb so an audit can tell an approved run from a waived one. `--persist` persists the breadcrumb (track, tasks, branch, base ref, plus the confirmed writable scope, frozen paths, required toolchain, and evidence floor with their `*_set` flags) so resume is self-recovering and the artifact records exactly what the human confirmed. `--persist` also writes a managed block into the installed `.github/hooks/track-env.sh` (gated on the `track-env.base.sh` marker, so it never touches the skill's `scripts/` source mirror) carrying **both** halves of the run's activation: `RUN_ID` — which **activates the recorder hooks for a solo run** with no manual export — and the **confirmed task-derived config** (`TRACK_ALLOWED_PREFIXES`, `TRACK_FROZEN_PATHS`, `PREFLIGHT_REQUIRE_TOOLCHAIN`, `TRACK_REQUIRED_EVIDENCE`), read back out of the breadcrumb so a resume recovers them without anyone re-typing. The scope has to travel this way because hooks are spawned by the agent surface: an `export` in a tool call never reaches them, and an unset scope makes the guard fail closed on the paths the human just approved. The block is **self-retiring**: it adopts only while the run is **live** — no `completed_utc` on the breadcrumb, no *deliberate* terminal `status` (`success`/`blocked`), and its branch still checked out in **some worktree of this repo** (not "`HEAD` here matches", which de-adopted every hook firing from the main checkout while the work sat in a sibling worktree — the skill's own default isolation). A `budget-exceeded` / `no-progress` record keeps adopting: those are ceiling trips stamped mid-session, and the work that follows one is the report-out, which still has to be recorded. An exported `RUN_ID` outranks the block, and the scope half is applied only when the adopted id is this run's, so an orchestrator's worker keeps its own per-track scope. `--complete` removes the block outright, but completion is reached at draft-PR handoff *only*, so binding adoption to liveness is what retires a run that ended any other way (`blocked`, crash, abandon). An unconditional `export RUN_ID=…` instead outlives the run it names and governs **every later session in the checkout**, where the evidence gate demands the finished task's kinds against the new task's diff. `--complete` (at draft-PR handoff) stamps `completed_utc` + `duration_secs` (now − `created_utc`) onto the breadcrumb — write-once, the honest home for the run's total wall-clock. Run by the skill, not a hook, since it precedes RUN_ID. |
 | Dependency version-lock + probe cache *(opt-in)* | `track-deps.sh` (manual / skill Step 1, invoked by `track-preflight.sh`) | Pins the tool versions a client checkout must use to stay aligned with the skill (`superpowers`, `speckit`, `git`, `jq`, …), so an install-target repo does not drift onto an incompatible toolchain. Reads the committed `skill-deps.json` manifest (seeded beside the hooks by `install-hooks.sh`, `git`/`jq` pinned + detected repo tools added `required:false`); each entry is `{range, probe, required}` where `range` is a space-separated AND-list of `>=`/`>`/`<=`/`<`/`=`/bare-`X.Y` bounds (empty = presence-only). Probes every declared tool, compares the extracted version, and **caches a fully-OK result** in `runs/.deps-cache.json` so heavy `--version` calls are not repeated every run — the cache invalidates on `PATH` change, manifest change, or TTL expiry (`TRACK_DEPS_CACHE_TTL_HOURS`, default 72; `0` = never cache). A **failing** environment is never cached (re-checked every run so a fix is seen immediately). `track-preflight.sh` runs it as part of the start gate and folds a lock violation into `missing`. A required tool missing, or (under `TRACK_DEPS_STRICT=1`) any pinned tool out of range, **hard-fails** with exit 3; out-of-range under the default `TRACK_DEPS_STRICT=0` is a non-blocking warning. **No-op** (exit 0) when the manifest is absent. The template seeds `superpowers` to `=6.2.0` and `speckit` to `=0.15.2`. Run by the skill, not a hook, since it precedes RUN_ID. |
 | Resume / reconcile after interruption | `track-reconcile.sh` (`SessionStart`/`agentStart`) | Preflight report (read-only w.r.t. the tree/git; it stamps `last_reconcile` into the run record so the audit can prove it ran): from committed history + `runs/<RUN_ID>.json` only, emit `{head, dirty_worktree, evidence:{fresh,stale,missing,failed}, resumable}` at the current fingerprint — so a crashed/credit-out run resumes at the first not-done task and stashes untrusted uncommitted work, instead of the model guessing where it left off. Self-recovers `RUN_ID` from the `runs/<id>.dispatch` breadcrumb when none is exported — **ranked**, not newest-wins: a breadcrumb whose recorded `branch` is the one actually checked out here, then any run not yet stamped terminal, then the newest match. Taking the newest outright adopts a finished run on an unrelated branch just as readily as this session's own, and then every line of the report describes the wrong task. No-op unless a `RUN_ID` is set or recoverable. Mirrors `track-evidence-gate.sh`'s fingerprint logic exactly. |
 | Compaction resilience — was the bundle re-read? | `track-compact.sh` (`PostCompact` + `PostToolUse`) | Records the two facts that make the post-compaction invariant auditable, both hook-observed and neither authored by the model: `compactions[]` (`{t, event, trigger}`) on every `PreCompact`/`PostCompact`, and `governance_reads[]` (`{t, tool, via}` — `via` is the matched path/command, truncated, so a real `cat` re-read is distinguishable from a command that merely names the path) whenever a tool call touches the **pinned** governance bundle — a `Read` of the path, or a `Bash`/`Grep` command naming it, since `cat runs/<id>.governance.md` is just as valid a re-read. With both on record, `track-audit.sh`'s `I4` reduces the checklist's highest-value manual item to arithmetic: between every compaction and the **next** subagent dispatch there must be a bundle re-read. No-op unless `RUN_ID` is set and a bundle has been pinned. This script proves the re-read happened; whether the next brief then *used* it is proved by `track-brief.sh` below, and `I4` fails on either half — a re-read followed by an empty brief is still a brief built from dropped context. |
@@ -166,8 +166,17 @@ cp .github/hooks/track-env.sh.example .github/hooks/track-env.sh        # gitign
 $EDITOR .github/hooks/track-env.sh                                      # just the vars that differ
 ```
 
-Every `track-*.sh` **auto-sources both files sitting next to it** (right after `set -eufo pipefail`) —
-`track-env.sh` first, then `track-env.base.sh`. Because `track-env.base.sh` is committed, a fresh
+Every `track-*.sh` **auto-sources both files** (right after `set -eufo pipefail`) — `track-env.sh`
+first, then `track-env.base.sh` — resolving them in the **main checkout** via `git-common-dir`, so a
+hook firing from a linked worktree reads the same pair. `track-guard.sh` then adds a third,
+narrower layer for the parallel case: for each write it resolves the **target path's** worktree and,
+if that worktree carries its own `.github/hooks/track-env.sh`, the non-empty
+`TRACK_ALLOWED_PREFIXES` / `TRACK_FROZEN_PATHS` / `TRACK_IMMUTABLE_PREFIXES` there **win for that
+path**. That is what makes N concurrent tracks enforceable: `dispatching-parallel-agents` fans out
+in-session subagents sharing one process env and one CWD, so the target path is the only thing that
+tells them apart. A worktree that declares nothing inherits the session's scope, so a solo run is
+unaffected. Only the guard does this — the recorders key off `RUN_ID` and most of their calls carry
+no path (see the orchestrator's *Known limit*). Because `track-env.base.sh` is committed, a fresh
 worktree (single-branch **or** a parallel track) already has it; nothing is copied at start. Every
 line uses `export VAR="${VAR:-default}"`, so precedence is **exported env > worktree `track-env.sh` >
 repo `track-env.base.sh` > script default**: a worktree override beats the repo base, and an
@@ -176,6 +185,17 @@ without editing a file, keeping the composition contract intact. `RUN_ID` is del
 either *static* preset — it's minted per run by `track-preflight.sh`, recovered from the breadcrumb on
 resume, and (at `--persist`) persisted as a managed block in the gitignored `.github/hooks/track-env.sh`
 so the recorder hooks activate automatically; `--complete` retires that block.
+
+> **An `export` in a tool call does not reach a hook.** Hooks are spawned by the agent surface with
+> *its* environment, not by the shell a `Bash`/`run_in_terminal` call runs in — so a `TRACK_*` value
+> exported mid-session is invisible to every hook that fires afterwards. The env files above are the
+> only channel. This is why `track-preflight.sh --persist` writes the run's confirmed
+> `TRACK_ALLOWED_PREFIXES` / `TRACK_FROZEN_PATHS` / `PREFLIGHT_REQUIRE_TOOLCHAIN` /
+> `TRACK_REQUIRED_EVIDENCE` into the managed block rather than trusting the caller to keep them
+> exported: without that, a human could approve a writable scope at the start gate and watch the
+> guard deny every path in it for the rest of the run, with the approval surviving only as a line in
+> a breadcrumb that nothing enforces. Export them **for the `--persist` call**; a resume reads them
+> back out of the breadcrumb.
 
 ### The vars (also settable manually)
 
@@ -203,7 +223,7 @@ export TRACK_EVIDENCE_SKIP_GLOBS="*.md;docs/*;specs/*"   # Stop gate: NON-CODE p
 export TRACK_BASE_REF="main"                  # Stop gate / reconcile: diff base. STRONGLY RECOMMENDED — without it, once work is COMMITTED the diff-vs-HEAD is empty so the gate requires nothing and silently passes (see Gotchas). Falls back to branch upstream, then HEAD-only.
 export TRACK_DEFAULT_BRANCH=""                # audit I1 only: the branch work must NEVER land on. Empty = derived from origin/HEAD, then init.defaultBranch, then "main". Set it when neither exists (bare clone, no remote). NOT derived from TRACK_BASE_REF's fallback: an unset base falls back to the branch's OWN upstream, which would make I1 fail every correctly-isolated run.
 export TRACK_MAX_TOOL_CALLS=200                                       # tool-call ceiling (hard stop). NOTE: counting/heartbeat are always-on when RUN_ID is set — this var only ADDS the halt.
-export TRACK_MAX_TOKEN_ESTIMATE=200000        # Stop: chars÷4 transcript ceiling; blocks the stop + writes status:"budget-exceeded" on trip. 0 disables. UNDERCOUNTS (blind to system prompt + cached tokens).
+export TRACK_MAX_TOKEN_ESTIMATE=1500000      # Stop: chars÷4 transcript ceiling; blocks the stop + writes status:"budget-exceeded" on trip. 0 disables. UNDERCOUNTS (blind to system prompt + cached tokens).
 export TRACK_AUDIT=1                          # make track-audit.sh a BLOCKING Stop gate. Unset = the CLI still works, it just never blocks a stop. Deliberately opt-in: a repo that adopts the hooks but not the governance discipline would otherwise be unable to end a session.
 export TRACK_TRUST_BOUNDARY_PATTERN="auth|secret|token|..."   # audit G4: which diff paths demand security-and-owasp in the bundle. Defaults cover auth/secrets/network/persistence/deploy.
 export TRACK_SELF_HEAL_ATTEMPTS=2             # retries per DISTINCT failure before halting `blocked`. PROMPT-enforced (no hook can count review rounds) — it lives here so the number survives a context compaction instead of only in the model's head. Distinct from the orchestrator's no-progress detector, which counts STALLED PASSES; this counts FIX ATTEMPTS.
@@ -219,8 +239,9 @@ single most common wrong turn here, because all three can trip at once and *look
 
 | Symptom | Which gate | Keyed to | Fix |
 |---|---|---|---|
-| Every write denied, incl. paths you own | `track-guard.sh` | `TRACK_ALLOWED_PREFIXES` — **not** `RUN_ID` | Set the scope for *this* task. Empty ⇒ fail-closed (denies all edits) by design. |
-| Every tool call halted, "ceiling exceeded" | `track-meter.sh` | `RUN_ID` + the record's cumulative `tool_calls` | Raise `TRACK_MAX_TOOL_CALLS` above the current count, or start a fresh run. |
+| Every write denied, incl. paths you own | `track-guard.sh` | `TRACK_ALLOWED_PREFIXES` — **not** `RUN_ID` | Set the scope for *this* task **in a file the hooks source** (re-run `track-preflight.sh --persist` with it exported; an export alone never reaches a hook). Empty ⇒ fail-closed by design. |
+| Nothing is being recorded (`trace[]`/`evidence[]` empty, `phase` never advances) | every recorder + the evidence gate | `RUN_ID`, which they all no-op without | Ask what the hooks actually resolve (the snippet below). A `track-note.sh` call prints a diagnostic when `RUN_ID` is unset — the hooks stay silent, so check them this way. |
+| One tool call halted, "ceiling exceeded" | `track-meter.sh` | `RUN_ID` + the record's cumulative `tool_calls` | The halt fires **once**, at the crossing, so the run can still report out and hand off. Continuing past it is deliberate: raise `TRACK_MAX_TOOL_CALLS` above the current count, or start a fresh run. |
 | Stop blocked demanding kinds your diff can't produce | `track-evidence-gate.sh` | `RUN_ID` + `TRACK_REQUIRED_EVIDENCE` / `_RULES` | Re-derive the floor for this task; for a prose-only diff see `TRACK_EVIDENCE_SKIP_GLOBS`. |
 
 Scope prefixes are resolved against the **git worktree root**, never the hook's CWD — a `cd` into a
@@ -241,12 +262,36 @@ jq '{run_id, branch, tasks, completed_utc}' runs/*.dispatch   # whose run is thi
 jq '{tool_calls, status, last_ts}'          runs/<RUN_ID>.json
 ```
 
-A `RUN_ID` resolving to a run on a different branch, or one whose record already carries a terminal
-`status`, is stale: `track-preflight.sh --complete` retires it, and the managed block declines to
-re-adopt it on its own. **The scope and floor lines are separate** — they are `[TASK-DERIVED]` values
-an operator wrote into `track-env.sh` / `track-env.base.sh`, so a finished task's values sit there
-until re-derived. Export the correct ones for the new task rather than deleting the run state and
-expecting the guard to open.
+> **One checkout can host several live runs, and the block is a registry, not a slot.** Start a
+> feature, leave it, open a second editor window on the same repo and start another: both sessions'
+> hooks read this one file. It therefore holds **one row per run** (`<run-id>|<branch>`) and resolves
+> which applies at source time — **the row whose branch is checked out where the hook is running**.
+> Only when no branch matches *and* the hook is in the **main checkout** *and* exactly one run is on
+> record does it fall back to that run (the ordinary solo shape: session in the main checkout, work
+> in a sibling worktree). Two live runs and an ambiguous CWD ⇒ it adopts **nothing**, because a wrong
+> guess here does not fail — it records one feature's work into another's record and enforces the
+> other's scope. `--persist` warns when a checkout gains a second live run; the answer is to open each
+> session on its own worktree. `--complete` removes only the finishing run's row, so a sibling run
+> keeps recording. Rows are pruned as they die, and `runs/` stays shared — records are keyed by
+> `RUN_ID`, so concurrent runs never collide there.
+
+A `RUN_ID` resolving to a run whose branch is checked out in no worktree of this repo, or whose
+record carries a **deliberate** terminal `status` (`success` / `blocked`), is stale: the managed
+block declines to re-adopt it, and `track-preflight.sh --complete` drops its row. A
+`budget-exceeded` / `no-progress` record is **not** stale — those are ceiling trips stamped
+mid-session, and everything that matters after one (the status stamp, the evidence capture, the
+handoff) still has to be recorded, so adoption deliberately survives them. **The scope and floor
+lines travel with the run**: `--persist` writes the confirmed values into the same managed block, so
+they retire exactly when the run does. Re-run `--persist` for the new task rather than deleting run
+state and expecting the guard to open.
+
+**Capture the verdict, not the log.** `track-evidence.sh` tags a command by pattern and stores a
+(truncated) `response`, so a 4,000-line `npm install` / `uv sync` / `docker compose up` buys no
+evidence — it just re-enters the model's context on every later turn, which is where a run's token
+budget actually goes. Redirect the noisy ones and read the tail (`cmd > /tmp/x.log 2>&1 || tail -50
+/tmp/x.log`); keep full output for the commands that *are* the evidence. A real `tail -50` clears
+`E2`'s 40-character floor on passing captures comfortably, so nothing is lost — but this is a token
+decision, never an evidence one: a verdict you cannot see is a verdict you have not verified.
 
 **Hooks are defense-in-depth, not the final gate.** They are local and bypassable. Layer them:
 hooks (fast, in-session) → git `pre-push` (local backstop) → **CI (the unbypassable merge gate)**.
@@ -266,13 +311,20 @@ the **self-reported** fields (`phase`, `governance_bundle`, `status`, `skills[]`
 require the model to call `track-note.sh` — and the first two are **mandatory**, not decoration: they
 are what a compacted or crashed session re-anchors on.
 
-> **The guard resolves scope by worktree root, but reads env where the agent runs.**
+> **Everything is single-homed on the MAIN checkout, so a worktree changes nothing.**
 > `track-guard.sh` checks each write path against the git worktree it belongs to
 > (`git rev-parse --show-toplevel`), not `$PWD` — so writes into a **sibling** worktree are
-> scope-checked normally. But it **sources `track-env.sh` from the checkout the agent process runs
-> in**, so per-run overrides (`TRACK_ALLOWED_PREFIXES`, `TRACK_ALLOW_FF_PUSH=1`) must live in *that*
-> checkout, not the target worktree's, or the guard never sees them. Simplest robust option: re-root
-> the workspace **into** the worktree so `$PWD`, file tools and env all agree.
+> scope-checked normally. Every hook resolves its env dir and a relative `RUNS_DIR` through
+> `git rev-parse --git-common-dir`, which points at the main repo from any linked worktree, so all of
+> them read the *same* `track-env.sh` and write the *same* run record no matter which directory the
+> hook fired from. Adoption follows suit: the managed block asks whether the run's branch is checked
+> out in **some** worktree of this repo, not whether `HEAD` *here* matches it. A `HEAD` comparison
+> de-adopted `RUN_ID` for every hook firing from the main checkout while the work sat in a sibling
+> worktree — which is the skill's own default form of isolation, so the documented happy path
+> silently switched the whole bundle off. You do **not** need to re-root the workspace into the
+> worktree. The one thing that is *not* automatic is the governance bundle: it is a path you choose,
+> so write it to the `Runs dir` preflight prints, never a bare `runs/` (which from a worktree is that
+> worktree's own gitignored copy, invisible to the main checkout).
 
 | Recorded | Field | Written on | Source |
 |---|---|---|---|
@@ -287,7 +339,7 @@ are what a compacted or crashed session re-anchors on.
 | **Self-reported** skill order | `skills[]` (`{t, skill, step, self_reported:true}`) | skill calls `track-note.sh skill …` at each core step (optional) | `track-note.sh` — the model's **own claim**, not hook-observed (no hook can see a skill name). Provenance-tagged so it can't be mistaken for verified truth. |
 | **Self-reported** loop count | `iterations` (integer) + `iterations_self_reported:true` (+ optional `iteration_log[]`) | skill calls `track-note.sh loop …` once per RED→GREEN→review cycle | `track-note.sh` — asserted by the model; hooks never see a reasoning loop. `tool_calls` remains the only mechanical turns-proxy. |
 | Test evidence | `evidence[]` (`{t, kind, cmd, response, fingerprint}`) | `PostToolUse` matching a **test** command only | `track-evidence.sh` |
-| Terminal state | `status` (`no-progress` only) | when the tool-call ceiling trips | `track-meter.sh` — the **only** hook that writes `status` |
+| Terminal state | `status` (`no-progress` only) | when the tool-call ceiling trips | `track-meter.sh` — halts the session **once**, at the crossing, then keeps counting: the count is cumulative, so a repeating halt never ends, and the calls after a trip are the report-out and handoff. Continuing past it is a deliberate act (raise the ceiling or start a fresh run), and the recorded `status` keeps it visible to `track-report`/`track-audit` either way. |
 | Token estimate + ceiling *(enforced)* | `token_estimate` (integer) + `token_estimate_chars` + `token_estimate_method` | once per `Stop`, **overwritten** each time | `track-tokens.sh` (ceiling set via `TRACK_MAX_TOKEN_ESTIMATE=200000`) — chars÷4 heuristic off the transcript; blocks stop on first exceedance (writes `status:"budget-exceeded"`); undercounts system prompt + cached tokens; labelled as estimate so it can't be mistaken for billing data |
 
 **Deliberately NOT recorded** (don't expect these in the file):
@@ -326,7 +378,7 @@ The bundle's answer is to keep the three things a compaction can destroy in file
 | At risk | Kept in | Restored by |
 |---|---|---|
 | Where in the pipeline you are | `phase` / `phase_log[]` (`track-note.sh phase`) | `track-reconcile.sh` → `position.phase` + `resume_action` |
-| The binding governance constraints | `runs/<RUN_ID>.governance.md` (pinned by `track-note.sh governance`) | re-read the file before the next dispatch |
+| The binding governance constraints | `<RUNS_DIR>/<RUN_ID>.governance.md` (pinned by `track-note.sh governance`, which records an **absolute** path so every reader resolves it identically) | re-read the file before the next dispatch |
 | Retry budget, ceilings, scope | `track-env.base.sh` (`TRACK_SELF_HEAL_ATTEMPTS`, …) + the `.dispatch` breadcrumb | auto-sourced by every hook |
 
 So after any compaction: re-run `track-reconcile.sh`, act on `resume_action`, re-read the governance

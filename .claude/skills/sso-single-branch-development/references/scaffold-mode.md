@@ -64,6 +64,9 @@ bracket 1–8 and a bare number means different things in the two documents:
             persist runs/<RUN_ID>.governance.md      [reuse: references/governance.md]
 MODE GUARD  assert every batched task is
             non-behavioral                           [refuse → story mode]
+RESOLVE     probe + PIN the toolchain and every
+            version the batch will materialize;
+            append to the bundle, re-pin it          [serial, one human confirm]
 GENERATE    fan out N read-only subagents, one per
             INDEPENDENT DOMAIN / DISJOINT-FILE
             CLUSTER (not one-per-file, not
@@ -93,6 +96,7 @@ cycle and no per-task implement↔review loop to run.
 | generate | Fan-out generation | `dispatching-parallel-agents` | One subagent per independent domain / disjoint-file cluster returns its file bodies in parallel — safe because nothing writes |
 | apply | Apply bodies | — (controller = single writer) | Collapses N proposals into one tree; serial application, no skill |
 | review gate | Whole-diff review | `requesting-code-review` | "Is it correct" proof — quality + governance rubric (constitution hard gate + matched `.github/instructions/*`; no security add-on — guard cleared trust boundaries) |
+| RESOLVE | Pin versions before generating | — (serial, one confirm) | Every version decided once, appended to the bundle and re-pinned — so a version surprise is not re-discovered N times as a post-hoc deviation |
 | convergence gate | Batch evidence | `verification-before-completion` | "Does it work" proof — real build/lint/bring-up output, not assertion |
 | bracket | Draft-PR finish | **overrides** `finishing-a-development-branch` | Worker stops at a draft PR; merge is owned by repo/CI |
 
@@ -107,6 +111,50 @@ same reason: the convergence gate requires every evidence kind to be captured ag
 tree**, so any edit after it (including a review-driven fix) invalidates the whole capture and forces
 a re-run. Verifying before reviewing guarantees you pay that cost on every review finding. Freeze,
 then capture.
+
+### RESOLVE — decide every version ONCE, before any subagent runs
+
+A scaffold's job is to materialize a toolchain, and a toolchain has versions. Decide them here,
+in one serial step with one human confirm, or you will decide them N times downstream — each time
+as a *deviation* discovered after generation, costing a review round and a re-run of the whole
+evidence set. On a real Phase-1 run this was eleven deviations; almost all were avoidable here.
+
+They come in three kinds, and only the first is a judgement call:
+
+1. **Task text vs. governance.** A task says "ruff + black"; the repo's `python.instructions.md`
+   mandates Ruff only. Governance is more specific and wins — resolve it at the **governance gate**
+   (that is what it is for) and record the resolution as a bundle line, so every maker brief carries
+   the decision instead of re-deriving it.
+2. **Task text vs. reality.** A task names `.eslintrc.cjs`; the current generator emits flat config,
+   or oxlint. A task pins Go 1.23; `go get` on the declared deps raises the directive to 1.25. A
+   config schema changed major version (`golangci-lint` v2 split `linters:`/`formatters:`, `gosimple`
+   folded into `staticcheck`). **Nothing in any document can tell you these — only the installed tool
+   can.** So ask it, before generating: `<tool> --version`, `<tool> config verify`, `npm view <pkg>
+   version`, `go list -m -versions`. One cheap probe per tool beats one review round per surprise.
+3. **Registry drift.** `npm create vite@latest`, `uv add <pkg>`, unpinned `@latest` anything: the tree
+   gets whatever the registry served that minute, so the same task run twice produces two different
+   trees and neither is reproducible. The governance bundle almost certainly already bans this for
+   build artifacts (`no :latest` / "pin versions"); **the generator is a build artifact too.**
+
+Produce a short table and append it to `runs/<RUN_ID>.governance.md` under `## Resolved toolchain`,
+then **re-pin the bundle** (`track-note.sh governance <path>`). No new machinery: it now travels into
+every maker brief exactly like the rest of the bundle, `G1` re-hashes it, and a compacted session
+re-reads it from disk.
+
+| Surface | Generator (pinned) | Runtime / language | Key deps (exact) | Probed from |
+|---|---|---|---|---|
+| frontend | `npm create vite@7.1.2` | node 22.11.0 | react 19.2.8, vite 8.2.1 | `npm view … version` |
+| backend-go | — | go 1.25.0 (`go get` raises 1.23) | golangci-lint 2.5.0 | `go version`, `golangci-lint --version` |
+
+**Confirm this table with the human before GENERATE**, and say what each pin costs — "the task says
+Go 1.23; the declared deps force 1.25, and forcing it back breaks `go list -m all`" is a decision
+someone should make knowingly, once, rather than read about in a PR three hours later. Where the
+repo has a `skill-deps.json`, a tool that belongs under version-lock goes there so `track-deps.sh`
+enforces it at preflight on every later run.
+
+**What this does NOT do:** it cannot pre-empt a genuine discovery (a peer-dependency conflict that
+only appears at install). Those remain deviations — and that is fine. The goal is that the
+deviations you report are the *novel* ones, not the ones a `--version` call would have told you.
 
 ### GENERATE — parallel generation is safe because nothing writes
 
@@ -219,6 +267,36 @@ Mechanically this reuses the existing evidence gate exactly once over the whole 
 whole-tree fingerprint is *happy* here because there is a single converged tree, one evidence pack,
 one commit. (Contrast story mode, where per-increment captures must each converge on the final tree
 at freeze & verify-all.)
+
+**Never edit the deliverable to make the gate green.** A scaffold creates directories that are
+still empty by design, so a batch verify routinely meets tools that cannot run yet: `go vet ./...`
+and `golangci-lint run ./...` fail on a module with zero `.go` files; a test target finds no tests.
+The gate is reporting the truth — the surface is empty — and the wrong repair is to change the
+*product* (a skip-guard bolted into the Makefile, a condition whose only reader is this gate) so a
+red command turns green. That ships logic nobody asked for, written for the gate rather than the
+user, and it is how a target ends up silently exiting 0 for work it did not do.
+
+Do this instead, in order of preference:
+
+1. **Verify what exists.** For an empty surface, the honest check is that the *configuration* is
+   valid, not that a suite passed: `golangci-lint config verify`, `docker compose config`,
+   `go mod verify`, `npm run build`. Those run fine on an empty module and prove the scaffold works.
+2. **Record the gap as evidence, not as code.** Capture the kind as `n/a — no sources yet` with the
+   command and its actual output. An evidence pack that says "this cannot run until Phase 2 lands
+   code" is *more* informative than one showing a fabricated pass.
+3. **Only then, if a guard genuinely belongs in the deliverable** — because the repo's CI already
+   uses the same detect-and-skip pattern, say — write it so it **skips loudly** (prints what it
+   skipped and why) or **fails loudly** (a missing tool is an error with an install hint), never so
+   it returns 0 in silence. And record it as a deviation with its reason, because you have just made
+   a design decision on the user's behalf.
+
+**Keep build noise out of the context.** `npm install`, `uv sync`, `docker compose up` and friends
+emit thousands of lines that prove nothing and are re-read on every subsequent turn. Redirect them
+and read the verdict: `npm install > /tmp/npm.log 2>&1 || tail -50 /tmp/npm.log`. Keep full output
+for the commands that *are* the evidence (build, lint, test, health check) — but a `tail -50` of a
+real run still satisfies the evidence gate and stays well clear of `E2`'s 40-character floor on
+passing captures. This is a token decision, never an evidence one: if you cannot see the verdict,
+you have not verified it.
 
 ### REVIEW GATE — one review, not two-stage
 
