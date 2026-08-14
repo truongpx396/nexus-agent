@@ -97,6 +97,137 @@ _canon_hooks_dir() {
   printf '%s' "$d"
 }
 
+# --- the managed block is a REGISTRY, not a slot ------------------------------------
+# One checkout routinely hosts more than one live run: start a feature, leave it, open a
+# second editor window on the same repo and start another. Both sessions' hooks resolve to
+# this one file. While it held a single run's id and scope, the second `--persist` simply
+# overwrote the first — and the first run did not fail loudly, it silently began recording
+# into the second run's record while its guard enforced the second run's scope and denied
+# the paths its own human had approved. So the block holds a ROW PER RUN and resolves which
+# one applies at source time.
+_BLK_BEGIN="# >>> track-preflight (managed - do not edit) >>>"
+_BLK_END="# <<< track-preflight (managed - do not edit) <<<"
+# Pre-registry single-slot markers. Stripped on sight: such a block predates row resolution,
+# so leaving it in place would let a stale unconditional adoption outrank the registry.
+_BLK_BEGIN_LEGACY="# >>> track-preflight RUN_ID (managed - do not edit) >>>"
+_BLK_END_LEGACY="# <<< track-preflight RUN_ID (managed - do not edit) <<<"
+
+# _blk_strip <file> — drop both block formats, leaving operator lines untouched.
+_blk_strip() {
+  [ -f "$1" ] || return 0
+  awk -v b="$_BLK_BEGIN" -v e="$_BLK_END" -v lb="$_BLK_BEGIN_LEGACY" -v le="$_BLK_END_LEGACY" '
+    $0==b || $0==lb {skip=1; next}
+    skip && ($0==e || $0==le) {skip=0; next}
+    !skip {print}
+  ' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+
+# _blk_rows <file> — echo the registry rows (id|branch) currently on file, one per line.
+_blk_rows() {
+  [ -f "$1" ] || return 0
+  awk "/^__sbd_rows='\$/{inr=1; next} inr && /^'\$/{inr=0; next} inr && NF {print}" "$1"
+}
+
+# _row_dead <id> <branch> — 0 when this row can be dropped. Pruned at write time so the
+# registry tracks reality instead of growing forever. A branch that does not exist YET is
+# alive (Step 1 runs before Step 3 cuts it); a branch that exists but is checked out in no
+# worktree is a run somebody abandoned or finished.
+_row_dead() {
+  local id="$1" br="$2"
+  jq -e '(.completed_utc // "") != ""' "$RUNS_DIR/$id.dispatch" >/dev/null 2>&1 && return 0
+  jq -e '(.status // "") | . == "success" or . == "blocked"' "$RUNS_DIR/$id.json" >/dev/null 2>&1 && return 0
+  if [ -n "$br" ] && git rev-parse --verify --quiet "refs/heads/$br" >/dev/null 2>&1 \
+     && ! git worktree list --porcelain 2>/dev/null | grep -Fqx "branch refs/heads/$br"; then return 0; fi
+  return 1
+}
+
+# _blk_write <env-file> <rows> — emit the registry block. Shared by --persist and
+# --complete so the resolution logic has exactly one author: --complete rewrites the block
+# with the finishing run's row dropped, and a second copy of this emitter would be a second
+# thing to keep in sync.
+_blk_write() {
+  local env_file="$1" rows="$2"
+  {
+    printf '%s\n' "$_BLK_BEGIN"
+    cat <<'SBD_BLK_HEAD'
+# Registry of this checkout's live runs, and the rule for deciding which one applies to the
+# session sourcing this file. One row per run: <run-id>|<branch>. A caller's exported RUN_ID
+# always outranks it; a handed-off or abandoned run is never re-adopted.
+SBD_BLK_HEAD
+    printf "__sbd_runs='%s'\n" "$RUNS_DIR"
+    printf "__sbd_rows='\n%s'\n" "$rows"
+    cat <<'SBD_BLK_TAIL'
+__sbd_pick=''; __sbd_pick_br=''; __sbd_n=0; __sbd_one=''; __sbd_one_br=''
+# WHICH run is this session? The reliable answer is the branch checked out where the hook
+# runs, so prefer that. Falling back to "the only run on record" keeps the common single-run
+# case working when the session sits in the main checkout while the work is in a sibling
+# worktree — the skill's own default isolation. With two runs and no branch match there is
+# no honest answer, so adopt NOTHING rather than guess: a wrong guess does not fail, it
+# quietly records one run's work into another run's record and enforces the wrong scope.
+__sbd_head="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '')"
+while IFS='|' read -r __r_id __r_br; do
+  [ -n "${__r_id:-}" ] || continue
+  __sbd_n=$(( __sbd_n + 1 ))
+  [ -n "$__sbd_one" ] || { __sbd_one="$__r_id"; __sbd_one_br="${__r_br:-}"; }
+  if [ -n "${__r_br:-}" ] && [ "$__r_br" = "$__sbd_head" ]; then __sbd_pick="$__r_id"; __sbd_pick_br="$__r_br"; fi
+done <<<"$__sbd_rows"
+# The "only run on record" fallback applies ONLY from the MAIN checkout. Inside a linked
+# worktree the branch is an exact signal, so a HEAD that matches no row means no run owns
+# this session — most sharply once a run completes: its worktree usually still exists, and
+# without this restriction the lone surviving row would be adopted there, recording the
+# finished feature's tree into an unrelated live run.
+if [ -z "$__sbd_pick" ] && [ "$__sbd_n" = 1 ] \
+   && [ "$(git rev-parse --git-dir 2>/dev/null || echo a)" = "$(git rev-parse --git-common-dir 2>/dev/null || echo b)" ]; then
+  __sbd_pick="$__sbd_one"; __sbd_pick_br="$__sbd_one_br"
+fi
+# Fast path: a caller already running some OTHER run needs none of the probes below. This
+# file is sourced on every tool call, so it must not spend git/jq on a settled question.
+if [ -n "$__sbd_pick" ] && { [ -z "${RUN_ID:-}" ] || [ "${RUN_ID:-}" = "$__sbd_pick" ]; }; then
+  __sbd_live=1
+  # Deliberately terminal: the model called `track-note.sh status success|blocked`, which it
+  # does once the run is over. NOT budget-exceeded / no-progress — those are CEILING trips
+  # stamped mid-session, and the work that follows one is precisely the report-out: the
+  # status stamp, the evidence capture, the handoff. De-adopting there switched off every
+  # recorder AND the Stop-time evidence gate for the rest of the session, so a tripped run
+  # went dark and un-gated while still writing to the tree. A ceiling stops the run; it must
+  # never stop the run being RECORDED.
+  if jq -e '(.status // "") | . == "success" or . == "blocked"' "$__sbd_runs/$__sbd_pick.json" >/dev/null 2>&1; then __sbd_live=0; fi
+  if [ "$__sbd_live" = 1 ] \
+     && jq -e '(.completed_utc // "") != ""' "$__sbd_runs/$__sbd_pick.dispatch" >/dev/null 2>&1; then __sbd_live=0; fi
+  # A branch that exists but is checked out nowhere is an abandoned or finished run.
+  # Skipped while it does not exist yet (Step 1 precedes Step 3) so a starting run meters itself.
+  if [ "$__sbd_live" = 1 ] && [ -n "$__sbd_pick_br" ] \
+     && git rev-parse --verify --quiet "refs/heads/$__sbd_pick_br" >/dev/null 2>&1 \
+     && ! git worktree list --porcelain 2>/dev/null | grep -Fqx "branch refs/heads/$__sbd_pick_br"; then __sbd_live=0; fi
+  if [ "$__sbd_live" = 1 ]; then
+    [ -n "${RUN_ID:-}" ] || export RUN_ID="$__sbd_pick"
+    # The confirmed scope comes from the run's own breadcrumb — the record of what a human
+    # approved — so the registry never has to restate it and a resume cannot lose it. One
+    # jq, joined, because this runs on every tool call.
+    if [ "${RUN_ID:-}" = "$__sbd_pick" ] && [ -f "$__sbd_runs/$__sbd_pick.dispatch" ]; then
+      __sbd_cfg="$(jq -r '[((.allowed_prefixes//[])|join(":")), ((.frozen_paths//[])|join(":")),
+                           ((.require_toolchain//[])|join(",")), ((.required_evidence//[])|join(","))]
+                          | join("|")' "$__sbd_runs/$__sbd_pick.dispatch" 2>/dev/null || echo '|||')"
+      IFS='|' read -r __c_a __c_f __c_t __c_e <<<"$__sbd_cfg"
+      # Written as `if` rather than `&&` chains on purpose: this file is sourced by every
+      # hook under `set -eufo pipefail`, where a short-circuiting AND-OR list is a footgun
+      # nobody wants to re-audit. An empty breadcrumb field means "not declared", so it
+      # falls through to track-env.base.sh rather than pinning an empty value.
+      if [ -z "${TRACK_ALLOWED_PREFIXES:-}" ] && [ -n "${__c_a:-}" ]; then export TRACK_ALLOWED_PREFIXES="$__c_a"; fi
+      if [ -z "${TRACK_FROZEN_PATHS:-}" ] && [ -n "${__c_f:-}" ]; then export TRACK_FROZEN_PATHS="$__c_f"; fi
+      if [ -z "${PREFLIGHT_REQUIRE_TOOLCHAIN:-}" ] && [ -n "${__c_t:-}" ]; then export PREFLIGHT_REQUIRE_TOOLCHAIN="$__c_t"; fi
+      if [ -z "${TRACK_REQUIRED_EVIDENCE:-}" ] && [ -n "${__c_e:-}" ]; then export TRACK_REQUIRED_EVIDENCE="$__c_e"; fi
+      unset __sbd_cfg __c_a __c_f __c_t __c_e
+    fi
+  fi
+  unset __sbd_live
+fi
+unset __sbd_runs __sbd_rows __sbd_pick __sbd_pick_br __sbd_n __sbd_one __sbd_one_br __sbd_head __r_id __r_br
+SBD_BLK_TAIL
+    printf '%s\n' "$_BLK_END"
+  } >> "$env_file"
+}
+
 mode="inspect"
 auto_confirm="${AUTO_CONFIRM:-0}"
 for a in "$@"; do
@@ -305,65 +436,67 @@ if [ "$mode" = "persist" ]; then
         evidence_floor_set:($required_evidence != "")}' \
       > "$rec_dispatch"
   fi
-  # --- activate the run record for SOLO runs -------------------------------------
-  # The per-call recorder hooks (meter/trace/evidence/note) require RUN_ID in their
-  # env and otherwise no-op. In a solo run no orchestrator exports it, so the run
-  # record (tool_calls / trace[] / skills[] / heartbeat) would stay empty. Persist
-  # RUN_ID into the per-worktree track-env.sh that every hook sources, as an
-  # idempotent managed block that never touches operator scope lines. An
-  # already-exported RUN_ID (e.g. an sso-executing-parallel-tracks per-worker value)
-  # still wins. Guarded by the track-env.base.sh marker so this only ever fires
-  # inside a real INSTALLED hooks dir — never in the skill's scripts/ source mirror
-  # that unit tests run in-place.
+  # --- activate the run for THIS checkout ------------------------------------------
+  # Two distinct things have to survive from this gate to the hooks, and NEITHER can
+  # travel in the process environment: hooks are spawned by the agent surface, not by
+  # the shell this script runs in, so an `export` here (or in any later tool call)
+  # never reaches them. The only channel is the file every hook sources.
   #
-  # The block SELF-RETIRES (see the conditions it writes). `--complete` also removes
-  # it, but completion is reached at draft-PR handoff ONLY: a run that ends any other
-  # way — ceiling trip, `blocked`, budget-exceeded, crash, human abandon — never gets
-  # there and used to leave an unconditional `export RUN_ID=…` behind forever. That
-  # residue governs every LATER session in the checkout, on any branch: the meter
-  # re-reads a run record whose tool_calls already exceeds the ceiling and halts every
-  # tool call (a bricked checkout, unrecoverable without hand-editing the file), and
-  # the evidence gate demands the finished task's kinds against the new task's diff.
-  # Binding adoption to "run is live AND this checkout is on its branch" retires the
-  # id on every exit path instead of just the happy one.
+  #   1. RUN_ID — the per-call recorders (meter/trace/evidence/note/brief/compact) and
+  #      the Stop-time evidence gate all no-op without it. In a solo run no orchestrator
+  #      exports it, so the record would stay empty.
+  #   2. The CONFIRMED task-derived config — the writable scope a human just approved on
+  #      the summary above. Without it `track-guard.sh` fails closed and denies every
+  #      edit to the very paths that were approved, and the approval survives only as a
+  #      line in the breadcrumb that nothing enforces. The operator's own scope lines in
+  #      track-env.base.sh are never touched; this block only supplies values the
+  #      environment has not already set.
+  #
+  # Values come from the BREADCRUMB, not from this process's env, because on a RESUME
+  # the breadcrumb is the only record of what was approved and the resuming session has
+  # no reason to have re-exported any of it. Guarded by the track-env.base.sh marker so
+  # this only ever fires inside a real INSTALLED hooks dir — never in the skill's
+  # scripts/ source mirror that unit tests run in-place.
+  #
+  # The block SELF-RETIRES (see the conditions it writes). `--complete` also removes it,
+  # but completion is reached at draft-PR handoff ONLY: a run that ends any other way —
+  # `blocked`, crash, human abandon — never gets there and used to leave an
+  # unconditional `export RUN_ID=…` behind forever. That residue governs every LATER
+  # session in the checkout, on any branch, which is how a finished run's evidence
+  # demands land on an unrelated task's diff. Binding adoption to "run is live AND its
+  # branch is checked out here" retires the id on every exit path instead of just the
+  # happy one.
   _env_dir="$(_canon_hooks_dir)"
   if [ -f "$_env_dir/track-env.base.sh" ]; then
     env_file="$_env_dir/track-env.sh"
-    _blk_begin="# >>> track-preflight RUN_ID (managed - do not edit) >>>"
-    _blk_end="# <<< track-preflight RUN_ID (managed - do not edit) <<<"
+    # Merge THIS run into the registry: keep every other row that is still alive, drop any
+    # stale copy of our own, append ours. A branch carrying a single quote would break the
+    # quoted row block, so it is refused rather than silently corrupting the file.
+    _rows_keep=""
     if [ -f "$env_file" ]; then
-      awk -v b="$_blk_begin" -v e="$_blk_end" '
-        $0==b {skip=1; next} skip && $0==e {skip=0; next} !skip {print}
-      ' "$env_file" > "$env_file.tmp" && mv "$env_file.tmp" "$env_file"
+      while IFS='|' read -r _r_id _r_br; do
+        [ -n "${_r_id:-}" ] || continue
+        [ "$_r_id" = "$run_id" ] && continue
+        _row_dead "$_r_id" "${_r_br:-}" && continue
+        _rows_keep="$_rows_keep$_r_id|${_r_br:-}
+"
+      done <<<"$(_blk_rows "$env_file")"
     fi
-    {
-      printf '%s\n' "$_blk_begin"
-      cat <<'SBD_BLK_HEAD'
-# Adopt this run's id ONLY while it is still this checkout's live run. A caller's
-# exported RUN_ID always wins; a terminal or off-branch run is never re-adopted.
-if [ -z "${RUN_ID:-}" ]; then
-SBD_BLK_HEAD
-      printf '  __sbd_id="%s"\n'     "$run_id"
-      printf '  __sbd_branch="%s"\n' "$branch"
-      printf '  __sbd_runs="%s"\n'   "$RUNS_DIR"
-      cat <<'SBD_BLK_TAIL'
-  __sbd_live=1
-  # Terminal status (meter: no-progress · tokens: budget-exceeded · note: blocked/success).
-  if jq -e '(.status // "") != ""' "$__sbd_runs/$__sbd_id.json" >/dev/null 2>&1; then __sbd_live=0; fi
-  # Completed at draft-PR handoff.
-  if [ "$__sbd_live" = 1 ] \
-     && jq -e '(.completed_utc // "") != ""' "$__sbd_runs/$__sbd_id.dispatch" >/dev/null 2>&1; then __sbd_live=0; fi
-  # Wrong branch. Skipped while the run's branch does not exist yet (Step 1, before the
-  # branch/worktree is cut) so a starting run still meters itself.
-  if [ "$__sbd_live" = 1 ] && [ -n "$__sbd_branch" ] \
-     && git rev-parse --verify --quiet "refs/heads/$__sbd_branch" >/dev/null 2>&1 \
-     && [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '')" != "$__sbd_branch" ]; then __sbd_live=0; fi
-  if [ "$__sbd_live" = 1 ]; then export RUN_ID="$__sbd_id"; fi
-  unset __sbd_id __sbd_branch __sbd_runs __sbd_live
-fi
-SBD_BLK_TAIL
-      printf '%s\n' "$_blk_end"
-    } >> "$env_file"
+    case "$run_id$branch" in
+      *"'"*) err "run id or branch contains a single quote — not registering it in track-env.sh" ;;
+      *)     _rows_keep="$_rows_keep$run_id|$branch
+" ;;
+    esac
+    # Tell the operator when this checkout now hosts more than one live run: adoption stops
+    # being inferable from a session sitting in the main checkout, and the fix is a choice
+    # they make (open the editor on the worktree), not one this script can make for them.
+    _n_rows="$(printf '%s' "$_rows_keep" | grep -c . || true)"
+    if [ "${_n_rows:-0}" -gt 1 ]; then
+      err "note: $_n_rows live runs now share this checkout. Hooks adopt a run only from a session whose HEAD is that run's branch — work from each run's own worktree, or the recorders stay off."
+    fi
+    _blk_strip "$env_file"
+    _blk_write "$env_file" "$_rows_keep"
+    unset _rows_keep _n_rows
   fi
   printf '%s\n' "$run_id"
   exit 0
@@ -397,18 +530,25 @@ if [ "$mode" = "complete" ]; then
   tmp="$(mktemp)"
   jq --arg done "$now_utc" --argjson dur "$dur" \
     '.completed_utc = $done | .duration_secs = $dur' "$rec_dispatch" >"$tmp" && mv "$tmp" "$rec_dispatch"
-  # Retire the persisted RUN_ID activation block (written at --persist) so a finished
-  # run stops steering the recorder hooks and can't bleed into an unrelated later run.
-  # Same installed-hooks guard as --persist (skip the scripts/ source mirror).
+  # Retire THIS run from the registry so it stops steering the recorder hooks — and only
+  # this run: a sibling run started from the same checkout is still live, and dropping the
+  # whole block would silently switch its recording off at the moment an unrelated feature
+  # happened to finish. When our row was the last one, the block goes entirely.
   _env_dir="$(_canon_hooks_dir)"
   if [ -f "$_env_dir/track-env.base.sh" ]; then
     env_file="$_env_dir/track-env.sh"
-    _blk_begin="# >>> track-preflight RUN_ID (managed - do not edit) >>>"
-    _blk_end="# <<< track-preflight RUN_ID (managed - do not edit) <<<"
     if [ -f "$env_file" ]; then
-      awk -v b="$_blk_begin" -v e="$_blk_end" '
-        $0==b {skip=1; next} skip && $0==e {skip=0; next} !skip {print}
-      ' "$env_file" > "$env_file.tmp" && mv "$env_file.tmp" "$env_file"
+      _rows_keep=""
+      while IFS='|' read -r _r_id _r_br; do
+        [ -n "${_r_id:-}" ] || continue
+        [ "$_r_id" = "$run_id" ] && continue
+        _row_dead "$_r_id" "${_r_br:-}" && continue
+        _rows_keep="$_rows_keep$_r_id|${_r_br:-}
+"
+      done <<<"$(_blk_rows "$env_file")"
+      _blk_strip "$env_file"
+      [ -n "$_rows_keep" ] && _blk_write "$env_file" "$_rows_keep"
+      unset _rows_keep
     fi
   fi
   printf '%s\n' "$run_id"
@@ -424,6 +564,11 @@ fi
   [ -n "$existing_file" ] && echo "  Breadcrumb:   $existing_file"
   echo "  Branch:       $branch  $([ -n "$branch_override" ] && echo '(TRACK_BRANCH — custom)' || echo '(derived from track slug)')"
   echo "  Base ref:     $base"
+  # Anchored to the MAIN working tree, so it is the same directory from every linked
+  # worktree. Printed because the run record AND the governance bundle both belong
+  # here: a bundle written to a worktree-relative runs/ lands in that worktree's own
+  # gitignored copy, splitting it from the record that points at it.
+  echo "  Runs dir:     $RUNS_DIR  (run record + governance bundle live HERE — use this path, not a bare 'runs/')"
   if [ -n "$allowed_prefixes" ]; then
     echo "  Scope:        $allowed_prefixes  (guard denies edits outside this)"
   else
@@ -465,7 +610,7 @@ fi
 
 jq -nc \
   --arg run_id "$run_id" --arg track "$track" --arg tasks "$tasks" \
-  --arg branch "$branch" --arg base "$base" \
+  --arg branch "$branch" --arg base "$base" --arg runs_dir "$RUNS_DIR" \
   --argjson resume "$resume" --argjson prereq_ok "$prereq_ok" \
   --arg missing "$missing" --arg breadcrumb "$existing_file" \
   --arg config_warn "$config_warn" \
@@ -476,6 +621,7 @@ jq -nc \
   --arg deps_viol "$deps_viol" --arg deps_warn "$deps_warn" \
   --argjson auto_confirm "$([ "$auto_confirm" = 1 ] && echo true || echo false)" \
   '{run_id:$run_id, track:$track, tasks:$tasks, branch:$branch, base_ref:$base,
+    runs_dir:$runs_dir,
     mode:(if $resume then "resume" else "start" end),
     prereq_ok:$prereq_ok,
     deps_configured:$deps_configured,

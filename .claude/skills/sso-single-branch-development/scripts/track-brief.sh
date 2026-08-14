@@ -94,6 +94,17 @@ brief="$(jq -r '[ .tool_input?.prompt?, .tool_input?.description?, .tool_input?.
           <<<"$input" 2>/dev/null || true)"
 [ -n "$brief" ] || exit 0
 
+# The dispatch's one-line PURPOSE and the agent kind it asked for, kept separate from the
+# brief body. `trace[]` is supposed to carry this as `reason` (from SubagentStart's
+# `agent_description`), but surfaces that don't populate that field leave a reviewer reading
+# five identical `SubagentStart general-purpose (a3c8254…)` rows with no way to tell what any
+# of them were for. The dispatch tool's own `description` is always there, so capture it here
+# and let the report fall back to it.
+desc="$(jq -r '[ .tool_input?.description?, .toolInput?.description?, .description? ]
+               | map(select(type == "string" and . != "")) | first // ""' <<<"$input" 2>/dev/null || true)"
+sub_type="$(jq -r '[ .tool_input?.subagent_type?, .tool_input?.subagentType?, .tool_input?.agent_type? ]
+               | map(select(type == "string" and . != "")) | first // ""' <<<"$input" 2>/dev/null || true)"
+
 RUNS_DIR="${RUNS_DIR:-runs}"
 # Anchor a RELATIVE RUNS_DIR to the main working tree so the run record is single-homed
 # across the main checkout and any linked worktree.
@@ -195,11 +206,14 @@ fi
 write_rec --arg t "$ts" --arg tool "$tool" --arg sha "${gov_sha:-}" \
           --argjson tot "$lines_total" --argjson mat "$lines_matched" \
           --argjson min "$min_lines" --arg secs "${sections:-}" \
+          --arg desc "${desc:-}" --arg st "${sub_type:-}" \
           --argjson na "$declared_na" --argjson thin "$thin" --argjson bmin "$below_min" \
   '.briefs = ((.briefs // []) + [
       {t:$t, tool:$tool, bundle_sha:$sha, lines_total:$tot, lines_matched:$mat,
        min_lines:$min, declared_na:$na, thin:$thin, below_min:$bmin}
       + (if $secs != "" then {sections: ($secs | split("|"))} else {} end)
+      + (if $desc != "" then {desc: ($desc[0:160])} else {} end)
+      + (if $st   != "" then {subagent_type: $st} else {} end)
     ]) | .last_ts = $t'
 
 # Blocking is opt-in. When it is on, the deny text has to be actionable — an agent that reads

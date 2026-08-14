@@ -231,7 +231,7 @@ export TRACK_BASE_REF="\${TRACK_BASE_REF:-$base_ref}"                 # [REPO-PO
 
 # --- ceilings / hardening ----------------------------------------------------
 export TRACK_MAX_TOOL_CALLS="\${TRACK_MAX_TOOL_CALLS:-200}"          # [REPO-POLICY] tool-call hard stop.
-export TRACK_MAX_TOKEN_ESTIMATE="\${TRACK_MAX_TOKEN_ESTIMATE:-200000}" # [REPO-POLICY] chars÷4 transcript ceiling; blocks Stop + writes status:budget-exceeded. 0 disables. Undercounts.
+export TRACK_MAX_TOKEN_ESTIMATE="\${TRACK_MAX_TOKEN_ESTIMATE:-1500000}" # [REPO-POLICY] chars÷4 transcript ceiling; blocks Stop + writes status:budget-exceeded. 0 disables. Undercounts.
 export TRACK_SELF_HEAL_ATTEMPTS="\${TRACK_SELF_HEAL_ATTEMPTS:-2}"    # [REPO-POLICY] retries per DISTINCT failure before halting \`blocked\`. Prompt-enforced; here so the number survives a context compaction.
 export TRACK_SENTINEL="\${TRACK_SENTINEL:-1}"                        # [REPO-POLICY] scan staged diff for secrets/leftovers.
 
@@ -279,6 +279,15 @@ base_exists=0; [ -f "$HOOKS_DIR/track-env.base.sh" ] && base_exists=1
 gitignore="$REPO_ROOT/.gitignore"
 runs_ignored=0
 git -C "$REPO_ROOT" check-ignore "$RUNS_DIR_NAME/" >/dev/null 2>&1 && runs_ignored=1
+# track-env.sh is the LOCAL layer — every doc calls it gitignored, and it must actually be,
+# for two reasons. (1) It holds the run's live activation block (RUN_ID + the confirmed
+# writable scope), which is per-checkout state that must never be committed into a branch
+# and travel to someone else. (2) Untracked-but-not-ignored file CONTENT is hashed into the
+# evidence fingerprint, so under the branch-in-place fallback every `--persist` rewrite
+# would silently stale every capture taken before it, and the convergence gate ("all
+# captures share one fingerprint") would fail for a reason nobody can see in the diff.
+env_ignored=0
+git -C "$REPO_ROOT" check-ignore ".github/hooks/track-env.sh" >/dev/null 2>&1 && env_ignored=1
 
 say "install-hooks: $(printf '%s' "$mode" | tr '[:lower:]' '[:upper:]')"
 say "  repo:       $REPO_ROOT"
@@ -305,15 +314,23 @@ fi
 say ""
 
 # 2. gitignore runs/
-if [ "$runs_ignored" -eq 0 ]; then
-  say "2. Gitignore '$RUNS_DIR_NAME/': not ignored (fingerprint will self-stale)."
+if [ "$runs_ignored" -eq 0 ] || [ "$env_ignored" -eq 0 ]; then
+  [ "$runs_ignored" -eq 0 ] && say "2. Gitignore '$RUNS_DIR_NAME/': not ignored (fingerprint will self-stale)."
+  [ "$env_ignored" -eq 0 ]  && say "2. Gitignore '.github/hooks/track-env.sh': not ignored (local run state; stales the fingerprint and is committable)."
   if act; then
-    printf '\n# sso-single-branch-development run records (self-stale the evidence fingerprint if tracked)\n%s/\n' \
-      "$RUNS_DIR_NAME" >> "$gitignore"
-    say "   ✓ appended '$RUNS_DIR_NAME/' to .gitignore"
+    if [ "$runs_ignored" -eq 0 ]; then
+      printf '\n# sso-single-branch-development run records (self-stale the evidence fingerprint if tracked)\n%s/\n' \
+        "$RUNS_DIR_NAME" >> "$gitignore"
+      say "   ✓ appended '$RUNS_DIR_NAME/' to .gitignore"
+    fi
+    if [ "$env_ignored" -eq 0 ]; then
+      printf '\n# sso-single-branch-development LOCAL hook env (RUN_ID + confirmed scope) — never commit;\n# untracked-and-unignored, its content would also shift the evidence fingerprint\n.github/hooks/track-env.sh\n' \
+        >> "$gitignore"
+      say "   ✓ appended '.github/hooks/track-env.sh' to .gitignore"
+    fi
   fi
 else
-  say "2. Gitignore '$RUNS_DIR_NAME/': already ignored."
+  say "2. Gitignore '$RUNS_DIR_NAME/' + '.github/hooks/track-env.sh': already ignored."
 fi
 say ""
 

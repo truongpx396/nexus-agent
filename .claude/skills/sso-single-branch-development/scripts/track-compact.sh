@@ -130,10 +130,14 @@ case "$ev" in
                      | map(select(. != null and . != "")) | join(" ")' <<<"$input" 2>/dev/null || true)"
     [ -n "$target" ] || exit 0
 
-    # Substring match on the pinned path. The bundle path is run-scoped
-    # (runs/<RUN_ID>.governance.md), so it is specific enough not to collide.
+    # Substring match on the pinned path OR its basename. The pin is absolute, while a
+    # re-read is usually typed relative ("cat runs/<id>.governance.md") — matching only
+    # the full path would miss every one of them and report the bundle as never re-read
+    # after a compaction (I4). The basename is run-scoped (<RUN_ID>.governance.md), so
+    # it is specific enough not to collide.
+    gov_base="${gov_path##*/}"
     case "$target" in
-      *"$gov_path"*)
+      *"$gov_path"* | *"$gov_base"*)
         # Record WHAT matched, not just that something did. `{t, tool}` alone reads as
         # "at 09:27 some Bash command mentioned the bundle" — which cannot distinguish a
         # real `cat runs/<id>.governance.md` re-read from a command that merely names the

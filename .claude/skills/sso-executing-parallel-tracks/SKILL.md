@@ -1,6 +1,6 @@
 ---
 name: sso-executing-parallel-tracks
-version: 0.2.0
+version: 0.2.1
 description: 'Orchestrate multiple independent implementation tracks in parallel, each in its own
 git worktree, fully autonomously from implement through review, verification, and pull request.
 Use when asked to "run tracks in parallel", "execute track 1, 2, 3", "spawn parallel agents",
@@ -191,15 +191,30 @@ counter). Leave *judgement* gates — TDD ordering, the maker/checker split, rev
 prompt instructions; a hook cannot tell which subagent reasoned about something, nor whether the
 *right* suite ran.
 
-Resolve each worker's env **two-tier** before launch — **per-track** vars (`TRACK_ALLOWED_PREFIXES`,
-`RUN_ID`) from the track's row in the **wave dispatch file**, **global** vars from the manifest
-Defaults/Commands sections. Every value is **derived from a manifest or wave dispatch field**
-(see its *Hook environment* table), not invented:
+Resolve each worker's config **two-tier** before launch — **per-track** vars from the track's row in
+the **wave dispatch file**, **global** vars from the manifest Defaults/Commands sections. Every value
+is **derived from a manifest or wave dispatch field** (see its *Hook environment* table), not invented.
+
+> **Per-track config travels in a FILE, not the environment.** Step 3 fans out with
+> `dispatching-parallel-agents`, i.e. **in-session subagents**: all N workers share one process
+> environment and one working directory. A subagent cannot set env for the hooks that fire on its own
+> tool calls — hooks are spawned by the agent surface, not by the shell a tool call runs in — so an
+> `export` per worker reaches nothing and every worker would be guarded by whatever single scope sits
+> in the main checkout. The channel that *does* distinguish workers is each track's **worktree**:
+> `track-guard.sh` resolves every write to the worktree its target path lives in and reads **that
+> worktree's** `.github/hooks/track-env.sh`. Write one per track, after `git worktree add` and before
+> fan-out.
+
 ```bash
-# PER-TRACK (a DIFFERENT value in each worktree — export inside each worker's launch)
+# PER-TRACK (a DIFFERENT value per worker)
+# SCOPE travels in the track's OWN WORKTREE file — the guard resolves every write to its
+# target path's worktree and reads the track-env.sh it finds there. Write it after
+# `git worktree add`, before fan-out. This is the channel that separates in-session workers.
+cat > "$WORKTREE_US1/.github/hooks/track-env.sh" <<'EOF'
 export TRACK_ALLOWED_PREFIXES="internal/ingest:migrations/0007_:test/ingest"  # this track's owns_paths + owns_migrations
-export RUN_ID="2026-06-27T14-03_us1"                                          # <UTC-timestamp>_<track_id>
-export AUTO_CONFIRM=1                                                         # MANDATORY for a dispatched worker: waives SBD's human proceed-confirm (taken once at Step 0). Prereq failures still hard-fail. Never set on a solo run.
+EOF
+export RUN_ID="2026-06-27T14-03_us1"   # <UTC-timestamp>_<track_id> — per-track by design (minted by track-wave-preflight.sh); reaches the RECORDERS only when a worker is its own process (see Known limit)
+export AUTO_CONFIRM=1                  # MANDATORY for a dispatched worker: waives SBD's human proceed-confirm (taken once at Step 0). Prereq failures still hard-fail. Never set on a solo run.
 # GLOBAL (identical for every worker in the wave)
 export TRACK_FROZEN_PATHS="cmd/main.go:internal/app/app.go"  # guard: frozen entrypoints
 export RUNS_DIR="runs"                                       # one shared dir; RUN_ID keys the file
@@ -210,7 +225,17 @@ export TRACK_MAX_IDLE_SECS=900                                        # hard sto
 export TRACK_NOTIFY_WEBHOOK="https://hooks.slack.com/services/..."     # notify
 ```
 Per-track `TRACK_ALLOWED_PREFIXES` values must be **non-overlapping** across tracks — the
-precheck gate already asserts this (overlap → STOP, it would only become a merge conflict).
+precheck gate already asserts this (overlap → STOP, it would only become a merge conflict), and with
+the per-worktree files in place the guard now *enforces* the same partition the precheck asserts.
+
+> **Known limit — the recorders are not per-track under in-session fan-out.** The guard scopes by
+> target path, but `track-meter.sh` / `track-trace.sh` / `track-evidence.sh` key off `RUN_ID`, and
+> most of their calls carry no path to infer a worktree from (`git status` belongs to no track). With
+> one shared process there is no way to give worker 2 a different `RUN_ID` than worker 3, so a wave
+> gets **one** run record, not N. Ownership enforcement, the property that keeps tracks from
+> colliding, is mechanical; per-track *recording* is not. Launching each worker as its own process
+> (its own env, its own `RUN_ID`) is what would restore it — until then, treat a wave's run record as
+> fleet-level and read per-track outcomes from the draft PRs.
 
 **Hooks are defense-in-depth, not the final gate.** They are local and bypassable — the
 agent can edit a hook script during its own run, and enterprise policy can disable hooks
@@ -430,6 +455,6 @@ Start low; graduate only after weeks of clean runs.
   (required), `WAVE_TRACKS` (comma-separated, required for `--persist`), `WAVE_ID` (override, rare),
   `TRACK_BASE_REF`. Derives per-track RUN_IDs as `<wave-id>_<track-id>`.
 - [`scripts/track-precheck.sh`](scripts/track-precheck.sh) (bundled, parallel-only) — the mechanical Precheck overlap gate: reads a JSON array of `{id, prefixes}` on stdin, exits 0 when all tracks' ownership prefixes are mutually disjoint, or exit 2 with the exact colliding pair / config error (empty ownership, duplicate id). Run it in Step 1 before fan-out.
-- The Copilot agent-hook bundle is **owned by `sso-single-branch-development`** ([`track-hooks.json`](../sso-single-branch-development/templates/track-hooks.json) + [`scripts/track-*.sh`](../sso-single-branch-development/scripts/)) and reused whole by every worker: `track-reconcile.sh` (SessionStart resume), `track-guard.sh` (PreToolUse ownership + push lockout), `track-evidence.sh` / `track-meter.sh` (PostToolUse evidence + tool-call ceiling), `track-trace.sh` (Subagent trace with per-spawn reason), `track-evidence-gate.sh` / `track-tokens.sh` / `track-sentinel.sh` / `track-notify.sh` (Stop: freshness gate, token estimate, secrets scan, webhook). Manual/CLI members: `track-preflight.sh` (mint/recover RUN_ID; `--yes` waiver), `track-report.sh` (deterministic PR-body Auto block), `track-note.sh` (`phase`/`governance`/`status` + optional skill/loop trace). This orchestrator reuses the bundle and layers per-track/global env on top. See [`references/hooks.md`](../sso-single-branch-development/references/hooks.md) for the full per-script contract.
+- The Copilot agent-hook bundle is **owned by `sso-single-branch-development`** ([`track-hooks.json`](../sso-single-branch-development/templates/track-hooks.json) + [`scripts/track-*.sh`](../sso-single-branch-development/scripts/)) and reused whole by every worker: `track-reconcile.sh` (SessionStart resume), `track-guard.sh` (PreToolUse ownership + push lockout), `track-evidence.sh` / `track-meter.sh` (PostToolUse evidence + tool-call ceiling), `track-trace.sh` (Subagent trace with per-spawn reason), `track-evidence-gate.sh` / `track-tokens.sh` / `track-sentinel.sh` / `track-notify.sh` (Stop: freshness gate, token estimate, secrets scan, webhook). Manual/CLI members: `track-preflight.sh` (mint/recover RUN_ID; `--yes` waiver), `track-report.sh` (deterministic PR-body Auto block), `track-note.sh` (`phase`/`governance`/`status` + optional skill/loop trace). This orchestrator reuses the bundle and layers config on top in two places, which are not interchangeable: **per-track** values go in each track's **worktree** `.github/hooks/track-env.sh` (the guard resolves them per write target — the only channel that separates in-session workers), **global** values in the environment or the committed base. See [`references/hooks.md`](../sso-single-branch-development/references/hooks.md) for the full per-script contract, and the *Known limit* above for why per-track `RUN_ID` is not among them under in-session fan-out.
 - [Copilot agent hooks (GitHub Docs)](https://docs.github.com/en/copilot/concepts/agents/hooks) · [Agent hooks in VS Code](https://code.visualstudio.com/docs/copilot/customization/hooks) · [Hooks reference (per-event I/O schema)](https://code.visualstudio.com/docs/agents/reference/hooks-reference) — events, JSON I/O, exit codes, Claude/CLI cross-compatibility.
 - Composes: `using-git-worktrees`, `dispatching-parallel-agents`, `sso-single-branch-development`.

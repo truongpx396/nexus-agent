@@ -79,13 +79,23 @@ jq --argjson n "$count" --arg t "$now_ts" \
   '.tool_calls = $n | .started_ts = (.started_ts // $t) | .last_ts = $t' "$rec" >"$tmp" && mv "$tmp" "$rec"
 
 if [ -n "${TRACK_MAX_TOOL_CALLS:-}" ] && [ "$count" -gt "$TRACK_MAX_TOOL_CALLS" ]; then
-  # Also record the terminal state for the orchestrator's summary.
+  prev_status="$(jq -r '.status // empty' "$rec" 2>/dev/null || true)"
+  # Record the terminal state for the orchestrator's summary (and for track-report /
+  # track-audit F1, which read it as a non-success outcome).
   tmp2="$(mktemp)"
   jq '.status = "no-progress"' "$rec" >"$tmp2" && mv "$tmp2" "$rec"
-  # The count is CUMULATIVE for the run, so the trip is sticky by design — but a sticky
-  # halt with no named way out is what turns "this run is over" into "this checkout is
-  # over". Name both deliberate exits so the next operator does not have to read the hook.
-  jq -nc --arg r "tool-call ceiling ($TRACK_MAX_TOOL_CALLS) exceeded for run $RUN_ID (count: $count); halting per hard-stop policy (status: no-progress). The count is cumulative for this run, so it stays tripped: to continue deliberately, raise TRACK_MAX_TOOL_CALLS above $count, or start a fresh run (new RUN_ID) via track-preflight.sh." \
-    '{continue:false, stopReason:$r}'
+  # HALT ONCE, at the crossing — not on every call thereafter. Same contract as
+  # track-tokens.sh's budget ceiling ("first exceedance blocks; the next stop is
+  # allowed"), and for the same reason: the count is cumulative, so a halt that repeats
+  # is a halt that never ends. The calls that FOLLOW a trip are the ones that matter —
+  # stamping the status, capturing what was verified, handing off — and denying those
+  # turns "this run is over" into "this checkout is over", whose only escape is deleting
+  # run state. One halt returns control to the operator, which is the ceiling's whole
+  # job; continuing past it is then a deliberate, recorded act. Name both clean exits so
+  # the next operator does not have to read the hook to find them.
+  if [ "$prev_status" != "no-progress" ]; then
+    jq -nc --arg r "tool-call ceiling ($TRACK_MAX_TOOL_CALLS) exceeded for run $RUN_ID (count: $count); halting per hard-stop policy (status: no-progress). This halt fires ONCE, at the crossing — the run stays recorded so you can report out and hand off. Do not treat the next call succeeding as permission to continue the task: raise TRACK_MAX_TOOL_CALLS above $count, or start a fresh run (new RUN_ID) via track-preflight.sh." \
+      '{continue:false, stopReason:$r}'
+  fi
 fi
 exit 0

@@ -6,9 +6,15 @@
 #     the values common to your repo, and commit it. Because it is committed it
 #     travels into every worktree automatically (single-branch AND parallel
 #     tracks) — nothing is copied at run start.
-#   * track-env.sh       — GITIGNORED, per-worktree LOCAL override. Optional.
-#     Copy this file to .github/hooks/track-env.sh in a worktree only when that
-#     branch must deviate from the repo base (e.g. a narrower writable scope).
+#   * track-env.sh       — GITIGNORED local layer. Two distinct uses:
+#     (a) MAIN CHECKOUT — the run's activation block, written by
+#         `track-preflight.sh --persist` (RUN_ID + the confirmed scope). Every hook
+#         resolves this one via git-common-dir, from any worktree.
+#     (b) A WORKTREE — that track's own override, for a PARALLEL WAVE. `track-guard.sh`
+#         resolves each write to its target path's worktree and prefers a track-env.sh
+#         found there, so N concurrent tracks get N different writable scopes out of one
+#         shared process. Only the guard reads (b): the recorders key off RUN_ID and
+#         most of their calls carry no path to resolve. Solo runs need only (a).
 #
 # WHY EITHER EXISTS
 #   The track-*.sh hooks read all their config from the environment, and each
@@ -28,12 +34,19 @@
 # track-preflight.sh and recovered from the runs/*.dispatch breadcrumb on resume.
 # Hand-setting it breaks resume. Leave it to the preflight step.
 #
-# `track-preflight.sh --persist` appends a MANAGED RUN_ID block to track-env.sh (not to
-# this base file). That block is self-retiring: it adopts its id only while the run is
-# LIVE (no terminal status, not completed) and this checkout is on the run's own branch.
-# Do not replace it with a bare `export RUN_ID=…` — an unconditional one outlives the run
-# it names and then governs every later session in the checkout, which is how a tripped
-# tool-call ceiling ends up halting an unrelated task's every tool call.
+# `track-preflight.sh --persist` appends a MANAGED block to track-env.sh (not to this base
+# file). The block is a REGISTRY of this checkout's live runs — one row per run,
+# <run-id>|<branch> — because one checkout routinely hosts several (start a feature, leave
+# it, open a second editor window and start another). At source time it picks the row whose
+# branch is checked out where the hook is running; failing that, and only from the MAIN
+# checkout with exactly one run on record, it picks that one; otherwise it picks NOTHING
+# rather than cross-wire two runs. The picked run's confirmed scope is then read from its own
+# breadcrumb. Rows are self-retiring: one drops when its run completes, goes deliberately
+# terminal (success/blocked), or its branch is checked out in no worktree. A budget-exceeded/no-progress
+# record keeps adopting: those are ceiling trips stamped mid-session, and the report-out that
+# follows one still has to be recorded. Do not replace any of this with a bare
+# `export RUN_ID=…` — an unconditional one outlives the run it names and then governs every
+# later session in the checkout.
 #
 # TWO CATEGORIES OF VAR (tagged inline below — the tag is documentation, NOT part
 # of the name; the hooks read the plain TRACK_*/PREFLIGHT_* names):
@@ -93,7 +106,7 @@ export TRACK_BASE_REF="${TRACK_BASE_REF:-origin/main}"               # [REPO-POL
 
 # --- ceilings / hardening ----------------------------------------------------
 export TRACK_MAX_TOOL_CALLS="${TRACK_MAX_TOOL_CALLS:-200}"           # [REPO-POLICY] tool-call hard stop
-export TRACK_MAX_TOKEN_ESTIMATE="${TRACK_MAX_TOKEN_ESTIMATE:-800000}" # [REPO-POLICY] Stop: token ceiling; blocks the stop + writes status:budget-exceeded on trip. 0 disables. Counts input+cache_write+output from the transcript's own message.usage (cache_read excluded); falls back to a chars÷4 heuristic on surfaces without usage data. RE-TUNE on a known-good run — a value inherited from the old chars÷4-only estimate trips far too early.
+export TRACK_MAX_TOKEN_ESTIMATE="${TRACK_MAX_TOKEN_ESTIMATE:-1500000}" # [REPO-POLICY] Stop: token ceiling; blocks the stop + writes status:budget-exceeded on trip. 0 disables. Counts input+cache_write+output from the transcript's own message.usage (cache_read excluded); falls back to a chars÷4 heuristic on surfaces without usage data. RE-TUNE on a known-good run — a value inherited from the old chars÷4-only estimate trips far too early.
 export TRACK_SENTINEL="${TRACK_SENTINEL:-1}"                         # [REPO-POLICY] Stop: scan staged diff for secrets/leftovers (unset to disable)
 # [REPO-POLICY] Self-heal cap: how many times the controller may retry ONE distinct
 # failure before halting the run `blocked` (via `track-note.sh status blocked …`) instead

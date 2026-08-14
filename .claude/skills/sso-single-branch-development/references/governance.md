@@ -148,14 +148,21 @@ spec.md for chunking rules`).
 
 ## Step 2 — Persist the bundle
 
-Write the distilled constraints to **`runs/<RUN_ID>.governance.md`**, then pin it into the run
-record:
+Write the distilled constraints to **`<RUNS_DIR>/<RUN_ID>.governance.md`** — the `Runs dir`
+preflight printed, which is anchored to the **main** checkout — then pin it into the run record:
 
 ```bash
-bash .github/hooks/track-note.sh governance "runs/$RUN_ID.governance.md"
+RUNS_DIR="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/runs"   # = the "Runs dir" preflight printed
+bash .github/hooks/track-note.sh governance "$RUNS_DIR/$RUN_ID.governance.md"
 ```
 
-`runs/` is gitignored, so the bundle never pollutes the diff or shifts the evidence fingerprint.
+`runs/` is gitignored, so the bundle never pollutes the diff or shifts the evidence fingerprint —
+and because it is gitignored, a **linked worktree has its own private copy**. A bare
+`runs/$RUN_ID.governance.md` written from a worktree therefore lands somewhere the main checkout
+cannot see, while the record pointing at it lives in the main checkout's `runs/`: the audit reports
+the bundle MISSING, and the usual repair is to write it twice and let the two drift. Use the
+anchored path and there is one bundle. (`track-note.sh` resolves and records an absolute path, and
+warns when the file sits outside the run's records dir.)
 `track-note.sh governance` records the path **and a sha**, so a later reader can tell whether the
 bundle changed after the briefs were built; `track-reconcile.sh` reports
 `position.governance_bundle_present:false` and tells you to re-run discovery if the file has since
@@ -189,10 +196,23 @@ Surface: backend-go/**, deploy/compose.yml
 - contracts/rag-ingest.md: POST /ingest {doc_id, source_uri} -> emits IngestCompleted{doc_id,
   chunk_count}
 
+## Conflicts — task text vs. governance (RESOLVED HERE, once)
+- T006 says "ruff + black"; python.instructions.md mandates Ruff only → Ruff only, no black anywhere.
+  (More specific rule wins. Decided here so no maker re-derives it and no reviewer re-litigates it.)
+
 ## Cluster → binding sections  (only when the core fans out to parallel makers)
 - go cluster (cmd/, kernel/, internal/, go.mod): Constitution I/II, go, Feature context (US2 only)
 - deploy cluster (compose.yml, Caddyfile, .env*): devops-cicd, backing-services, security-and-owasp
 ```
+
+**Resolve task-vs-governance conflicts in the bundle, not in the makers.** A task written weeks ago
+names the tooling of its time; the instruction files are the current rule. When they disagree, the
+more specific rule wins — but the *decision* belongs here, as a `## Conflicts` line, because it then
+travels into every brief and is made once instead of N times. A conflict discovered by a maker
+mid-generation costs a review round; the same conflict resolved here costs a sentence. (Conflicts
+between the task and *reality* — a tool whose config schema changed, a generator whose defaults
+moved — cannot be settled by reading, only by probing the installed tool. Scaffold mode's RESOLVE
+step does that immediately after this gate.)
 
 State **ABSENT** explicitly for every check that no-opped. An absent line is proof the check ran; a
 missing line is indistinguishable from a skipped check — this applies to the Feature-context section
