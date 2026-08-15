@@ -109,9 +109,15 @@ What a reviewer sees in the PR body when a step is missed:
 - [ ] ⚙️ **C1** `[M1]` — At least two distinct `agent_id`s in `trace[]`. Note the audit can only
       prove separation was *possible*; Claude Code's `SubagentStop` omits ids entirely, and it says
       so rather than passing silently.
-- [ ] ✋ **C2** — The controller never authored what it applied. In scaffold mode especially: bodies
-      came back **from subagents**, not the controller's own reasoning. A converged tree the
-      controller wrote itself is a violation even though it looks identical.
+- [ ] ⚙️ **C2** `[C2]` — *(scaffold)* The audit fails a scaffold run that produced a deliverable diff
+      with **zero** subagent dispatches — the fan-out never happened and the controller authored the
+      tree. `track-guard.sh` denies the same thing live, at the first deliverable Write. Both go quiet
+      when `track-trace.sh` is unwired, and say so rather than passing an unobserved run.
+- [ ] ✋ **C2b** — Every applied body came **from its cluster's maker**, not the controller's own
+      reasoning. C2 proves a fan-out happened; no artifact ties an individual file to the subagent
+      that returned it, so a run that dispatched and *then* hand-wrote half the tree still reads clean.
+      The one sanctioned exception is a **pinned generator/resolver run in Bash** (`go mod init`,
+      `uv lock`, `npm install`) — tool-determined output, which no maker could author.
 - [ ] ✋ **C3** — Review actually applied the governance rubric, rather than generic "looks good".
 
 ## D. Test discipline

@@ -16,10 +16,34 @@
 #      input). Recorded in full as `token_usage`
 #      {input, output, cache_read, cache_write}.
 #
-#      `token_estimate` — the number the ceiling is enforced on — is
-#      input + cache_write + output. cache_read is deliberately EXCLUDED: re-reading
-#      an already-cached context is the cheap part, and counting it makes the figure
-#      grow with run length rather than with work actually done.
+#      `token_estimate` — the number the ceiling is enforced on — is a COST-WEIGHTED
+#      sum in input-token-equivalents:
+#
+#          input×1  +  cache_write×1.25  +  cache_read×0.1  +  output×5
+#
+#      WHY WEIGHTED, AND WHY cache_read IS IN IT. This used to be a flat
+#      input + cache_write + output, excluding cache_read on the reasoning that
+#      "re-reading a cached context is the cheap part, and counting it makes the
+#      figure grow with run length rather than with work actually done." That
+#      reasoning is backwards for a runaway-run detector: growing with run length is
+#      precisely the signal it exists to catch, and cheap-per-token is not cheap in
+#      aggregate. Measured on a real client scaffold run that had completed only part
+#      of its Go+Python batch:
+#
+#          input 418 · output 188,142 · cache_write 1,492,020 · cache_read 38,860,060
+#          old figure  = 1,680,580   (what the ceiling saw)
+#          cache_read  = 95.9% of all tokens processed, and ~58% of the real cost
+#          weighted    = 6,692,159   (what was actually spent, in input-equivalents)
+#
+#      The gauge was reading a quarter of the spend, and the three quarters it ignored
+#      were the part that grows without bound. A ceiling calibrated on that figure
+#      cannot fire before a long run has burned several times its budget.
+#
+#      The weights are the published Claude cache/output price ratios relative to base
+#      input, and are env-tunable (see CONFIG). Setting
+#      TRACK_TOKEN_W_CACHE_READ=0 TRACK_TOKEN_W_CACHE_WRITE=1 TRACK_TOKEN_W_OUTPUT=1
+#      restores the old flat formula exactly, for a repo mid-project with a ceiling
+#      tuned against it.
 #
 #   2. chars/4 over the raw transcript text — fallback for a surface whose
 #      transcript carries no usage block. 1 token ≈ 4 characters. UNDERCOUNTS: it
@@ -61,9 +85,14 @@
 #   budget controls.
 #
 # CONFIG (set in track-env.base.sh):
-#   TRACK_MAX_TOKEN_ESTIMATE   integer ceiling (e.g. 200000). Hook is a no-op when unset
-#                        or 0. Set high enough that normal feature work never hits
-#                        it — only runaway agents should reach it.
+#   TRACK_MAX_TOKEN_ESTIMATE   integer ceiling in input-token-EQUIVALENTS (see the
+#                        weighting above). Hook is a no-op when unset or 0. Set high
+#                        enough that normal feature work never hits it — only runaway
+#                        agents should reach it. A value tuned against the OLD flat
+#                        figure is roughly 4x too low for a cache-heavy run.
+#   TRACK_TOKEN_W_CACHE_READ   weight for cache_read   (default 0.1)
+#   TRACK_TOKEN_W_CACHE_WRITE  weight for cache_write  (default 1.25; use 2 for the 1h cache)
+#   TRACK_TOKEN_W_OUTPUT       weight for output       (default 5)
 #   RUN_ID               stable run-id for this worker (set by preflight --persist)
 #   RUNS_DIR             where run records live (default: runs)
 #
@@ -141,13 +170,25 @@ usage="$(jq -s '
     end' "$tp" 2>/dev/null || true)"
 
 chars=0
+weights=null
 if [ -n "$usage" ] && [ "$usage" != "null" ]; then
-  # The ceiling is enforced on NEW tokens (input + cache writes + output) and
-  # deliberately excludes cache_read: re-reading a cached context is the cheap
-  # part, and including it makes the number balloon with run length rather than
-  # with actual work. The full breakdown is recorded either way.
-  estimate="$(jq -r '.input + .cache_write + .output' <<<"$usage")"
-  method="transcript message.usage (authoritative; new tokens = input + cache_write + output, excludes cache_read)"
+  # Cost-weighted, in input-token-equivalents — see the header for why cache_read is
+  # counted rather than dropped. Weights are read as STRINGS and coerced inside jq
+  # (`tonumber? // <default>`), so a typo'd or non-numeric override falls back to the
+  # default instead of aborting the hook and silently disabling the ceiling.
+  weights="$(jq -nc --arg r "${TRACK_TOKEN_W_CACHE_READ:-0.1}" \
+                    --arg w "${TRACK_TOKEN_W_CACHE_WRITE:-1.25}" \
+                    --arg o "${TRACK_TOKEN_W_OUTPUT:-5}" \
+    '{input:1, cache_write:($w|tonumber? // 1.25),
+      cache_read:($r|tonumber? // 0.1), output:($o|tonumber? // 5)}')"
+  estimate="$(jq -r --argjson k "$weights" \
+    '(.input * $k.input) + (.cache_write * $k.cache_write)
+     + (.cache_read * $k.cache_read) + (.output * $k.output) | round' <<<"$usage")"
+  method="transcript message.usage (authoritative), cost-weighted to input-token-equivalents: input×$(jq -r '.input' <<<"$weights") + cache_write×$(jq -r '.cache_write' <<<"$weights") + cache_read×$(jq -r '.cache_read' <<<"$weights") + output×$(jq -r '.output' <<<"$weights")"
+  # chars stays UNSET (null) on this path rather than 0: a literal 0 reads as "the
+  # transcript parser matched nothing", which is a real failure mode this hook warns
+  # about two paragraphs up, and a reader cannot tell the two apart from the record.
+  chars=null
 else
   # --- source 2 (fallback): character heuristic over the raw transcript ------
   # Used when the transcript carries no usage block. Both transcript schemas are
@@ -175,24 +216,32 @@ else
 fi
 
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+ceiling="${TRACK_MAX_TOKEN_ESTIMATE:-0}"   # set before write_estimate, which records it
 
 # Every write records the same shape; `extra` appends any status mutation. The
 # method string and the usage breakdown live in ONE place so the three exit paths
 # below cannot drift apart.
 write_estimate() { # write_estimate [extra-jq-filter]
   _tmp="$(mktemp)"
+  # `token_ceiling` is recorded alongside the estimate so the record answers "why did
+  # this not trip?" on its own. Without it, an under-budget run and a run whose ceiling
+  # was quietly raised or unset are indistinguishable after the fact — and that is
+  # exactly the question a reviewer asks when an estimate looks high and no
+  # budget-exceeded status is present.
   jq --argjson e "$estimate" --argjson c "${chars:-0}" --arg t "$ts" \
-     --arg m "$method" --argjson u "${usage:-null}" \
+     --arg m "$method" --argjson u "${usage:-null}" --argjson k "${weights:-null}" \
+     --argjson cap "${ceiling:-0}" \
     ".token_estimate = \$e
      | .token_estimate_chars = \$c
      | .token_estimate_method = \$m
+     | .token_estimate_weights = \$k
+     | .token_ceiling = \$cap
      | .token_usage = \$u
      | .last_ts = \$t${1:+ | $1}" \
     "$rec" >"$_tmp" && mv "$_tmp" "$rec" || rm -f "$_tmp"
 }
 
 # --- ceiling check (first exceedance: block stop; second: allow clean exit) --
-ceiling="${TRACK_MAX_TOKEN_ESTIMATE:-0}"
 if [ "$ceiling" -gt 0 ] && [ "$estimate" -gt "$ceiling" ]; then
   current_status="$(jq -r '.status // empty' "$rec" 2>/dev/null || true)"
   if [ "$current_status" = "budget-exceeded" ]; then
@@ -202,8 +251,17 @@ if [ "$ceiling" -gt 0 ] && [ "$estimate" -gt "$ceiling" ]; then
   fi
   # First exceedance: write terminal state and block this stop.
   write_estimate '.status = "budget-exceeded"'
+  # Print the breakdown, not just the total. The weighted figure is unintuitive the
+  # first time you meet it — on a long run cache_read routinely dominates it while
+  # being ~96% of raw tokens — and a reader who cannot see where the number came from
+  # reaches for raising the ceiling rather than for shortening the context.
   printf '%s\n' \
-    "TRACK_TOKENS: TOKEN BUDGET EXCEEDED — estimated ~${estimate} tokens (ceiling: ${ceiling})." \
+    "TRACK_TOKENS: TOKEN BUDGET EXCEEDED — ~${estimate} input-token-equivalents (ceiling: ${ceiling})." \
+    "  $(jq -r --argjson k "${weights:-null}" '
+         if $k == null then "breakdown unavailable (chars/4 fallback)"
+         else "input \(.input) · output \(.output) · cache_write \(.cache_write) · cache_read \(.cache_read)"
+              + "   weights: cw×\($k.cache_write) cr×\($k.cache_read) out×\($k.output)" end' \
+         <<<"${usage:-null}" 2>/dev/null || printf 'breakdown unavailable')" \
     "  Run record status set to 'budget-exceeded'." \
     "  DO NOT open a draft PR. Report status to orchestrator and stop cleanly." \
     "  (On the next stop attempt the hook will allow the clean exit.)" >&2

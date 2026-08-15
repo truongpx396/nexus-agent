@@ -46,14 +46,25 @@ the *check* must happen, and its outcome must be stated. Never no-op by omission
    task's surface. Absent → note it and continue.
 2. **Matched instructions** — **list the directory, then match globs. Do not work from a remembered
    list of filenames.** For every file in `.github/instructions/`, read its `applyTo` front-matter
-   glob and read the file if that glob overlaps the paths this task batch will touch.
+   glob and read the file if that glob overlaps the paths this task batch will touch. Two plain
+   commands, one per tool call:
 
    ```bash
-   for f in .github/instructions/*.instructions.md; do
-     printf '%s\t%s\n' "$(basename "$f")" \
-       "$(sed -n 's/^applyTo:[[:space:]]*//p' "$f" | head -1)"
-   done
+   ls .github/instructions/                                     # the full set — nothing remembered
+   grep -H '^applyTo:' .github/instructions/*.instructions.md    # each file's glob, one per line
    ```
+
+   A file `ls` shows but `grep` does not is a file with **no `applyTo`** — never auto-matched, never
+   required by `G2` (see the two deliberate members of that category below).
+
+   > **Keep each Bash call a single plain command.** This step used to ship as a `for` loop over the
+   > directory, and under this skill's own default isolation that is unrunnable: a worktree-isolated
+   > session's Bash guard refuses a command it cannot statically prove stays inside the worktree —
+   > loops, redirects, and `&&`-chained probes all trip it, with *"too complex to verify … break it
+   > into plain, separate commands."* Every command this reference gives is written to survive that,
+   > and so should the ones you improvise. A refused governance probe does not fail loudly; it
+   > pressures the run into skipping the enumeration and working from a remembered list, which is
+   > exactly what this item exists to prevent.
 
    This is deliberately mechanical: the set of instruction files is per-repo and changes over time,
    and `track-audit.sh` check **G2** re-derives the matched set from the same `applyTo` globs. Any
@@ -129,6 +140,9 @@ the *check* must happen, and its outcome must be stated. Never no-op by omission
 
 ### Budget the read — distil, don't hoard
 
+*(This gate's instance of the standing rule in [`context-budget.md`](context-budget.md) — same
+discipline, applied to the largest single read in the pipeline.)*
+
 The matched set is large: `security-and-owasp` alone is ~1,100 lines, and a Go+React+compose surface
 can match ~3,000 lines across several files. Holding all of that raw in the main session for the whole
 core is the single biggest context-pressure source in this pipeline, and it is exactly what
@@ -148,21 +162,35 @@ spec.md for chunking rules`).
 
 ## Step 2 — Persist the bundle
 
-Write the distilled constraints to **`<RUNS_DIR>/<RUN_ID>.governance.md`** — the `Runs dir`
-preflight printed, which is anchored to the **main** checkout — then pin it into the run record:
+Three steps, in this order, and **never derive the path by hand** — `govpath` prints the one correct
+answer and creates the directory it names:
 
 ```bash
-RUNS_DIR="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/runs"   # = the "Runs dir" preflight printed
-bash .github/hooks/track-note.sh governance "$RUNS_DIR/$RUN_ID.governance.md"
+bash .github/hooks/track-note.sh govpath        # → /abs/path/to/runs/<RUN_ID>.governance.md
+```
+```bash
+# Write the distilled constraints to EXACTLY that path (Write tool, not a heredoc).
+```
+```bash
+bash .github/hooks/track-note.sh governance "<the path govpath printed>"
 ```
 
-`runs/` is gitignored, so the bundle never pollutes the diff or shifts the evidence fingerprint —
-and because it is gitignored, a **linked worktree has its own private copy**. A bare
-`runs/$RUN_ID.governance.md` written from a worktree therefore lands somewhere the main checkout
-cannot see, while the record pointing at it lives in the main checkout's `runs/`: the audit reports
-the bundle MISSING, and the usual repair is to write it twice and let the two drift. Use the
-anchored path and there is one bundle. (`track-note.sh` resolves and records an absolute path, and
-warns when the file sits outside the run's records dir.)
+**Ask `govpath` again for the second write too.** Both failure modes below were observed on one real
+run, and both come from re-deriving the path instead of asking for it:
+
+- **The Write hard-fails with nothing written.** `runs/` is gitignored, so it exists only where
+  something created it — the main checkout, where preflight minted the breadcrumb, and *not* a
+  freshly added linked worktree. The agent surface's Write tool does not reliably create missing
+  parent directories, so the skill's own mandatory step dies on a missing dir. `govpath` runs
+  `mkdir -p` before it prints.
+- **The path drifts and the bundle forks.** Re-deriving it mid-run reliably produces a bare
+  `runs/$RUN_ID.governance.md`, which from a worktree resolves to that worktree's **private,
+  gitignored copy** — invisible to the main checkout where the record lives. The audit then reports
+  the bundle MISSING, and the usual repair is to keep both and `cp` between them until they diverge.
+
+`runs/` being gitignored is also what keeps the bundle out of the diff and out of the evidence
+fingerprint. (`track-note.sh governance` resolves and records an absolute path, and warns — naming
+`govpath` — when the file sits outside the run's records dir.)
 `track-note.sh governance` records the path **and a sha**, so a later reader can tell whether the
 bundle changed after the briefs were built; `track-reconcile.sh` reports
 `position.governance_bundle_present:false` and tells you to re-run discovery if the file has since
@@ -257,6 +285,23 @@ Governance therefore gates **both ends** — the maker brief prevents the violat
 catches what slipped through. That is deliberate defense-in-depth, not redundancy. Review is the
 backstop, never the first place governance is consulted.
 
+**Every brief also states what comes back**, alongside the governance content:
+
+```
+RETURN, in this order and nothing else:
+  1. NOTES — max 5 bullets: blockers, deviations, or constraints you could NOT satisfy.
+     Write "NOTES: none" if there are none. Never silently drop one to stay brief.
+  2. The file bodies, each a fenced block preceded by its repo-relative path.
+     COMPLETE and VERBATIM — never abbreviate, elide, or write "... unchanged ...".
+No preamble, no rationale, no summary of what you did.
+```
+
+The contract bounds the **packaging**, never the content — the controller applies a returned body
+verbatim, so an elided body writes a truncated file to disk that reads as complete in the diff, and a
+banned "commentary" section is how a maker's blocker goes unheard. Both halves are deliberate. Full
+rationale in [`context-budget.md`](context-budget.md#the-contract-bounds-the-packaging-never-the-content);
+`G6` checks what went **out** in the brief, and only the elision guard checks what comes **back**.
+
 ### This step is now audited, not trusted
 
 `track-brief.sh` (a `PreToolUse` hook on the dispatch tool) reads the outgoing brief and counts how
@@ -348,7 +393,8 @@ neither is a lesser cousin of the other's rule:
 - [ ] Constitution read, or explicitly noted absent
 - [ ] `.github/instructions/` **listed** and every `applyTo`-matching file read — matched by glob at
       run time, not from a remembered list (a `SKILL.md` in the diff pulls in the two `ai-agent-*`
-      files, whose globs cover it)
+      files, whose globs cover it). If a probe was **refused** by the surface rather than answered,
+      it did not run — re-issue it as a single plain command, never fall back to memory
 - [ ] Design artefacts read for any frontend surface, or noted absent
 - [ ] `security-and-owasp.instructions.md` read for any trust-boundary surface
 - [ ] `code-review-generic.instructions.md` **not** in the bundle — it is loaded at the review step
@@ -360,8 +406,9 @@ neither is a lesser cousin of the other's rule:
       exists
 - [ ] Feature-context distilled to the task's own scope (user-story tag or named artifact) **before**
       reading, not transcribed from the whole `spec.md`/`plan.md`/`research.md`/`data-model.md`
-- [ ] Constraints distilled and written to `runs/<RUN_ID>.governance.md` — each matched file's section
-      carries ≥2 actionable bullets, not just a heading (`G5` fails a hollow section)
+- [ ] Constraints distilled and written to the path `track-note.sh govpath` printed — never a bare
+      `runs/…` re-derived by hand — each matched file's section carrying ≥2 actionable bullets, not
+      just a heading (`G5` fails a hollow section)
 - [ ] `## Cluster → binding sections` map added when the core fans out to parallel makers, and it
       slices Feature-context sections per-cluster the same way it slices instruction sections
 - [ ] `track-note.sh governance <path>` called — again after any mid-core re-distil (governance or
