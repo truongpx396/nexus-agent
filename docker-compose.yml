@@ -1,0 +1,42 @@
+# Local development backing services for nexus-agent.
+# Usage (see README quickstart): docker compose up -d postgres redis
+#
+# Compose is for local dev / CI integration only — not production orchestration.
+# Real credentials come from a gitignored .env (see .env.example for every
+# variable this file references).
+
+services:
+  postgres:
+    image: postgres:17.11
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_USER: ${POSTGRES_USER:-nexus}
+      POSTGRES_DB: ${POSTGRES_DB:-nexus_agent}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-nexus} -d $${POSTGRES_DB:-nexus_agent}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  redis:
+    image: redis:8.10.0
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    ports:
+      - "127.0.0.1:6379:6379"
+
+# No named volume for redis: AOF persistence is intentionally not enabled at
+# this bootstrap stage (local dev only holds cache/rate-limit style ephemeral
+# state so far). Once Redis starts backing durable state (checkpoints, outbox),
+# add `command: redis-server --appendonly yes` and a `redisdata:/data` volume.
+volumes:
+  pgdata:

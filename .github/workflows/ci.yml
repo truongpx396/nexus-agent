@@ -2,8 +2,9 @@ name: CI
 
 # Lint, test, build and security-scan every change. The repo is spec-stage today:
 # jobs detect whether a component actually has source yet and SKIP gracefully when
-# it does not, then light up automatically once code lands under backend-go/ or
-# backend-python/. Nothing here needs editing when the first real code is merged.
+# it does not, then light up automatically once code lands under backend-go/,
+# ml-python/, or frontend/. Nothing here needs editing when the first real code
+# is merged.
 
 on:
   push:
@@ -25,9 +26,11 @@ jobs:
   # ---------------------------------------------------------------------------
   detect:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       go: ${{ steps.check.outputs.go }}
       python: ${{ steps.check.outputs.python }}
+      frontend: ${{ steps.check.outputs.frontend }}
       docker: ${{ steps.check.outputs.docker }}
       terraform: ${{ steps.check.outputs.terraform }}
     steps:
@@ -39,7 +42,8 @@ jobs:
           has() { compgen -G "$1" > /dev/null 2>&1 && echo true || echo false; }
           {
             echo "go=$(has 'backend-go/**/*.go')"
-            echo "python=$(has 'backend-python/**/*.py')"
+            echo "python=$(has 'ml-python/**/*.py')"
+            echo "frontend=$(has 'frontend/package.json')"
             echo "docker=$(has 'deploy/**/Dockerfile*')"
             echo "terraform=$(has 'infra/terraform/**/*.tf')"
           } >> "$GITHUB_OUTPUT"
@@ -52,6 +56,7 @@ jobs:
     needs: detect
     if: needs.detect.outputs.go == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: backend-go
@@ -68,7 +73,7 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v2.12.2
           working-directory: backend-go
       - name: Test
         run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
@@ -79,37 +84,63 @@ jobs:
           if-no-files-found: ignore
 
   # ---------------------------------------------------------------------------
-  # Python ML / condenser helper.
+  # Python ML / eval helper (uv-managed — see python.instructions.md: UV only,
+  # never bare pip).
   # ---------------------------------------------------------------------------
   python:
     needs: detect
     if: needs.detect.outputs.python == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
-        working-directory: backend-python
+        working-directory: ml-python
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
         with:
-          python-version: "3.12"
-      - name: Install tooling
-        run: |
-          python -m pip install --upgrade pip
-          pip install ruff
-          if [ -f pyproject.toml ]; then pip install -e ".[dev]" || pip install -e . || true; fi
-          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          version: "0.11.16"
+      - name: Set up Python
+        run: uv python install
+      - name: Sync environment
+        run: uv sync --all-extras --dev
       - name: Lint (ruff)
-        run: ruff check .
+        run: uv run ruff check .
       - name: Format check (ruff)
-        run: ruff format --check .
+        run: uv run ruff format --check .
       - name: Test (pytest)
         run: |
           if compgen -G "tests/**/*.py" > /dev/null || compgen -G "**/test_*.py" > /dev/null; then
-            pip install pytest && pytest -q
+            uv run pytest -q
           else
             echo "No tests found yet — skipping."
           fi
+
+  # ---------------------------------------------------------------------------
+  # Frontend web surface (React + Vite + TypeScript).
+  # ---------------------------------------------------------------------------
+  frontend:
+    needs: detect
+    if: needs.detect.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint (oxlint)
+        run: npm run lint
+      - name: Build
+        run: npm run build
 
   # ---------------------------------------------------------------------------
   # Validate every Dockerfile builds (no push here — that is the deploy workflow).
@@ -118,6 +149,7 @@ jobs:
     needs: detect
     if: needs.detect.outputs.docker == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -147,6 +179,7 @@ jobs:
   security:
     needs: detect
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       security-events: write
@@ -180,13 +213,28 @@ jobs:
           soft_fail: true
 
   # ---------------------------------------------------------------------------
+  # Eval gate placeholder. The real eval runner (regression + calibration gate)
+  # is a later Foundational-phase task (T026g); this no-op keeps the ci-gate
+  # dependency shape stable so branch protection doesn't need to change later.
+  # ---------------------------------------------------------------------------
+  eval-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Placeholder
+        run: |
+          echo "eval gate placeholder — wired in Phase 2 (T026g)"
+          exit 0
+
+  # ---------------------------------------------------------------------------
   # Single gate the branch-protection rule can require. Fails only if a job that
   # actually ran ended in failure; skipped (absent-component) jobs pass the gate.
   # ---------------------------------------------------------------------------
   ci-gate:
-    needs: [go, python, docker-build, security]
+    needs: [go, python, frontend, docker-build, security, eval-gate]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Evaluate results
         shell: bash
@@ -194,7 +242,8 @@ jobs:
           set -euo pipefail
           fail=0
           for r in "${{ needs.go.result }}" "${{ needs.python.result }}" \
-                   "${{ needs.docker-build.result }}" "${{ needs.security.result }}"; do
+                   "${{ needs.frontend.result }}" "${{ needs.docker-build.result }}" \
+                   "${{ needs.security.result }}" "${{ needs.eval-gate.result }}"; do
             if [[ "$r" == "failure" ]]; then fail=1; fi
           done
           if [[ "$fail" == "1" ]]; then
@@ -209,6 +258,7 @@ jobs:
     needs: [ci-gate]
     if: always() && failure() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/telegram-notify
