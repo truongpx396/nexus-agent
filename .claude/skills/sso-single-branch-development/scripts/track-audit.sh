@@ -156,6 +156,7 @@ remediation_for() {
     I3) printf 'Run track-reconcile.sh at session start and after any compaction, and act on its resume_action. If it never runs, wire it to SessionStart (install-hooks.sh) — position must come from durable state, never from re-reading the worktree.' ;;
     I4) printf 'After ANY compaction, re-read the pinned governance bundle from disk BEFORE dispatching the next subagent — a post-compaction brief built from memory carries constraints the compaction already dropped. If the finding is that the hook is unwired, run install-hooks.sh --apply so track-compact.sh records compactions and bundle re-reads.' ;;
     P1|P2) printf 'Stamp each gate boundary as you cross it: track-note.sh phase <mode> <step>. Without it a compacted session cannot re-anchor.' ;;
+    C2) printf 'Scaffold mode delegates generation: fan out one read-only subagent per disjoint-file cluster (dispatching-parallel-agents), each returning its file bodies as text, and apply what they return. Re-run GENERATE as a real fan-out — a converged tree the controller authored itself is a mode violation even though it looks identical. Only a pinned generator/resolver run in Bash (go mod init, uv lock, npm install) may produce content without a maker.' ;;
     M1) printf 'The stage-1/stage-2 reviewer must be a subagent distinct from the implementer. Re-review with a fresh agent if one agent did both.' ;;
     T1) printf 'Story mode requires the RED suite to fail BEFORE implementation. Confirm the tests were authored first; if they were not, this is not TDD.' ;;
     T2) printf 'Never green a frozen test by weakening it. Restore the assertion / remove the skip, and route a genuinely wrong test back through its review gate.' ;;
@@ -626,6 +627,55 @@ else
 fi
 
 # ════════════════════════════════════════════════════════════════════════════════════
+# SCAFFOLD FAN-OUT — the controller applies, it never authors
+# ════════════════════════════════════════════════════════════════════════════════════
+# C2 used to live wholly in the MANUAL list, on the reasoning that no artifact distinguishes
+# an applied body from an authored one. Half of it does: whether the fan-out happened AT ALL.
+# A scaffold run that produced a real diff with ZERO subagent dispatches on record did not
+# slice its clusters badly — it never dispatched, collapsing GENERATE into APPLY. That is the
+# documented anti-pattern, and a real run walked into it while able to quote the rule back.
+# The narrower question — whether each applied body came from its own maker — is genuinely
+# unmechanizable and stays on the MANUAL list, reworded so the split is explicit.
+if [ "$run_mode" = "scaffold" ]; then
+  trace_wired=0
+  for _f in .claude/settings.json .github/hooks/track-hooks.json .vscode/hooks.json; do
+    [ -f "$_f" ] && grep -q 'track-trace' "$_f" 2>/dev/null && { trace_wired=1; break; }
+  done
+  # Deliverables only. The run's own bookkeeping (governance bundle, PR body) is authored by
+  # the controller by design, so it can never be evidence of a skipped fan-out. `runs/` is
+  # normally gitignored and absent from `changed` anyway; filtering it is belt-and-braces for
+  # a repo that forgot the ignore rule.
+  n_deliv="$(printf '%s\n' "$changed" | sed '/^$/d' \
+             | grep -vc -e "^${RUNS_DIR##*/}/" -e '^runs/' || true)"
+  n_deliv="${n_deliv:-0}"
+  # A GENERATING dispatch, not any dispatch. RESOLVE may delegate its toolchain probe to a
+  # read-only subagent whose brief declares `GOVERNANCE: n/a` — counting that would clear this
+  # check one dispatch before the fan-out it exists to require. track-brief.sh records the
+  # discriminator, so prefer briefs[] when it has anything to say and fall back to trace[]
+  # when the brief hook is unwired or did not recognise the dispatch tool.
+  n_gen="$(jq -r '(.briefs // []) as $b
+              | if ($b | length) > 0
+                then [$b[] | select((.declared_na // false) != true)] | length
+                else [.trace[]? | '"$SUBAGENT_SEL"' | .t] | length
+                end' "$rec" 2>/dev/null || echo 0)"
+  n_gen="${n_gen:-0}"; [ "$n_gen" = "null" ] && n_gen=0
+  n_probe=$((n_dispatch > 0 && n_gen == 0 ? 1 : 0))
+  if [ "$n_gen" -gt 0 ]; then
+    add C2 PASS "scaffold run dispatched a generating fan-out — GENERATE ran (whether each applied body came from its own maker stays a human check, C2b)"
+  elif [ "$n_probe" -eq 1 ] && [ "$n_deliv" -gt 0 ]; then
+    add C2 FAIL "scaffold run produced $n_deliv deliverable file(s) but every dispatch declared 'GOVERNANCE: n/a' — a read-only probe is not the GENERATE fan-out, and no maker returned a body to apply"
+  elif [ "$trace_wired" -eq 0 ]; then
+    add C2 WARN "scaffold run with no subagent on record, but track-trace.sh is not wired — a compliant fan-out would leave the same empty trace[], so this cannot be judged (run install-hooks.sh --apply)"
+  elif [ "$n_deliv" -eq 0 ]; then
+    add C2 PASS "scaffold run with no subagent dispatched and no deliverable in the diff — GENERATE has not been reached yet, nothing was authored"
+  else
+    add C2 FAIL "scaffold run produced $n_deliv deliverable file(s) with ZERO subagent dispatches — GENERATE was collapsed into APPLY and the controller authored the tree itself"
+  fi
+else
+  add C2 PASS "not a scaffold run — the generate/apply delegation rule does not apply"
+fi
+
+# ════════════════════════════════════════════════════════════════════════════════════
 # MAKER / CHECKER — the reviewer must not be the implementer
 # ════════════════════════════════════════════════════════════════════════════════════
 
@@ -753,7 +803,7 @@ fi
 
 MANUAL_ITEMS="A5|the governance a brief carried was the RIGHT governance — G6 counts bundle constraint lines present in the brief text, it cannot tell whether the sections sliced to that cluster were the ones binding its files
 A6b|feature-context sections (spec/plan/research/contracts) were scoped to this run's task IDs/user-story tags, not transcribed wholesale from the whole feature
-C2|in scaffold mode the controller applied subagent output, never authored it itself
+C2b|in scaffold mode EVERY applied body came from its cluster's maker — C2 now checks mechanically that a fan-out happened at all, but no artifact ties an individual file to the subagent that returned it (a pinned generator/resolver run in Bash is the one sanctioned exception)
 C3|review applied the governance rubric, not a generic 'looks good'
 D1|the RED batch failed for the RIGHT reason (unmet expectation, not a typo/import error)
 D3|characterization tests passed at baseline (a baseline failure is a wrong test)

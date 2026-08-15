@@ -26,11 +26,22 @@
 # Always-on (no env needed): any file whose first 3 lines carry a
 # "GENERATED — DO NOT EDIT" banner is denied — re-run its generator instead.
 #
+# Also always-on: a write whose CONTENT carries an elision marker
+# ("... existing code ...", "# rest of file unchanged", "<!-- snip -->") is denied.
+# Set TRACK_ALLOW_ELISION=1 to permit it (e.g. authoring docs *about* elision).
+#
 # Opt-in destructive-infra guard (off unless set):
 #   TRACK_GUARD_DESTRUCTIVE  set to any value to also deny irreversible data/infra
 #                            shell commands (DROP/TRUNCATE, unbounded DELETE, Redis
 #                            FLUSHALL/FLUSHDB, NATS stream/consumer teardown,
 #                            rm -rf on an absolute/home path). Tune per stack.
+#
+# Scaffold fan-out gate (ON by default; only ever active on a scaffold-mode run):
+#   TRACK_SCAFFOLD_FANOUT_GUARD  set to 0 to disable. While a run's record says
+#                            phase.mode=="scaffold" and NO subagent has been dispatched yet,
+#                            a Write/Edit to a deliverable path is denied — the controller
+#                            would be authoring what GENERATE must delegate. See the block
+#                            above the `case` for why this fails open in every unknown case.
 #
 # Opt-in fast-forward push (off unless set):
 #   TRACK_ALLOW_FF_PUSH      set to any value to permit a plain `git push` (e.g. a
@@ -166,6 +177,120 @@ _git_relpath() {
   fi
 }
 
+# --- scaffold mode: the controller APPLIES, it never AUTHORS -------------------------
+# Scaffold mode's one structural rule is that generation is delegated: GENERATE fans out a
+# read-only subagent per disjoint-file cluster, each RETURNS its file bodies as text, and the
+# controller's only job is to write them down. Nothing observed whether that happened, because
+# a converged tree the controller authored looks byte-identical to one it applied — and on a
+# real run a model that had already read the rule, and could quote it back verbatim, skipped
+# the fan-out anyway because the files were "trivial config" and a subagent per cluster felt
+# heavyweight. A rule that only the rule-breaker can check is not a gate.
+#
+# One half of it IS checkable in the moment: whether ANY subagent has run yet. In scaffold
+# mode no deliverable write is legitimate before the first dispatch, so that is the test.
+#
+# What stays allowed, deliberately, because it is NOT authorship:
+#   * writes into the run's own RUNS_DIR — the governance bundle and the PR body are the
+#     controller's own work product by design (handled by the caller, which skips this check
+#     for those paths);
+#   * every Bash command. Running a PINNED generator or resolver (`go mod init`, `uv lock`,
+#     `npm create vite@8.2.1`, `go mod tidy`, `npm install`) produces tool-determined output,
+#     not a judgement call, and it is the only way a real lockfile hash ever gets made. That
+#     is exactly the line scaffold-mode.md draws: content that took a decision comes from a
+#     maker, content a pinned tool decides comes from the tool.
+#
+# And it stops after the first dispatch: this catches the STRUCTURAL skip (no fan-out at all),
+# never per-file provenance (whether body N came from maker N), which no hook can see and which
+# track-audit.sh keeps on its MANUAL list.
+#
+# FAILS OPEN in every case where the answer is not positively known — no RUN_ID, no run record,
+# a mode other than scaffold, or a track-trace.sh that is not wired. That last one matters: with
+# no trace hook, trace[] is empty on a perfectly compliant run, and a guard that denied every
+# write on that basis would be worse than no guard at all.
+# --- elision markers: a truncated body that reads as a complete one -------------------
+# The controller APPLIES a maker's returned body verbatim, so anything the maker left out is
+# simply missing from the file on disk — and a file that was silently abbreviated still
+# parses, still diffs cleanly, and looks complete to a reviewer who was not told to expect a
+# gap. Nobody can eyeball this: the controller is writing 400 lines it did not author.
+#
+# The risk got sharper when this skill started telling briefs to keep returns tight
+# (references/context-budget.md). "Be brief" aimed at a maker is the single most reliable way
+# to produce `// ... rest of file unchanged ...`, and that instruction now sits directly
+# upstream of a verbatim-write step. The doc rule says bodies come back complete; this is the
+# half that does not depend on everyone having read it.
+#
+# DELIBERATELY NARROW — FIVE conditions, because every one of them alone has honest uses and
+# a false positive here blocks a legitimate write with no in-bounds alternative. A line is an
+# elision marker only when it (a) is SHORT, (b) carries no quote or backtick, (c) opens as a
+# comment or a bracketed/leading-dots placeholder, (d) contains an ellipsis, and (e) names the
+# elision in words.
+#
+# (a) and (b) are what separate a marker from a line ABOUT markers, and both were found the
+# hard way: this guard's own header comment and context-budget.md both discuss elision by
+# quoting it, and an earlier form of this check denied writing either file. The real
+# discriminator is that a genuine marker IS the whole line — a mention of one is embedded in a
+# sentence, in quotes or backticks, and runs long.
+#
+# Note single `-` is NOT a comment opener here: it is the markdown/YAML list bullet, and
+# treating it as one flagged every prose bullet that mentioned elision. `--` (SQL, Lua) stays.
+# Honest uses each condition protects: a bare `...` is Python's Ellipsis and YAML's document
+# end; "the rest of the file is unchanged" is a fine English sentence; `{...x}` is a spread;
+# "wait for it... then retry" is ordinary punctuation in a comment.
+_elision_hit() {  # _elision_hit <content> — echoes the offending line, empty if clean
+  [ -n "${1:-}" ] || return 0
+  [ -z "${TRACK_ALLOW_ELISION:-}" ] || return 0
+  printf '%s\n' "$1" \
+    | grep -aE '^.{0,72}$' \
+    | grep -av '["'"'"'`]' \
+    | grep -aE '^[[:space:]]*(//|/\*|\*|#+|--|;+|%|<!--|\[|\()?[[:space:]]*(\.\.\.|…)|^[[:space:]]*(//|/\*|\*|#+|--|;+|%|<!--)' \
+    | grep -aE '(\.\.\.|…)' \
+    | grep -aiE '(unchanged|existing code|rest of|remainder|remains? the same|omitted|elided|truncated|snip|as (above|before)|previous (content|code)|no changes? here)' \
+    | head -1 || true
+}
+
+__sfg_done=0; __sfg_deny=0
+_scaffold_fanout_violation() {   # exit 0 = deny this write, 1 = nothing to say
+  if [ "$__sfg_done" -eq 0 ]; then
+    __sfg_done=1
+    [ "${TRACK_SCAFFOLD_FANOUT_GUARD:-1}" != "0" ] || return 1
+    [ -n "${RUN_ID:-}" ] || return 1
+    _sfg_root="${TRACK_MAIN_ROOT:-$PWD}"
+    _sfg_runs="${RUNS_DIR:-runs}"
+    case "$_sfg_runs" in /*) ;; *) _sfg_runs="${_sfg_root%/}/${_sfg_runs%/}" ;; esac
+    _sfg_rec="$_sfg_runs/$RUN_ID.json"
+    [ -f "$_sfg_rec" ] || return 1
+    jq -e '(.phase.mode // "") == "scaffold"' "$_sfg_rec" >/dev/null 2>&1 || return 1
+    # "Has a GENERATING dispatch happened?" — not "has any subagent run?". RESOLVE may
+    # legitimately delegate its toolchain PROBE to a read-only subagent (that is the whole
+    # point of the probe: `nvm install`/`npm view`/`uv python list` output is bulk noise the
+    # controller should never hold), and such a brief declares `GOVERNANCE: n/a` because it
+    # carries no maker constraints. Counting it would hand the run a free pass out of this
+    # gate before GENERATE — the exact skip being guarded, one dispatch later.
+    #
+    # track-brief.sh already records the discriminator (`declared_na`), so prefer briefs[]
+    # when it has anything to say and fall back to the weaker trace[] signal when the brief
+    # hook is unwired or did not recognise the dispatch tool. Same selector track-audit.sh
+    # uses: the kind tag first, the raw event name for records written before that tag.
+    jq -e '((.briefs // []) as $b
+            | if ($b | length) > 0
+              then ([$b[] | select((.declared_na // false) != true)] | length) > 0
+              else ([.trace[]? | select(((.kind // "") == "subagent")
+                      or (((.event // "") | ascii_downcase) | test("subagent")))] | length) > 0
+              end) | not' \
+      "$_sfg_rec" >/dev/null 2>&1 || return 1
+    # An empty trace[] is only evidence of anything if something was watching.
+    _sfg_wired=0
+    for _sfg_f in "${_sfg_root%/}/.claude/settings.json" \
+                  "${_sfg_root%/}/.github/hooks/track-hooks.json" \
+                  "${_sfg_root%/}/.vscode/hooks.json"; do
+      if [ -f "$_sfg_f" ] && grep -q 'track-trace' "$_sfg_f" 2>/dev/null; then _sfg_wired=1; break; fi
+    done
+    [ "$_sfg_wired" -eq 1 ] || return 1
+    __sfg_deny=1
+  fi
+  [ "$__sfg_deny" -eq 1 ]
+}
+
 case "$tool" in
   create_file | replace_string_in_file | multi_replace_string_in_file | edit_notebook_file | Write | Edit | MultiEdit | NotebookEdit)
     # Collect every target path this edit touches, across surface variants.
@@ -178,6 +303,22 @@ case "$tool" in
         (.tool_input.edits[]?.file_path) ]
       | map(select(. != null and . != "")) | .[]' <<<"$input")"
     [ -z "$paths" ] && exit 0
+
+    # Content check runs once per call, before the per-path loop: an elision is a property
+    # of what is being written, not of where it lands. Every surface's new-text field is
+    # collected, so a MultiEdit hunk is covered as well as a whole-file Write.
+    _new_text="$(jq -r '
+      [ .tool_input.content?,
+        .tool_input.new_string?,
+        .tool_input.newString?,
+        (.tool_input.edits[]?.new_string),
+        (.tool_input.replacements[]?.newString) ]
+      | map(select(type == "string" and . != "")) | join("\n")' <<<"$input" 2>/dev/null || true)"
+    _elided="$(_elision_hit "$_new_text")"
+    if [ -n "$_elided" ]; then
+      deny "this write contains an ELISION MARKER — '$(printf '%s' "$_elided" | cut -c1-80)'. A body applied verbatim with a placeholder in it writes a TRUNCATED file that still parses and still diffs cleanly, so nothing downstream will catch it. If this came back from a maker subagent, the return contract was not honoured: re-request the file COMPLETE and VERBATIM rather than patching around the gap by hand (see references/context-budget.md). If the marker is genuinely part of the content — documentation about elision, a test fixture — set TRACK_ALLOW_ELISION=1 for this write."
+    fi
+    unset _new_text _elided
 
     while IFS= read -r p; do
       [ -z "$p" ] && continue
@@ -230,18 +371,23 @@ case "$tool" in
       # happens to sit under some subdirectory the hook was invoked from is a DIFFERENT
       # directory and must stay denied. Both roots are checked because the bundle is
       # written to the main checkout while the work lives in a linked worktree.
-      if [ "$ok" -ne 1 ]; then
-        _runs="${RUNS_DIR:-runs}"
-        case "$p" in /*) _abs="$p" ;; *) _abs="$PWD/$p" ;; esac
-        case "$_runs" in
-          /*) case "$_abs" in "${_runs%/}"/*) ok=1 ;; esac ;;
-          *)  for _base in "$TRACK_MAIN_ROOT" "${GIT_WT_ROOT:-}"; do
-                [ -n "$_base" ] || continue
-                case "$_abs" in "${_base%/}/${_runs%/}"/*) ok=1 ;; esac
-              done ;;
-        esac
-        unset _runs _abs _base
-      fi
+      # `p_is_runs` also tells the scaffold fan-out check below to leave this path alone:
+      # bookkeeping is controller-authored by design, deliverables are not. It is computed
+      # unconditionally (not only when the scope check already failed) because a scope that
+      # legitimately includes `runs/` would otherwise leave the flag unset and hand the
+      # governance bundle to a check that has nothing to say about it.
+      p_is_runs=0
+      _runs="${RUNS_DIR:-runs}"
+      case "$p" in /*) _abs="$p" ;; *) _abs="$PWD/$p" ;; esac
+      case "$_runs" in
+        /*) case "$_abs" in "${_runs%/}"/*) p_is_runs=1 ;; esac ;;
+        *)  for _base in "$TRACK_MAIN_ROOT" "${GIT_WT_ROOT:-}"; do
+              [ -n "$_base" ] || continue
+              case "$_abs" in "${_base%/}/${_runs%/}"/*) p_is_runs=1 ;; esac
+            done ;;
+      esac
+      unset _runs _abs _base
+      if [ "$p_is_runs" -eq 1 ]; then ok=1; fi
       # A path outside EVERY worktree gets its own message. It is not a scope dispute — no
       # track owns it and no prefix can match it, because the scope is repo-relative and
       # `_git_relpath` leaves such a path absolute. The generic "merge conflict at
@@ -276,6 +422,12 @@ case "$tool" in
         esac
       done
       IFS="$saved_ifs"
+
+      # Scaffold mode: a deliverable written before the first subagent ran is the controller
+      # authoring what GENERATE must delegate (see _scaffold_fanout_violation above).
+      if [ "$p_is_runs" -eq 0 ] && _scaffold_fanout_violation; then
+        deny "scaffold mode: '$rel' would be AUTHORED by the controller — this run's record shows no GENERATING subagent yet, so no maker has returned a body for you to apply. GENERATE fans out one read-only subagent per disjoint-file cluster (dispatching-parallel-agents); each RETURNS its file bodies as text and the controller only writes them down. Dispatch the fan-out, then apply what it returns. Two things do NOT clear this and are not meant to: a RESOLVE toolchain-probe dispatch (its brief declares 'GOVERNANCE: n/a', so it is not counted), and running a PINNED generator or resolver in Bash (go mod init, uv lock, npm create vite@<pinned>, npm install) — the latter stays allowed because it is tool-determined output rather than authorship. That is the line: content that took a decision comes from a maker, content a pinned tool decides comes from the tool. Escape hatch, if this is genuinely not a fan-out step: TRACK_SCAFFOLD_FANOUT_GUARD=0."
+      fi
     done <<<"$paths"
     ;;
 

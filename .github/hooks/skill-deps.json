@@ -6,7 +6,8 @@
     "probe = the command whose output carries the version; the first N.N(.N) token in its stdout/stderr is parsed. If the probe's binary is absent from PATH the dep is 'missing'.",
     "required:true  → a missing dep hard-fails preflight; an out-of-range version hard-fails only when TRACK_DEPS_STRICT=1 (otherwise it warns).",
     "required:false → missing or out-of-range only ever warns; use for repo toolchain that not every run needs.",
-    "an empty range ('') skips the version check but still records presence (pure caching, no lock)."
+    "an empty range ('') skips the version check but still records presence (pure caching, no lock).",
+    "speckit's CLI binary is 'specify', not 'speckit' — the old probe name meant the dep always resolved 'missing' and the =0.15.2 pin never actually verified anything. Upstream (supspec-orchestration v0.10.0) pins =0.16.0; this repo stays at =0.15.2 to match the installed CLI and the vendored .claude/skills/speckit-* — bump both together."
   ],
   "dependencies": {
     "git": {
@@ -26,7 +27,7 @@
     },
     "speckit": {
       "range": "=0.15.2",
-      "probe": "speckit --version",
+      "probe": "specify --version",
       "required": false
     }
   }

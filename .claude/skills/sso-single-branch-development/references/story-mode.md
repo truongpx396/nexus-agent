@@ -170,6 +170,15 @@ evidence kind
 fingerprint. The story's Definition of Done is its **Checkpoint** line (e.g. *"US1 fully functional —
 ingest … browsable library"*) realized as green output you paste, not assert.
 
+**Watch the context budget through the green phase — this core is where it bites hardest.** Story mode
+is the longest-running core in the skill: N increments, each with a maker dispatch, a reviewer
+dispatch, and a test run whose output then rides along in context for every remaining increment. Two
+habits, both from [`context-budget.md`](context-budget.md): redirect the *setup* around a test run
+(`npm ci`, `uv sync`, container bring-up) and read only its verdict, while keeping the **test output
+itself in full** — that is the evidence, and truncating it to save tokens is the one trade this skill
+never makes. And give every maker and reviewer brief an explicit one-line `RETURN:` contract, because
+per-increment dispatch is where an unbounded return payload compounds N times.
+
 ## What story mode changes vs. keeps
 
 | Aspect | Per-task SDD (inside green) | Story core (whole story) |

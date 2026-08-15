@@ -19,6 +19,12 @@ export TRACK_FROZEN_PATHS="${TRACK_FROZEN_PATHS:-}"                  # exact fil
 # backend-go/migrations/... and the append-only rule was silently inert.
 export TRACK_IMMUTABLE_PREFIXES="${TRACK_IMMUTABLE_PREFIXES:-backend-go/migrations/}"  # [REPO-POLICY] committed files here are append-only.
 export TRACK_GUARD_DESTRUCTIVE="${TRACK_GUARD_DESTRUCTIVE:-1}"       # [REPO-POLICY] deny DROP TABLE/TRUNCATE TABLE/FLUSHALL/rm -rf. Heredoc bodies are data and are not scanned.
+# Both new in bundle 0.8.0, both ON by default, and both left ON here — these two lines
+# DOCUMENT the escape hatches, they do not change behaviour. Prefer a one-command override
+# (`TRACK_ALLOW_ELISION=1 <cmd>`) over flipping either repo-wide: each guards a failure the
+# controller cannot catch by eye in a body it did not author.
+export TRACK_SCAFFOLD_FANOUT_GUARD="${TRACK_SCAFFOLD_FANOUT_GUARD:-1}" # [REPO-POLICY] scaffold mode: deny a DELIVERABLE Write/Edit until a GENERATING subagent is on record — otherwise the controller authors what GENERATE must delegate. RUNS_DIR writes and all Bash (pinned generators/resolvers: go mod init, uv lock, npm install) stay allowed. Fails open with no RUN_ID/record/track-trace.sh. 0 disables.
+export TRACK_ALLOW_ELISION="${TRACK_ALLOW_ELISION:-}"                # [REPO-POLICY] empty = deny a write whose content carries an elision marker ("... rest of file unchanged"), which lands a TRUNCATED file that still parses and still diffs cleanly. 1 permits — only when the marker genuinely IS the content (docs about elision, a test fixture).
 # Empty is the correct default: the guard allows a worker to publish its OWN branch once so
 # `gh pr create` can reach the remote. Set to 1 ONLY for an sso-pr-review-feedback flow that
 # updates an ALREADY-published PR branch — and prefer `TRACK_ALLOW_FF_PUSH=1 <cmd>` for the
@@ -64,7 +70,21 @@ export TRACK_VACUOUS_PATTERN="${TRACK_VACUOUS_PATTERN:-}"            # [REPO-POL
 
 # --- ceilings / hardening ----------------------------------------------------
 export TRACK_MAX_TOOL_CALLS="${TRACK_MAX_TOOL_CALLS:-600}"          # [REPO-POLICY] tool-call hard stop. The Phase 1 scaffold used 370.
-export TRACK_MAX_TOKEN_ESTIMATE="${TRACK_MAX_TOKEN_ESTIMATE:-3000000}" # [REPO-POLICY] transcript ceiling; blocks Stop + writes status:budget-exceeded. 0 disables. The Phase 1 scaffold measured 1,481,446 new tokens (against 66.1M cache reads).
+# UNIT CHANGE in bundle 0.8.0 — this number no longer means what it did. The estimate is now
+# COST-WEIGHTED input-token-EQUIVALENTS (input×1 + cache_write×1.25 + cache_read×0.1 +
+# output×5) instead of a flat input+cache_write+output, because cache_read was excluded and
+# is both the largest and the only unbounded term: on the upstream client run it was 95.9% of
+# tokens processed, so the old gauge read ~25% of the spend.
+# Re-tuned, not carried over: Phase 1's measured 1,481,446 new tokens against 66.1M cache
+# reads re-scores at ~9.1M under the new formula (6.6M of that is cache_read alone), so the
+# old 3,000,000 would now trip MID-SCAFFOLD on a known-good run — status:budget-exceeded,
+# Stop blocked, no draft PR. 15,000,000 keeps roughly the old ~2x headroom and clears even
+# the worst-case re-weighting of that run (~14M, if all 1.48M had been output). The exact
+# split is unrecoverable (that run record is gone), so RE-TUNE from the next real run:
+# `token_estimate` is now recorded beside `token_ceiling` in the record. Weights are tunable
+# via TRACK_TOKEN_W_CACHE_READ / _CACHE_WRITE / _OUTPUT (0/1/1 restores the old flat sum;
+# _CACHE_WRITE=2 if a run uses the 1-hour prompt cache rather than the 5-minute one).
+export TRACK_MAX_TOKEN_ESTIMATE="${TRACK_MAX_TOKEN_ESTIMATE:-15000000}" # [REPO-POLICY] Stop ceiling in input-token-equivalents; blocks Stop + writes status:budget-exceeded. 0 disables.
 export TRACK_SELF_HEAL_ATTEMPTS="${TRACK_SELF_HEAL_ATTEMPTS:-2}"    # [REPO-POLICY] retries per DISTINCT failure before halting `blocked`. Prompt-enforced; here so the number survives a context compaction.
 export TRACK_SENTINEL="${TRACK_SENTINEL:-1}"                        # [REPO-POLICY] scan staged diff for secrets/leftovers.
 # Makes track-audit.sh a BLOCKING Stop gate instead of an advisory CLI report. Unset in the

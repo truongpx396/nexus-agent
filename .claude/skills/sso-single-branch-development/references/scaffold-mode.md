@@ -64,15 +64,22 @@ bracket 1–8 and a bare number means different things in the two documents:
             persist runs/<RUN_ID>.governance.md      [reuse: references/governance.md]
 MODE GUARD  assert every batched task is
             non-behavioral                           [refuse → story mode]
-RESOLVE     probe + PIN the toolchain and every
-            version the batch will materialize;
-            append to the bundle, re-pin it          [serial, one human confirm]
+RESOLVE     ├ PROBE the installed toolchain and every
+            │ version the batch will materialize     [parallel ✅  read-only, DELEGABLE]
+            └ PIN the versions, resolve the conflicts,
+              run any required install, optionally lay
+              down a pinned generator's BASELINE tree
+              (Bash only) as fan-out INPUT; append to
+              the bundle, re-pin it                  [serial, one human confirm, NOT delegable]
 GENERATE    fan out N read-only subagents, one per
             INDEPENDENT DOMAIN / DISJOINT-FILE
             CLUSTER (not one-per-file, not
             one-per-task); each RETURNS file bodies
             as strings, no disk writes               [parallel ✅  dispatching-parallel-agents]
 APPLY       controller writes all returned bodies    [serial, single writer, instant]
+MATERIALIZE controller runs the pinned RESOLVERS over
+            the applied manifests to produce real
+            lockfiles (Bash only, never hand-authored) [serial → go mod tidy / uv lock / npm install]
 REVIEW GATE ONE code review over the whole diff      [serial → requesting-code-review]
 CONVERGENCE freeze, then ONE batch verify against
    GATE     the converged tree: build (all runtimes)
@@ -95,8 +102,10 @@ cycle and no per-task implement↔review loop to run.
 | mode guard | Eligibility | — (local refusal guard) | All-or-nothing non-behavioral assertion; routes to story mode on any hit |
 | generate | Fan-out generation | `dispatching-parallel-agents` | One subagent per independent domain / disjoint-file cluster returns its file bodies in parallel — safe because nothing writes |
 | apply | Apply bodies | — (controller = single writer) | Collapses N proposals into one tree; serial application, no skill |
+| materialize | Run the pinned resolvers | — (controller, Bash only) | Lockfile hashes are tool-determined, not authorable — no subagent can return a valid `go.sum`/`uv.lock` |
 | review gate | Whole-diff review | `requesting-code-review` | "Is it correct" proof — quality + governance rubric (constitution hard gate + matched `.github/instructions/*`; no security add-on — guard cleared trust boundaries) |
-| RESOLVE | Pin versions before generating | — (serial, one confirm) | Every version decided once, appended to the bundle and re-pinned — so a version surprise is not re-discovered N times as a post-hoc deviation |
+| RESOLVE / probe | Ask the installed tools what they are | `dispatching-parallel-agents` (optional) | Read-only, bulk-noise-in / one-table-out — the one part of RESOLVE that is pure fact-gathering, so it is the one part that delegates |
+| RESOLVE / pin | Decide versions before generating | — (serial, one confirm) | Every version decided once, appended to the bundle and re-pinned — so a version surprise is not re-discovered N times as a post-hoc deviation |
 | convergence gate | Batch evidence | `verification-before-completion` | "Does it work" proof — real build/lint/bring-up output, not assertion |
 | bracket | Draft-PR finish | **overrides** `finishing-a-development-branch` | Worker stops at a draft PR; merge is owned by repo/CI |
 
@@ -141,10 +150,19 @@ then **re-pin the bundle** (`track-note.sh governance <path>`). No new machinery
 every maker brief exactly like the rest of the bundle, `G1` re-hashes it, and a compacted session
 re-reads it from disk.
 
-| Surface | Generator (pinned) | Runtime / language | Key deps (exact) | Probed from |
+| Surface | Generator + version (**decided here, run below or not at all**) | Runtime / language | Key deps (exact) | Probed from |
 |---|---|---|---|---|
 | frontend | `npm create vite@7.1.2` | node 22.11.0 | react 19.2.8, vite 8.2.1 | `npm view … version` |
 | backend-go | — | go 1.25.0 (`go get` raises 1.23) | golangci-lint 2.5.0 | `go version`, `golangci-lint --version` |
+
+**RESOLVE decides versions; it does not author files.** The generator column records *which* pinned
+tool would produce a surface, established by a cheap `--version` / `npm view` probe. Reading a pinned
+generator out of that column and executing the whole bootstrap from it — `go mod init` … `go get` …
+`uv add` … `npm create vite` — is the slide that ends the run before GENERATE ever fans out, and it
+happened on a real run: the model read `Generator (pinned): npm create vite@7.1.2`, ran it, kept
+going, and made the batch's live authorial decisions (which lint rules, which judge dependencies)
+itself. Nothing in this document licenses that. Exactly one thing may be *run* here, under the rules
+in the next section.
 
 **Confirm this table with the human before GENERATE**, and say what each pin costs — "the task says
 Go 1.23; the declared deps force 1.25, and forcing it back breaks `go list -m all`" is a decision
@@ -156,7 +174,107 @@ enforces it at preflight on every later run.
 only appears at install). Those remain deviations — and that is fine. The goal is that the
 deviations you report are the *novel* ones, not the ones a `--version` call would have told you.
 
+#### PROBE is delegable; PIN is not
+
+RESOLVE is two jobs wearing one name, and they have opposite delegation rules — the same trap the
+[GENERATE boundary](#generate--parallel-generation-is-safe-because-nothing-writes) sets one step
+later, so decide it deliberately rather than by momentum.
+
+- **PROBE — fact-gathering. Delegate it.** `go version`, `golangci-lint --version`, `npm view <pkg>
+  version`, `uv python list --all-versions`, `<tool> config verify`. This is read-only, needs no
+  judgement, and its *inputs are bulk noise the controller should never hold* — a `uv python list`
+  or an `nvm install` dumps hundreds of lines to establish one number. One subagent per surface
+  (go / python / node), dispatched in parallel via `dispatching-parallel-agents`, is the same shape
+  as the GENERATE fan-out and safe for the same reason: nothing writes. On the observed run this was
+  the single largest avoidable context sink outside governance.
+- **PIN — judgement. Keep it in your own session.** Which version wins when `plan.md` pins
+  `requires-python = ">=3.13.15"` and that patch does not exist; whether a task's `.eslintrc.cjs` or
+  the generator's actual `.oxlintrc.json` is authoritative; what each pin costs. These are the
+  `## Conflicts` lines that travel into every brief, and they are non-delegable for exactly the
+  reason the governance gate is: a subagent's reasoning dies at the process boundary, and what
+  survives is a number with no argument attached.
+
+**A probe subagent's brief must declare `GOVERNANCE: n/a — read-only toolchain probe, returns
+versions only, writes nothing`** — it carries no maker constraints, and the declaration is what keeps
+`G6` from reading it as a filename-passing brief. That declaration is also load-bearing in the other
+direction: `track-guard.sh` and `track-audit.sh`'s `C2` **do not count an `n/a` dispatch as the
+GENERATE fan-out**, so probing does not buy you out of the gate one dispatch early.
+
+**Return raw output, not a summary.** Each probe comes back as the command and its verbatim answer
+(`$ go version` → `go version go1.25.4 darwin/arm64`), not "Go is 1.25". A summarized version number
+is an assertion, and pins built on assertions are the deviations RESOLVE exists to prevent. The
+compact table is *yours* to build from those lines, in the bundle, once.
+
+**A probe never installs.** `nvm install 22`, `uv python install 3.13.13`, a `GOTOOLCHAIN=auto` fetch:
+these mutate the developer's machine outside the repo, and they belong **after** the human confirm,
+run by the controller — a scaffold run should not silently put a new Node on someone's laptop. A
+probe that finds a required version missing reports it as a *required action* ("node 22.x not
+installed; `nvm install 22` would add it") and stops. Two further reasons this is not pedantry:
+shell activation does not cross a process boundary at all (`nvm use 22` inside a subagent is inert
+for you — the binary persists, the activation does not), so **whether every later command in this run
+needs a `nvm use 22` prefix is itself a probe finding to report**; and an install performed before
+the confirm has front-run the one gate that was supposed to authorize it.
+
+### The line: JUDGEMENT is delegated, TOOL-DETERMINED output is not
+
+Every real scaffold hits the same tension, and leaving it unstated is what produced the worst
+observed failure of this mode. A read-only subagent returns *text*. But `go.sum`, `uv.lock` and
+`package-lock.json` carry cryptographic hashes no model can author, and `tasks.md` itself usually
+says to commit them **"as generated, never hand-edited."** So some content genuinely cannot come from
+a maker — and a controller that notices this, with no rule to point at, generalizes from "lockfiles
+must come from the real tool" to "so I'll just do all of it myself," and dresses the result up as
+compliant. Both halves of that are separable. Separate them:
+
+| | Who produces it | With what | Examples |
+|---|---|---|---|
+| **Took a decision** | a **maker subagent**, always | returns text; controller applies with Write/Edit | the dependency *list*, ruff rule selection, `.golangci.yml`, compose services, CI jobs, `Makefile` targets, every override layered on a template |
+| **A pinned tool decides** | the **controller**, always | **Bash only**, never typed by hand | `go.sum`, `uv.lock`, `package-lock.json`, a generator's own untouched template files |
+
+Two consequences, and they are the whole rule:
+
+- **If you are about to use Write/Edit on a deliverable and no subagent has returned a body yet, you
+  are violating the mode.** That is now mechanical: `track-guard.sh` denies the write while the run
+  record shows scaffold mode with zero dispatches, and `track-audit.sh`'s `C2` fails a scaffold run
+  that produced a diff with none. Bash is untouched — the guard is drawing exactly the line in this
+  table, not blocking work.
+- **"Only a tool can produce it" is never a reason to also decide it.** `uv.lock` must come from
+  `uv lock`; *which packages it locks* is a decision, and that decision belongs in a maker's brief.
+  A controller that picks the dependency set and then points at the lockfile as justification has
+  used a real constraint to launder an unrelated deviation.
+
+#### BASELINE (optional, inside RESOLVE) — a generator's tree is INPUT, never the deliverable
+
+Where a pinned generator owns a surface (`npm create vite@<pinned>`, `go mod init`, `uv init`),
+run it **here, in Bash**, before the fan-out, and treat what it lays down as *material the makers
+build on*: record the resulting file inventory and the defaults that surprised you (the template
+ships `.oxlintrc.json`, not ESLint; `go mod init` wrote a `go` directive one minor above the pin)
+into the bundle's `## Resolved toolchain` section. Every cluster brief then carries the real
+baseline instead of the maker guessing at it.
+
+It is **input, not output.** The baseline is not the scaffold, and laying it down is not GENERATE
+having happened. Everything on top of it — every pin override, every config the batch actually names
+— still comes back from a maker.
+
+#### MATERIALIZE (after APPLY) — resolvers run over maker-authored manifests
+
+Once the applied tree is converged, the controller runs the pinned resolvers over it, in Bash, once:
+`go mod tidy`, `uv lock` / `uv sync`, `npm install`. This is a mechanical pass over text the makers
+authored — it turns a declared dependency set into real hashes and nothing else. Keep the output out
+of context (`npm install > /tmp/npm.log 2>&1 || tail -50 /tmp/npm.log`); the lockfiles are the
+artifact, not the log. If a resolver reports a conflict, that is a genuine deviation: fix it by
+re-briefing the owning cluster's maker, not by hand-editing the manifest it authored.
+
 ### GENERATE — parallel generation is safe because nothing writes
+
+> **Reset your mode at this boundary.** The step immediately before this one — the governance gate —
+> is explicitly **non-delegable**: it must happen in your own session, and you will have just spent
+> many turns correctly doing everything yourself. GENERATE is the exact opposite and the switch is
+> not automatic. On a real run it wasn't made: the controller carried "I do this myself" straight
+> through RESOLVE into raw Bash execution and **never invoked the dispatch tool at GENERATE at all**,
+> while its own TODO list said *"fan out 5 disjoint-file cluster subagents."* Writing the correct
+> plan down is not the same as using it as a checkpoint. Before the first deliverable write, assert
+> out loud: **N cluster briefs dispatched, N sets of file bodies returned.** If N is zero, you are
+> not at APPLY.
 
 The fan-out subagents are **read-only**: each receives its cluster's task text + the relevant
 design-doc context and **returns the file body (or bodies) as text**. They do not touch the git index,
@@ -219,6 +337,14 @@ you have collapsed generate and apply into one role and **dropped the fan-out**.
 discipline, not an optimization to trade away: generation is delegated to the subagents, application
 is the controller's sole job. A converged tree that the controller authored itself is a scaffold-mode
 violation even though it "looks the same."
+
+**And do not narrate the deviation into the bundle.** The observed run wrote `(real, controller-run)`
+into its own `## Resolved toolchain` table, as if that were sanctioned terminology — inventing a
+framing that made a skipped fan-out read like a designed part of the process. There are exactly two
+sanctioned controller-run steps, BASELINE and MATERIALIZE, both Bash-only and both named above; if
+what you are about to record is neither, the honest record is a deviation, and the honest move is to
+stop and dispatch. A genuine ambiguity here is a reason to **ask**, never a licence to pick a third
+option and document it as policy.
 
 ### APPLY (scope rule) — generate ONLY the task-declared surface, no speculative structure
 
@@ -290,7 +416,9 @@ Do this instead, in order of preference:
    it returns 0 in silence. And record it as a deviation with its reason, because you have just made
    a design decision on the user's behalf.
 
-**Keep build noise out of the context.** `npm install`, `uv sync`, `docker compose up` and friends
+**Keep build noise out of the context** — the local case of the standing rule in
+[`context-budget.md`](context-budget.md), which covers the rest of the run. `npm install`, `uv sync`,
+`docker compose up` and friends
 emit thousands of lines that prove nothing and are re-read on every subsequent turn. Redirect them
 and read the verdict: `npm install > /tmp/npm.log 2>&1 || tail -50 /tmp/npm.log`. Keep full output
 for the commands that *are* the evidence (build, lint, test, health check) — but a `tail -50` of a

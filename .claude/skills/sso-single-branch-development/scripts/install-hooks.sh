@@ -231,7 +231,7 @@ export TRACK_BASE_REF="\${TRACK_BASE_REF:-$base_ref}"                 # [REPO-PO
 
 # --- ceilings / hardening ----------------------------------------------------
 export TRACK_MAX_TOOL_CALLS="\${TRACK_MAX_TOOL_CALLS:-200}"          # [REPO-POLICY] tool-call hard stop.
-export TRACK_MAX_TOKEN_ESTIMATE="\${TRACK_MAX_TOKEN_ESTIMATE:-1500000}" # [REPO-POLICY] chars÷4 transcript ceiling; blocks Stop + writes status:budget-exceeded. 0 disables. Undercounts.
+export TRACK_MAX_TOKEN_ESTIMATE="\${TRACK_MAX_TOKEN_ESTIMATE:-6000000}" # [REPO-POLICY] Stop: ceiling in input-token-EQUIVALENTS (input×1 + cache_write×1.25 + cache_read×0.1 + output×5); blocks Stop + writes status:budget-exceeded. 0 disables. RE-TUNE on a known-good run.
 export TRACK_SELF_HEAL_ATTEMPTS="\${TRACK_SELF_HEAL_ATTEMPTS:-2}"    # [REPO-POLICY] retries per DISTINCT failure before halting \`blocked\`. Prompt-enforced; here so the number survives a context compaction.
 export TRACK_SENTINEL="\${TRACK_SENTINEL:-1}"                        # [REPO-POLICY] scan staged diff for secrets/leftovers.
 

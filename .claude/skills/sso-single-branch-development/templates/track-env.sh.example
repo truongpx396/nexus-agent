@@ -106,7 +106,7 @@ export TRACK_BASE_REF="${TRACK_BASE_REF:-origin/main}"               # [REPO-POL
 
 # --- ceilings / hardening ----------------------------------------------------
 export TRACK_MAX_TOOL_CALLS="${TRACK_MAX_TOOL_CALLS:-200}"           # [REPO-POLICY] tool-call hard stop
-export TRACK_MAX_TOKEN_ESTIMATE="${TRACK_MAX_TOKEN_ESTIMATE:-1500000}" # [REPO-POLICY] Stop: token ceiling; blocks the stop + writes status:budget-exceeded on trip. 0 disables. Counts input+cache_write+output from the transcript's own message.usage (cache_read excluded); falls back to a chars÷4 heuristic on surfaces without usage data. RE-TUNE on a known-good run — a value inherited from the old chars÷4-only estimate trips far too early.
+export TRACK_MAX_TOKEN_ESTIMATE="${TRACK_MAX_TOKEN_ESTIMATE:-6000000}" # [REPO-POLICY] Stop: token ceiling in input-token-EQUIVALENTS; blocks the stop + writes status:budget-exceeded on trip. 0 disables. Cost-weighted from the transcript's own message.usage: input×1 + cache_write×1.25 + cache_read×0.1 + output×5 (tune via TRACK_TOKEN_W_*); falls back to a chars÷4 heuristic on surfaces without usage data. RAISED from 1500000 because cache_read is now counted — a cache-heavy run scores ~4x the old flat figure. RE-TUNE on a known-good run.
 export TRACK_SENTINEL="${TRACK_SENTINEL:-1}"                         # [REPO-POLICY] Stop: scan staged diff for secrets/leftovers (unset to disable)
 # [REPO-POLICY] Self-heal cap: how many times the controller may retry ONE distinct
 # failure before halting the run `blocked` (via `track-note.sh status blocked …`) instead

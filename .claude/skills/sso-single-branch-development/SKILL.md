@@ -1,6 +1,6 @@
 ---
 name: sso-single-branch-development
-version: 0.7.0
+version: 0.8.0
 description: 'Run a full end-to-end implementation pipeline on one branch/worktree in one of three execution cores — scaffold (non-behavioral bootstrap batch), story (TDD for new/changed behavior), or refactor (behavior-preserving keep-green) — with two-stage spec-compliance + code-quality verification, evidence capture, optional Copilot hooks, and draft-PR handoff. Use when asked to implement one feature, fix one bug, refactor existing code, or do foundation/scaffold setup with strong quality gates but without multi-track parallel orchestration.'
 ---
 
@@ -173,8 +173,8 @@ subagent vs ⚙️ script).
    by listing the directory rather than from a remembered list · design artefacts for frontend
    surfaces · `security-and-owasp` on any trust boundary · the task's scoped SpecKit spec/plan/
    research/data-model/contracts slice, when present), **distil to binding constraints**, **persist to
-   `<Runs dir>/<RUN_ID>.governance.md`** — the `Runs dir` preflight printed, never a bare `runs/` (from
-   a worktree that is a private, gitignored copy) — then pin it with `track-note.sh governance <path>`.
+   the path `track-note.sh govpath` prints** — it `mkdir -p`s the anchored records dir (a bare `runs/`
+   from a worktree is a private copy) — then pin it with `track-note.sh governance <path>`.
 
    Three rules the reference expands and this body will not restate:
    - **Persist it, don't just hold it.** The bundle lives in a file because this core spans many
@@ -315,49 +315,41 @@ it separately.
 
 Invariants this skill asserts; most are *realized by* SDD's loop, not re-run here.
 
-- **TDD required** for behavioral changes — realized at story scope: story mode authors the failing
-  RED suite before any implementation (N=1 for a lone task). It's a prompt-level invariant (hooks
-  can't see test-first ordering), backstopped by the RED gate (tests must fail first) and the evidence
-  gate (they must end green). Scaffold mode is the sole exemption — its guard proved nothing is
-  behavioral.
+- **TDD required** for behavioral changes — story mode authors the failing RED suite before any
+  implementation (N=1 for a lone task). A prompt-level invariant (hooks can't see test-first ordering),
+  backstopped by the RED gate (tests must fail first) and the evidence gate (they must end green).
+  Scaffold mode is the sole exemption — its guard proved nothing is behavioral.
 - **Behavior-preserving work is keep-green, not red-first**: refactor mode is the third core — it
   never authors a failing RED suite. It pins the existing suite green up front (adding characterization
   tests that must pass *immediately* where coverage of the touched surface is thin), then holds it
   green through every transform step. A red test mid-refactor signals a behavior change and must route
   to story mode; greening it by editing a behavioral/contract test is a false green.
 - **Governance gate — hard, in every mode (incl. scaffold)**: every review applies the repo's standing
-  governance (now including feature/task context — governance.md item 6) on top of the quality
-  rubric — the **project constitution** as a *hard* gate (a diff violating a stated principle fails
-  review in every mode), plus every `applyTo`-matching `.github/instructions/*`, applied to the diff
-  even when the reviewer didn't author the file. The baseline rubric comes from
-  `code-review-generic.instructions.md`, loaded at this step rather than carried in the bundle (see
-  below). The **same governance set is pushed upstream into every maker brief**, so governance gates
-  both ends and review is the backstop, not the first consultation. **No-ops only when those files
-  genuinely don't exist**, never by omission — and `track-audit.sh` fails a run whose bundle omits an
-  `applyTo`-matched file. Procedure: [`references/governance.md`](references/governance.md).
-- **Security review required** at stage 2 for trust-boundary changes: the `requesting-code-review`
-  rubric is quality-only, so the reviewer must also apply `security-and-owasp.instructions.md`.
-- **The reviewer gets the rubric as content.** At the review step, read
-  `code-review-generic.instructions.md` and embed the relevant parts in the reviewer brief alongside
-  the governance bundle. It carries no `applyTo` — nothing auto-injects it, on either surface.
+  governance (incl. feature/task context — governance.md item 6) on top of the quality rubric — the
+  **project constitution** as a *hard* gate (a diff violating a stated principle fails review in every
+  mode), plus every `applyTo`-matching `.github/instructions/*`, applied to the diff even when the
+  reviewer didn't author the file. The **same set is pushed upstream into every maker brief**, so
+  governance gates both ends and review is the backstop, not the first consultation. **No-ops only
+  when those files genuinely don't exist**, never by omission — and `track-audit.sh` fails a bundle
+  that omits an `applyTo`-matched file. Procedure: [`references/governance.md`](references/governance.md).
+- **The reviewer gets both, as content.** At the review step read
+  `code-review-generic.instructions.md` (no `applyTo` — nothing auto-injects it, on either surface) and
+  embed the relevant parts in the reviewer brief alongside the governance bundle; for trust-boundary
+  changes add `security-and-owasp.instructions.md`, since the review rubric is quality-only.
 - **Maker/checker required**: the stage-1/stage-2 reviewer must be a subagent distinct from the
   implementer (SDD's two-stage review).
-- **Resume from durable state, not memory**: an interrupted run reconciles from committed history +
-  the fingerprint-matched run record; uncommitted changes at startup are stashed, not built upon. The
-  `RUN_ID` is durable too — minted once, persisted to a breadcrumb, recovered automatically on resume.
+- **Resume AND position come from durable state, not memory**: an interrupted run reconciles from
+  committed history + the fingerprint-matched run record (uncommitted changes are stashed, never built
+  upon); `RUN_ID`, every `track-note.sh phase` stamp, and the governance bundle are persisted, so a
+  compacted or crashed session re-anchors via `track-reconcile.sh`, never by re-reading the worktree.
 - **Evidence, not assertion**: completion requires command output. The fingerprint is whole-tree, so
   every required kind must pass against **one common final tree** (Step 5 converges the lanes).
 - **Self-heal cap**: SDD loops "until approved" unbounded; this skill caps retries at
-  `TRACK_SELF_HEAL_ATTEMPTS` (default 2, in `track-env.base.sh`) per distinct failure, then halts
-  `blocked` rather than thrashing. Prompt-enforced — no hook counts review rounds — but the number
-  lives in the preset so it survives a compaction instead of only in the model's head.
-- **Position is durable, not remembered**: every step boundary is stamped with `track-note.sh phase`,
-  and the governance bundle is persisted to a file. A compacted or crashed session re-anchors from
-  `track-reconcile.sh`, never from re-reading the worktree.
-- **Discipline is audited from artifacts, not asserted**: `track-audit.sh` re-derives what actually
-  happened (governance ordering + coverage, phase advance, real RED, convergence, test weakening)
-  and prints what it *cannot* check rather than implying a clean bill of health. Necessary, never
-  sufficient.
+  `TRACK_SELF_HEAL_ATTEMPTS` (default 2, `track-env.base.sh`) per distinct failure, then halts
+  `blocked` — in the preset, so the number survives a compaction. Prompt-enforced.
+- **Discipline is audited from artifacts, not asserted**: `track-audit.sh` re-derives what happened
+  (governance ordering + coverage, phase advance, real RED, convergence, scaffold fan-out, test
+  weakening) and prints what it *cannot* check rather than implying a clean bill of health.
 
 ## Gotchas
 
@@ -389,40 +381,46 @@ Invariants this skill asserts; most are *realized by* SDD's loop, not re-run her
 - **`[P]` is *not* the scaffold trigger.** `[P]` marks file-disjointness, not non-behavioral-ness — it
   sits on security-critical tasks too. Scaffold mode keys on an explicit `scaffold_only` batch + the
   guard; any test obligation or trust boundary refuses the whole batch to story mode.
-- **Two scaffold traps, both silent.** (a) The controller **applies** file bodies, it never *authors*
-  them — writing them yourself because they're "just trivial config" collapses maker and applier and
-  **skips the fan-out entirely**; a converged tree you wrote yourself is a violation even though it
-  looks identical. (b) Generate only the **task-declared surface, no speculative structure** — a task naming
-  `backend-go/{cmd/api,kernel,…}` does not license pre-building every future `internal/<domain>/…`,
-  and the tell-tale is one `.gitkeep` per anticipated leaf flooding a bootstrap PR. Both in full in
-  [`references/scaffold-mode.md`](references/scaffold-mode.md) — read it **before** executing the
-  core; this body is a summary, the mode reference is the binding spec.
+- **Three scaffold traps, all silent.** (a) The controller **applies** file bodies, it never *authors*
+  them — writing them yourself because they're "trivial config" collapses maker and applier and **skips
+  the fan-out**; the guard now denies a deliverable Write until a *generating* dispatch is on record,
+  and `C2` fails it afterwards. (b) Lockfiles are the one exception, and only via **Bash** (`go mod
+  tidy`, `uv lock`, `npm install`) — "only a tool can make it" never licenses also *deciding* it.
+  (c) Generate only the **task-declared surface, no speculative structure**. RESOLVE splits the same
+  way: **probe** delegates (read-only, bulk noise), **pin** does not, and a probe never installs. All in
+  [`references/scaffold-mode.md`](references/scaffold-mode.md) — read it **before** executing the core.
 - **Report state from command output, not intent.** Never announce a commit, push, or PR "exists"
   until its creating command *returned successfully* — read the URL from **its** output. Saying
   "draft PR opened" after a bare `git push` is exactly the `verification-before-completion` failure
   this pipeline prevents: the artifact you claimed may not exist.
 - **Never green a frozen test by weakening it (story) or editing behavior (refactor).** A deleted
   assertion, loosened matcher, `skip`-ped case, or a contract test rewritten to pass is a false green
-  in every mode — `track-audit.sh` flags both signatures in the diff. A genuinely wrong test routes
-  back through its review gate. (Full rules in the story/refactor sections.)
+  in every mode — `track-audit.sh` flags both signatures. A genuinely wrong test routes back through
+  its review gate. (Full rules in the story/refactor sections.)
 - **Governance AND feature-context discovery are a main-session in-context read — not a subagent
   task, not a filename reference, not a whole-document paste.** A subagent read loses it at the
   process boundary; a filename without content ("follow `go.instructions.md`", "implement per
   `spec.md`") gives the subagent nothing to act on. Pass **content**, scoped to this run's task
-  IDs/user-story tags for feature context. VS Code's `applyTo` injection reaches the main session
-  only and never propagates into dispatched subagents. Full procedure:
-  [`references/governance.md`](references/governance.md) item 6.
-- **A long run *will* be compacted, and compaction fires no hook.** It is not a new session, so
-  `SessionStart`/`track-reconcile.sh` does not re-run and nothing re-injects what was dropped —
-  first to go is bulk pasted content, i.e. your governance excerpts. The model keeps believing it
+  IDs/user-story tags. VS Code's `applyTo` injection reaches the main session only and never
+  propagates into subagents. Full procedure: [`references/governance.md`](references/governance.md) item 6.
+- **A long run *will* be compacted, and compaction fires no hook.** Not a new session, so
+  `SessionStart`/`track-reconcile.sh` does not re-run and nothing re-injects what was dropped — first
+  to go is bulk pasted content, i.e. your governance excerpts, while the model keeps believing it
   complied. Defend with the three [Run Ledger](#run-ledger-do-this-first-keep-it-current) habits: a
-  live TODO list, a `track-note.sh phase` stamp at every boundary, and a persisted governance bundle
-  you re-read after any compaction. Never rebuild position by reading the worktree.
+  live TODO list, a `phase` stamp at every boundary, a persisted bundle re-read after any compaction.
+- **Bound every tool result before it lands — context discipline is a correctness control, not thrift.**
+  Context pressure *causes* the compaction above, and a token you hold is re-read every later turn (on
+  one real run, ~26× each). `Grep` before `Read`, `offset`/`limit` over whole files, redirect
+  installs/builds and read only the verdict (`> /tmp/x.log 2>&1 || tail -50`), and give every brief a
+  `RETURN:` contract. But it bounds **packaging, never content**: bodies come back COMPLETE and VERBATIM
+  (the guard denies a write carrying `... existing code ...`, since you apply them unread), with a NOTES
+  slot so "no commentary" can't silence a blocker. **Never truncate what *is* evidence.**
+  [`context-budget.md`](references/context-budget.md).
 - **A green evidence gate is not proof the suite passed.** `track-evidence.sh` records the tool's
   **text** response, not an exit code, so the gate asserts a fingerprint match plus the absence of a
   failure marker in a possibly-truncated string — which a truncated pass-looking response satisfies
-  trivially. `track-audit.sh` warns on suspiciously short passing captures, but read the output
-  yourself; CI stays the authority.
+  trivially. `track-audit.sh` warns on short passing captures, but read the output yourself; CI is
+  the authority.
 
 ## Hooks (Optional, Composable) — Bundle Owned Here
 
@@ -485,7 +483,9 @@ already took that human gate at its wave plan. Nothing else is waivable by an or
   `verification-before-completion` (evidence gate, after). **Overrides** SDD's terminal
   `finishing-a-development-branch`: this skill stops at a **draft PR**; merge is owned by repo/CI.
 - [`references/governance.md`](references/governance.md) — the governance gate: discovery procedure,
-  bundle format, persistence, context budget, and post-compaction re-anchor.
+  bundle format, persistence, and post-compaction re-anchor.
+- [`references/context-budget.md`](references/context-budget.md) — the standing tool-use rule: bound
+  every result, brief a `RETURN:` contract, never truncate evidence.
 - [`tests/prompt-level-checklist.md`](tests/prompt-level-checklist.md) — the judgement invariants
   `track-audit.sh` deliberately leaves unchecked, and how to audit them by hand.
 - [`references/hooks.md`](references/hooks.md) — full hooks bundle: every script + event, install/env

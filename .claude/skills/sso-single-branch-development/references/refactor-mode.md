@@ -173,6 +173,13 @@ change, no changed exported signature that callers depend on (unless the caller 
 of the reviewed refactor). Definition of Done: **same behavior, clearer structure** — the suite that
 was green at the pin-green gate is still green, untouched.
 
+**Keep the per-step suite runs from eating the context.** Refactor mode re-runs the suite after *every*
+transform — that is its defining discipline, and it means the same output lands in context many times
+over a long run. Per [`context-budget.md`](context-budget.md): redirect the setup around each run and
+read only its verdict, keep the **suite output itself in full** for the captures that are evidence, and
+give every maker/reviewer brief a one-line `RETURN:` contract. A green run you have already read and
+acted on does not need re-reading; the fingerprint in the run record is the durable record of it.
+
 ## What refactor mode changes vs. keeps
 
 | Aspect | Story core | **Refactor core** |

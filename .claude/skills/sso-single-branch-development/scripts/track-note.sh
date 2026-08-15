@@ -35,6 +35,10 @@
 #   track-note.sh skill <name> [step]        append {t, skill, step, self_reported:true} to skills[]
 #   track-note.sh loop  [phase]              iterations += 1  (+ optional phase label on the mark)
 #   track-note.sh phase <mode> <step>        SET phase={mode,step,t} (overwritten) + append phase_log[]
+#   track-note.sh govpath                    PRINT the anchored path the governance bundle must be
+#                                            written to, creating the records dir first. Call it
+#                                            BEFORE writing the bundle, and write to exactly what it
+#                                            prints — see the subcommand for the two failures it removes.
 #   track-note.sh governance <file>          SET governance_bundle={path,sha,t} — the persisted bundle
 #                                            AND append the same to governance_stamps[] (the pin
 #                                            HISTORY, so a legitimate mid-core re-pin is on record)
@@ -155,6 +159,26 @@ case "$sub" in
        | .started_ts = (.started_ts // $t) | .last_ts = $t' \
       "$rec" >"$tmp" && mv "$tmp" "$rec"
     ;;
+  govpath)
+    # WHERE the governance bundle goes — one command, one answer, directory already made.
+    # Two observed failures, both from the caller re-deriving this path by hand:
+    #
+    #   1. The Write hard-failed with nothing written. `runs/` is gitignored, so it exists
+    #      only where something created it — which is the MAIN checkout (preflight mints the
+    #      breadcrumb there) and never a freshly-added linked worktree. The agent surface's
+    #      Write tool does not reliably create missing parent directories, so the skill's
+    #      own mandatory step died on a missing dir and the repair was a hand-rolled `mkdir`
+    #      the skill never mentions. `mkdir -p "$RUNS_DIR"` above has already run by here.
+    #   2. The path drifted on the SECOND write. Deriving it once is easy; deriving it again
+    #      later in the run reliably produces a bare `runs/<id>.governance.md`, which from a
+    #      worktree resolves to that worktree's private copy — invisible to the main checkout
+    #      where the record lives. The usual repair is to keep both and let them diverge.
+    #
+    # Printing it (rather than having this script write the file) keeps authorship where it
+    # belongs: distilling the bundle is the model's judgement, not a script's.
+    printf '%s\n' "$RUNS_DIR/$RUN_ID.governance.md"
+    rm -f "$tmp"
+    ;;
   governance)
     # Pin the PERSISTED governance bundle so a compacted session can re-read the binding
     # constraints from disk instead of from a context window that no longer holds them.
@@ -188,7 +212,8 @@ case "$sub" in
            "  bundle: $file" \
            "  runs:   $_runs_abs  (where $RUN_ID.json lives)" \
            "  The pin is absolute so it stays readable, but a bundle under a linked worktree's" \
-           "  gitignored runs/ is invisible to the main checkout and easily written twice." >&2 ;;
+           "  gitignored runs/ is invisible to the main checkout and easily written twice." \
+           "  Fix: move it to \$(track-note.sh govpath) and re-pin that path." >&2 ;;
     esac
     unset _runs_abs
     sha="$( { if command -v shasum >/dev/null 2>&1; then shasum "$file"; else sha1sum "$file"; fi; } | cut -d' ' -f1)"
@@ -229,7 +254,7 @@ case "$sub" in
     ;;
   *)
     rm -f "$tmp"
-    printf '%s\n' "track-note: unknown subcommand '${sub:-<none>}' (want: skill | loop | phase | governance | status)." >&2
+    printf '%s\n' "track-note: unknown subcommand '${sub:-<none>}' (want: skill | loop | phase | govpath | governance | status)." >&2
     exit 2
     ;;
 esac
