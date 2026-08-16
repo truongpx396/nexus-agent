@@ -386,6 +386,33 @@ case "$tool" in
               case "$_abs" in "${_base%/}/${_runs%/}"/*) p_is_runs=1 ;; esac
             done ;;
       esac
+      # THE GOVERNANCE BUNDLE HAS EXACTLY ONE HOME. `runs/` is gitignored, so a linked
+      # worktree gets its own private, unrelated copy the moment anything writes there —
+      # and the run record, the audit and every later reader look only at the main
+      # checkout's. v0.10.0 added `track-note.sh govpath` to print the one right path;
+      # a later client run shows that was not enough, because nothing DENIED the wrong one:
+      # its governance_reads[] carries two `cp <worktree>/runs/<id>.governance.md
+      # <main>/runs/<id>.governance.md` calls, the hand repair for a fork that had already
+      # happened, and its bundle was pinned three times at three different shas.
+      # Writing the bundle anywhere but the anchored records dir is now denied outright,
+      # which is the only thing that makes `govpath` load-bearing rather than advisory.
+      # p_is_runs is true for EITHER root's runs/ — deliberately, since both are legitimate
+      # bookkeeping. The bundle is the one artifact for which that is not true, so it needs
+      # the narrower test: the anchored (main-checkout) records dir, and nothing else.
+      p_is_anchored_runs=0
+      _runs2="${RUNS_DIR:-runs}"
+      case "$_runs2" in
+        /*) case "$_abs" in "${_runs2%/}"/*) p_is_anchored_runs=1 ;; esac ;;
+        *)  [ -n "${TRACK_MAIN_ROOT:-}" ] && case "$_abs" in
+              "${TRACK_MAIN_ROOT%/}/${_runs2%/}"/*) p_is_anchored_runs=1 ;; esac ;;
+      esac
+      unset _runs2
+      case "${_abs##*/}" in
+        *.governance.md)
+          if [ "$p_is_anchored_runs" -eq 0 ]; then
+            deny "'$rel' is a governance bundle outside this run's records dir. runs/ is gitignored, so a copy written from a linked worktree is PRIVATE to that worktree — the main checkout, the run record's pin and the audit all read a different file, and the usual repair is a cp between the two until they diverge. Ask for the one correct path instead: bash .github/hooks/track-note.sh govpath (it mkdir -p's the dir and prints an absolute path), write to exactly what it prints, then pin it with track-note.sh governance <that path>."
+          fi ;;
+      esac
       unset _runs _abs _base
       if [ "$p_is_runs" -eq 1 ]; then ok=1; fi
       # A path outside EVERY worktree gets its own message. It is not a scope dispute — no
@@ -438,6 +465,57 @@ case "$tool" in
     case "$cmd" in
       *"gh pr merge"* | *"git merge "* | *"git reset --hard"*)
         deny "blocked by autonomy boundary: merging/rewriting history is the merge gate's job (human or merge queue), not the worker's." ;;
+    esac
+    # --- the PR body's machine-rendered block must still BE machine-rendered ------------
+    # `gh pr create`/`gh pr edit` is the last moment this is checkable locally. The auto
+    # block between track-report.sh's BEGIN/END markers says "machine-rendered, do not
+    # hand-edit" and, until the sha landed in the END marker, nothing enforced it: a real
+    # client PR shipped with the markers intact and every line between them re-typed —
+    # summary singularised, the findings table's "How to clear it" column dropped, the
+    # <details> list of un-checked invariants deleted, and the one audit WARN rewritten into
+    # a paragraph asserting compliance no artifact showed. CI caught it, but only after the
+    # PR existed, and only because the summary's shape happened to differ.
+    #
+    # Verify the body being published instead. `--verify-body` re-hashes the block, so this
+    # is arithmetic, not shape-guessing: exit 3 = the content and its own sha disagree.
+    # A body with no auto block at all (exit 4) is NOT denied — plenty of legitimate PRs are
+    # opened by hand from this repo, and the audit's own reporting covers that case.
+    case "$cmd" in
+      *"gh pr create"* | *"gh pr edit"*)
+        _pb=""
+        # --body-file <path> (the shape the skill documents) or --body "<literal>".
+        _bf="$(printf '%s' "$cmd" | sed -n 's/.*--body-file[= ]*\([^ ]*\).*/\1/p' | head -1)"
+        if [ -n "$_bf" ]; then
+          case "$_bf" in
+            /*) [ -f "$_bf" ] && _pb="$_bf" ;;
+            *)  # A relative path resolves against the AGENT's cwd, which under this skill's
+                # default isolation is the worktree — not the hook's, which is the session's
+                # (usually the main checkout). Try each root, or the check silently never
+                # fires in exactly the configuration the skill ships.
+                for _r in "$PWD" "${GIT_WT_ROOT:-}" "${TRACK_MAIN_ROOT:-}"; do
+                  [ -n "$_r" ] || continue
+                  [ -f "$_r/$_bf" ] && { _pb="$_r/$_bf"; break; }
+                done ;;
+          esac
+        fi
+        if [ -z "$_pb" ]; then
+          # A literal --body carries the block inline; write it out to verify it the same way.
+          _lit="$(printf '%s' "$cmd" | sed -n "s/.*--body[= ]*['\"]\(.*\)['\"].*/\1/p" | head -1)"
+          if [ -n "$_lit" ] && printf '%s' "$_lit" | grep -q 'BEGIN track-report auto block'; then
+            _pb="$(mktemp)"; printf '%s\n' "$_lit" >"$_pb"
+          fi
+        fi
+        if [ -n "$_pb" ] && [ -f "$_pb" ]; then
+          _rep="${BASH_SOURCE[0]%/*}/track-report.sh"
+          if [ -f "$_rep" ]; then
+            _vout="$(bash "$_rep" --verify-body "$_pb" 2>&1 || true)"
+            case "$_vout" in
+              *"does NOT match its own sha"*)
+                deny "the PR body's auto block was edited after it was rendered — $_vout. Everything between the BEGIN/END markers is machine-rendered and is the one part of the body a reviewer is entitled to read as un-authored; re-typing it (even to tidy the wording) turns the audit's verdict into a claim. Re-run 'bash .github/hooks/track-report.sh > <body-file>' and paste it unmodified — put your own narrative BELOW the END marker, where it belongs." ;;
+            esac
+          fi
+        fi
+        ;;
     esac
     # `--force` / `--no-verify` are the flags that matter HERE, but neither spelling is
     # git's alone: a raw substring match denies every unrelated tool that happens to take

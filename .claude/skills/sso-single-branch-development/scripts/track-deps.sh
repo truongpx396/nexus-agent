@@ -207,10 +207,15 @@ while IFS= read -r name; do
     if [ "$required" = "true" ] && [ "$strict" = 1 ]; then ok=false; violations="$violations $name($version!~$range)";
     else warnings="$warnings $name($version!~$range)"; fi
   fi
+  # `in_range` starts true so an unranged tool is never a violation, but reporting
+  # `{"present":false,"version":null,"in_range":true}` states a range verdict for a version
+  # that was never observed — a green next to an absent tool, in the one file whose whole
+  # job is proving versions. Absent means UNKNOWN: null, not true.
   results="$(printf '%s' "$results" | jq -c \
     --arg n "$name" --argjson pr "$present" --arg v "$version" --arg r "$range" \
     --argjson ir "$in_range" --argjson req "$required" \
-    '.[$n] = {present:$pr, version:(if $v=="" then null else $v end), range:$r, in_range:$ir, required:$req}')"
+    '.[$n] = {present:$pr, version:(if $v=="" then null else $v end), range:$r,
+              in_range:(if $pr then $ir else null end), required:$req}')"
 done <<<"$deps"
 
 violations="$(printf '%s' "$violations" | sed 's/^ *//')"

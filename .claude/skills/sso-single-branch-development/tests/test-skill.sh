@@ -663,6 +663,27 @@ assert_deny "guard: a runs-lookalike dir is NOT the runs dir -> deny" \
   "$GUARD" "$(jq -nc --arg p "$GIT_TOP/runsomething/x.md" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
   "TRACK_ALLOWED_PREFIXES=src/" "RUNS_DIR=runs"
 
+# THE BUNDLE HAS ONE HOME. A worktree's own runs/ is legitimate bookkeeping for everything
+# else, but a governance bundle written there is PRIVATE to that worktree — the pin, the
+# audit and the main checkout all read a different file. v0.10.0 shipped `govpath` to print
+# the right path; a later client run still forked, because nothing denied the wrong one: its
+# governance_reads[] holds two `cp <worktree>/runs/… <main>/runs/…` repairs and its bundle
+# was pinned three times at three different shas. `govpath` is only load-bearing if this is.
+WT_RUNS_ABS="$(mktemp -d)"
+assert_deny "guard: a governance bundle outside the anchored records dir -> deny" \
+  "$GUARD" "$(jq -nc --arg p "$WT_RUNS_ABS/x.governance.md" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
+  "TRACK_ALLOWED_PREFIXES=src/" "RUNS_DIR=$RUNS_ABS"
+result=$(printf '%s' "$(jq -nc --arg p "$WT_RUNS_ABS/x.governance.md" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
+  | env "TRACK_ALLOWED_PREFIXES=src/" "RUNS_DIR=$RUNS_ABS" bash "$GUARD" 2>&1) || true
+printf '%s' "$result" | grep -q 'govpath' \
+  && pass "guard: the bundle-fork denial names govpath as the in-bounds move" \
+  || fail "guard: bundle-fork denial names no fix"
+# Any OTHER bookkeeping file in that same dir is still fine — this narrows to the bundle.
+assert_allow "guard: a non-bundle file in a worktree runs/ is still bookkeeping -> allow" \
+  "$GUARD" "$(jq -nc --arg p "$RUNS_ABS/pr-body.md" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
+  "TRACK_ALLOWED_PREFIXES=src/" "RUNS_DIR=$RUNS_ABS"
+rm -rf "$WT_RUNS_ABS"
+
 assert_deny "guard: runs/ allowance does not open the rest of the tree -> deny" \
   "$GUARD" '{"tool_name":"Write","tool_input":{"file_path":"deploy/x.yml"}}' \
   "TRACK_ALLOWED_PREFIXES=src/" "RUNS_DIR=runs"
@@ -822,6 +843,40 @@ if printf '%s' '{"tool_name":"Write","tool_input":{"file_path":"/tmp/scratch-xyz
 else
   fail "guard: out-of-worktree denial explains where to write instead"
 fi
+
+# --- the PR body's machine-rendered block, checked BEFORE the PR exists --------------
+# A real client PR shipped with the BEGIN/END markers intact and every line between them
+# re-typed. CI caught it — after the PR existed, and only because the summary's wording
+# happened to differ. `gh pr create` is the last moment this is checkable locally, and with
+# the sha in the END marker it is arithmetic rather than a guess about shape.
+PRB="$(mktemp -d)"
+(
+  cd "$PRB" && git init -q && git config user.email t@t && git config user.name t
+  echo hi > a.go && git add a.go && git commit -q -m init && echo x >> a.go && git commit -qam work
+  mkdir -p runs
+  jq -nc '{run_id:"prb",v:1,tool_calls:3,evidence:[{kind:"go-test",cmd:"go test",response:"ok pkg all good here",fingerprint:"f1"}]}' > runs/prb.json
+  TRACK_BASE_REF=HEAD~1 RUNS_DIR=runs bash "$SCRIPTS_DIR/track-report.sh" prb > body.md 2>/dev/null
+  sed 's/warning(s)/warning/; s/failure(s)/failures/' body.md > retyped.md
+) || true
+assert_allow "guard: gh pr create with a verbatim auto block -> allow" \
+  "$GUARD" "$(jq -nc --arg c "cd $PRB && gh pr create --draft --body-file body.md" '{tool_name:"Bash",tool_input:{command:$c}}')" \
+  "TRACK_ALLOWED_PREFIXES=src/"
+result=$(cd "$PRB" && printf '%s' "$(jq -nc '{tool_name:"Bash",tool_input:{command:"gh pr create --draft --body-file retyped.md"}}')" \
+  | env "TRACK_ALLOWED_PREFIXES=src/" bash "$GUARD" 2>&1) || true
+printf '%s' "$result" | grep -q '"deny"' \
+  && pass "guard: gh pr create with a re-typed auto block -> deny (before the PR exists)" \
+  || fail "guard: re-typed auto block reaches the PR (got: $(printf '%s' "$result" | head -c 140))"
+printf '%s' "$result" | grep -q 'BELOW the END marker' \
+  && pass "guard: the auto-block denial says where the model's own narrative belongs" \
+  || fail "guard: auto-block denial names no in-bounds move"
+# A PR with no auto block at all is a human PR, not a forgery — never denied.
+( cd "$PRB" && printf 'just a normal hand-written PR body\n' > plain.md )
+result=$(cd "$PRB" && printf '%s' "$(jq -nc '{tool_name:"Bash",tool_input:{command:"gh pr create --body-file plain.md"}}')" \
+  | env "TRACK_ALLOWED_PREFIXES=src/" bash "$GUARD" 2>&1) || true
+printf '%s' "$result" | grep -q '"deny"' \
+  && fail "guard: a hand-written PR body with no auto block was denied" \
+  || pass "guard: a PR body with no auto block is not this check's business -> allow"
+rm -rf "$PRB"
 
 assert_deny "guard: DROP TABLE with TRACK_GUARD_DESTRUCTIVE -> deny" \
   "$GUARD" "$(mk_term "$T_DROP_CMD")" "TRACK_GUARD_DESTRUCTIVE=1"
@@ -1030,6 +1085,90 @@ if printf '%s' "$result" | grep -qiE '"block"|MISSING' && printf '%s' "$result" 
   pass "evidence(e2e): multi-kind, one kind missing -> gate blocks (names py)"
 else fail "evidence(e2e): multi-kind missing -> gate blocks (got: $result)"; fi
 
+# --- RUN the tool, or merely FETCH/LOCATE it? ------------------------------------------
+# A kind pattern is a tool NAME, so installing, locating or reading the log of that tool
+# matches it exactly as well as running it does. On a real client run seven captures were
+# this shape, all recorded `pass`, and its PR printed
+# `| ci-lint | brew install actionlint + cat actionlint.log | ✅ pass |` for the mandatory
+# kind on the highest-risk cluster in the diff. Both directions are pinned: acquisition is
+# vacuous, and a redirect-then-read block (which CONTAINS a read) still verifies.
+NV_RUNS="$(mktemp -d)"
+nv_cap() { # nv_cap <run-id> <command> <stdout>
+  printf '%s' "$3" | jq -Rs --arg c "$2" \
+    '{tool_name:"Bash",tool_input:{command:$c},tool_response:{stdout:.,stderr:"",interrupted:false}}' \
+    | RUN_ID="$1" RUNS_DIR="$NV_RUNS" \
+      TRACK_EVIDENCE_KINDS='go-lint:golangci-lint;ci-lint:actionlint|yamllint;go-test:go test;compose-config:docker compose config;frontend-build:npm run build' \
+      bash "$EVIDENCE" >/dev/null 2>&1 || true
+  jq -c '.evidence[-1]' "$NV_RUNS/$1.json" 2>/dev/null || true; }
+
+nv_cap nv1 'which actionlint 2>&1
+brew install actionlint > /tmp/brew.log 2>&1 &
+echo started' 'started brew install pid 25195' >/dev/null
+[ ! -f "$NV_RUNS/nv1.json" ] \
+  && pass "evidence(producer): installing the tool is not evidence that it ran" \
+  || fail "evidence(producer): brew install recorded as evidence ($(jq -c '.evidence[-1]|{cmd,verdict_by}' "$NV_RUNS/nv1.json"))"
+
+# …and a read of the tool's logfile must not CLOBBER the real run that produced it. The gate
+# reads the latest capture per kind, so recording this at all would let `cat x.log` displace
+# the `actionlint … > x.log` before it.
+nv_cap nv2 'actionlint .github/workflows/ci.yml > /tmp/al.log 2>&1
+echo "ci-lint exit: $?"' 'ci-lint exit: 0' >/dev/null
+nv_cap nv2 'cat /tmp/al.log' 'exit: 0' >/dev/null
+[ "$(jq -r '.evidence | length' "$NV_RUNS/nv2.json")" = "1" ] \
+  && [ "$(jq -r '.evidence[-1].cmd' "$NV_RUNS/nv2.json")" = "actionlint .github/workflows/ci.yml > /tmp/al.log 2>&1" ] \
+  && pass "evidence(producer): reading the logfile afterwards never displaces the real run" \
+  || fail "evidence(producer): cat <log> clobbered the real capture ($(jq -c '.evidence' "$NV_RUNS/nv2.json"))"
+
+nv_cap nv3 'go test ./... > /tmp/go.log 2>&1
+cat /tmp/go.log' 'ok example 0.4s' >/dev/null
+[ "$(jq -r '.evidence[-1].vacuous // false' "$NV_RUNS/nv3.json")" = "false" ] \
+  && pass "evidence(producer): redirect-then-read still verifies (one real segment is enough)" \
+  || fail "evidence(producer): redirect-then-read wrongly vacuous"
+[ "$(jq -r '.evidence[-1].cmd' "$NV_RUNS/nv3.json")" = "go test ./... > /tmp/go.log 2>&1" ] \
+  && pass "evidence(producer): a redirection's & is not a segment separator (2>&1 survives)" \
+  || fail "evidence(producer): 2>&1 mangled (got $(jq -r '.evidence[-1].cmd' "$NV_RUNS/nv3.json"))"
+
+# The display line: a bare assignment names no command. This exact capture put
+# `GCL=/…/golangci-lint` into a real PR as the command proving the Go lint passed.
+nv_cap nv4 'GCL=/tmp/gcl/golangci-lint
+cd /x/backend-go
+$GCL config verify
+echo "go-lint exit: $?"' 'go-lint exit: 0' >/dev/null
+[ "$(jq -r '.evidence[-1].cmd' "$NV_RUNS/nv4.json")" = "\$GCL config verify" ] \
+  && pass "evidence(producer): shows what the block RAN, not the variable assignment" \
+  || fail "evidence(producer): display resolves through the assignment (got $(jq -r '.evidence[-1].cmd' "$NV_RUNS/nv4.json"))"
+[ "$(jq -r '.evidence[-1].vacuous // false' "$NV_RUNS/nv4.json")" = "false" ] \
+  && pass "evidence(producer): an all-assignment match is neutral, never asserted vacuous" \
+  || fail "evidence(producer): assignment-only match wrongly vacuous"
+
+# fail_re was CASE-SENSITIVE on \bERROR\b. `docker compose config` exiting 1 with
+# "error while interpolating … required variable POSTGRES_PASSWORD is missing" was graded
+# PASS on a real run; the identical failure 30s later graded fail only because that block
+# echoed `exit: 1`. Lowercase forms must catch it WITHOUT failing "0 errors".
+nv_cap nv5 'docker compose config' 'error while interpolating services.postgres.environment.POSTGRES_PASSWORD: required variable POSTGRES_PASSWORD is missing a value' >/dev/null
+[ "$(jq -r '.evidence[-1].verdict' "$NV_RUNS/nv5.json")" = "fail" ] \
+  && pass "evidence(producer): a lowercase 'error while …' failure is graded fail" \
+  || fail "evidence(producer): lowercase failure still graded pass"
+nv_cap nv6 'npm run build' '> vite build
+transforming...67 modules transformed
+built in 218ms
+0 errors' >/dev/null
+[ "$(jq -r '.evidence[-1].verdict' "$NV_RUNS/nv6.json")" = "pass" ] \
+  && pass "evidence(producer): '0 errors' in a clean build is still a pass" \
+  || fail "evidence(producer): clean build wrongly graded fail"
+
+# Attestation: this surface reports no exit code, so a pass means "printed no failure
+# marker" — which an empty output also satisfies. Recorded, never graded here.
+# NB `.attested // true` would answer "true" for a recorded `false` — jq's // treats false
+# as empty. Read the field itself: absent (null) means attested, present means it is not.
+[ "$(jq -r '.evidence[-1].attested' "$NV_RUNS/nv6.json")" = "false" ] \
+  && pass "evidence(producer): a green with no exit marker is recorded attested:false" \
+  || fail "evidence(producer): unattested green not marked (got $(jq -r '.evidence[-1].attested' "$NV_RUNS/nv6.json"))"
+[ "$(jq -r '.evidence[-1].attested' "$NV_RUNS/nv4.json")" = "null" ] \
+  && pass "evidence(producer): 'echo \"<kind> exit: \$?\"' attests the capture" \
+  || fail "evidence(producer): attested capture wrongly marked"
+rm -rf "$NV_RUNS"
+
 rm -rf "$PROD_RUNS"
 
 # ---------------------------------------------------------------------------
@@ -1091,6 +1230,39 @@ if [ -n "$RUN1_ID" ]; then
   if printf '%s' "$result" | grep -qiE '"block"|MISSING' && printf '%s' "$result" | grep -q 'py'; then
     pass "evidence-gate: multi-kind, second kind missing -> block names it"
   else fail "evidence-gate: multi-kind missing -> block (got: $result)"; fi
+
+  # VACUITY, both directions. track-evidence.sh has flagged "passed but verified nothing"
+  # since the flag landed, and NOTHING read it: this gate passed them, the audit ignored
+  # them, and a real PR certified `go-build ✅ pass` for a build that compiled zero
+  # packages. Not a hard failure — sometimes there is genuinely nothing to build yet — but
+  # it must be SAID, the same way an ABSENT line says a governance check no-opped.
+  FP=$(current_fingerprint)
+  vac_rec() { jq -nc --arg fp "$FP" --argjson na "$1" \
+    '{evidence:[{kind:"go-build",cmd:"go build ./...",response:"matched no packages",
+                 fingerprint:$fp,verdict:"pass",vacuous:true}], evidence_na:$na}' \
+    > "$TMPDIR_RUNS/$RUN1_ID.json"; }
+  vac_rec '[]'
+  result=$(printf '{"stop_hook_active":false}' | RUN_ID="$RUN1_ID" RUNS_DIR="$TMPDIR_RUNS" \
+           TRACK_REQUIRED_EVIDENCE="go-build" bash "$EVIDENCE_GATE" 2>&1) || true
+  if printf '%s' "$result" | grep -q '"block"' && printf '%s' "$result" | grep -q 'VERIFIED NOTHING' \
+     && printf '%s' "$result" | grep -q 'evidence-na'; then
+    pass "evidence-gate: an undeclared vacuous pass blocks, and names the declaration that clears it"
+  else fail "evidence-gate: vacuous pass blocks (got: $result)"; fi
+
+  vac_rec '[{"kind":"go-build","why":"Phase 1 scaffold: no Go sources exist yet"}]'
+  result=$(printf '{"stop_hook_active":false}' | RUN_ID="$RUN1_ID" RUNS_DIR="$TMPDIR_RUNS" \
+           TRACK_REQUIRED_EVIDENCE="go-build" bash "$EVIDENCE_GATE" 2>&1) || true
+  [ -z "$result" ] \
+    && pass "evidence-gate: 'track-note.sh evidence-na' on record clears the vacuity block" \
+    || fail "evidence-gate: declared vacuity still blocks (got: $result)"
+
+  # The declaration is per-KIND, not a global waiver.
+  vac_rec '[{"kind":"py-lint","why":"unrelated kind"}]'
+  result=$(printf '{"stop_hook_active":false}' | RUN_ID="$RUN1_ID" RUNS_DIR="$TMPDIR_RUNS" \
+           TRACK_REQUIRED_EVIDENCE="go-build" bash "$EVIDENCE_GATE" 2>&1) || true
+  printf '%s' "$result" | grep -q 'VERIFIED NOTHING' \
+    && pass "evidence-gate: a declaration for another kind does not clear this one" \
+    || fail "evidence-gate: evidence-na leaks across kinds (got: $result)"
 else
   for i in 1 2 3 4 5 6 7; do skip "evidence-gate: skipped (no RUN1_ID)"; done
 fi
@@ -1615,13 +1787,39 @@ g5_seed '# bundle
 [ "$(_g5 G5)" = "FAIL" ] \
   && pass "audit: G5 fails a section whose only bullet is a pointer, not a constraint" \
   || fail "audit: G5 fails a pointer-only section (got $(_g5 G5))"
+# Two bullets is a THEME summary of a ~1,100-line instruction file, not its binding constraints,
+# and it used to clear this check. The floor is 5 now that the bundle's own budget is ~500 lines —
+# a thin section is under-distillation, never a context trade-off — so the old passing shape is
+# pinned as a FAIL to keep the floor from silently regressing.
 g5_seed '# bundle
 ## go.instructions.md — matched **/*.go
 - errors wrapped with %w, never %v
 - no naked returns in exported funcs'
+[ "$(_g5 G5)" = "FAIL" ] \
+  && pass "audit: G5 fails a two-bullet theme summary (the old default floor)" \
+  || fail "audit: G5 fails a two-bullet section under the default floor of 5 (got $(_g5 G5))"
+g5_seed '# bundle
+## go.instructions.md — matched **/*.go
+- errors wrapped with %w, never %v
+- no naked returns in exported funcs
+- context.Context is the first parameter of any call that does I/O
+- table-driven tests with subtests for anything with more than two input shapes
+- exported errors are sentinel vars or typed, never fmt.Errorf at the boundary'
 [ "$(_g5 G5)" = "PASS" ] \
   && pass "audit: G5 passes once the section carries real distilled constraints" \
   || fail "audit: G5 passes on a substantive section (got $(_g5 G5))"
+# The floor is repo-policy, not a constant: a repo that wants the old behaviour tunes it back.
+_g5_min() { ( cd "$G5_ISO" && RUN_ID=g5 RUNS_DIR=runs TRACK_BASE_REF=main \
+              TRACK_GOV_MIN_BULLETS="$1" TRACK_TRUST_BOUNDARY_PATTERN="__none__" \
+              bash "$AUDIT" --json --warn-only 2>/dev/null ) \
+            | jq -r '.checks[] | select(.id=="G5") | .verdict'; }
+g5_seed '# bundle
+## go.instructions.md — matched **/*.go
+- errors wrapped with %w, never %v
+- no naked returns in exported funcs'
+[ "$(_g5_min 2)" = "PASS" ] && [ "$(_g5_min 5)" = "FAIL" ] \
+  && pass "audit: G5's floor is tunable via TRACK_GOV_MIN_BULLETS" \
+  || fail "audit: G5 honors TRACK_GOV_MIN_BULLETS (got 2=$(_g5_min 2) 5=$(_g5_min 5))"
 rm -rf "$G5_ISO"
 
 # G6 — THE LAST HOP: did the brief carry the bundle, as observed at dispatch time? All five
@@ -1700,6 +1898,28 @@ aud_seed p1none; jq 'del(.phase) | del(.phase_log)' "$AUD_RUNS/p1none.json" > "$
 aud_seed p2gap; jq '.phase_log=[{t:"2026-01-01T00:00:00Z",mode:"story",step:"governance"}]' "$AUD_RUNS/p2gap.json" > "$AUD_RUNS/t" && mv "$AUD_RUNS/t" "$AUD_RUNS/p2gap.json"
 [ "$(aud_verdict p2gap P2)" = "WARN" ] && pass "audit: P2 warns when the gate sequence has holes" || fail "audit: P2 warns when the gate sequence has holes"
 
+# P2 was a SET test on a check named "gate sequence". A real scaffold run stamped
+# apply+materialize, then review+convergence, and only then GENERATE — four minutes after
+# its last subagent had already stopped — and P2 passed it, because all five words were
+# present somewhere. Order is now compared by first occurrence.
+aud_seed p2ord
+jq '.phase = {mode:"scaffold",step:"convergence"}
+    | .phase_log=[{step:"governance"},{step:"apply"},{step:"materialize"},{step:"review"},{step:"convergence"},{step:"generate"}]' \
+   "$AUD_RUNS/p2ord.json" > "$AUD_RUNS/t" && mv "$AUD_RUNS/t" "$AUD_RUNS/p2ord.json"
+[ "$(aud_verdict p2ord P2)" = "WARN" ] \
+  && pass "audit: P2 catches a gate stamped AFTER a later one (order, not just presence)" \
+  || fail "audit: P2 blind to an out-of-order gate sequence (got $(aud_verdict p2ord P2))"
+aud_json p2ord | jq -r '.checks[] | select(.id=="P2") | .message' | grep -q 'generate-before-apply\|apply-before-generate' \
+  && pass "audit: P2 names which pair is inverted" \
+  || fail "audit: P2 does not name the inversion"
+aud_seed p2inord
+jq '.phase = {mode:"scaffold",step:"convergence"}
+    | .phase_log=[{step:"governance"},{step:"generate"},{step:"apply"},{step:"review"},{step:"convergence"}]' \
+   "$AUD_RUNS/p2inord.json" > "$AUD_RUNS/t" && mv "$AUD_RUNS/t" "$AUD_RUNS/p2inord.json"
+[ "$(aud_verdict p2inord P2)" = "PASS" ] \
+  && pass "audit: P2 passes a scaffold log stamped in canonical order" \
+  || fail "audit: P2 passes an in-order log (got $(aud_verdict p2inord P2))"
+
 aud_seed m1one; jq '.trace=[.trace[0]]' "$AUD_RUNS/m1one.json" > "$AUD_RUNS/t" && mv "$AUD_RUNS/t" "$AUD_RUNS/m1one.json"
 [ "$(aud_verdict m1one M1)" = "WARN" ] && pass "audit: M1 warns when one agent may have made and reviewed" || fail "audit: M1 warns when one agent may have made and reviewed"
 
@@ -1716,6 +1936,35 @@ aud_seed e2short; jq '.evidence=[{t:"a",kind:"go",cmd:"c",response:"ok",fingerpr
 [ "$(aud_verdict e2short E2)" = "WARN" ] && pass "audit: E2 warns on a suspiciously short PASSING capture" || fail "audit: E2 warns on a suspiciously short PASSING capture"
 aud_seed e2fail; jq '.evidence=[{t:"a",kind:"go",cmd:"c",response:"FAIL",fingerprint:"fp1"}]' "$AUD_RUNS/e2fail.json" > "$AUD_RUNS/t" && mv "$AUD_RUNS/t" "$AUD_RUNS/e2fail.json"
 [ "$(aud_verdict e2fail E2)" = "PASS" ] && pass "audit: E2 does NOT flag a short FAILING capture (it can't fake a pass)" || fail "audit: E2 does NOT flag a short FAILING capture"
+
+# E2 measured `.response`, which on this surface is the tool_response OBJECT serialized —
+# ~110 chars of `{"stdout":…,"stderr":"","interrupted":false,…}` around 7 chars of proof.
+# The 40-char floor was therefore unreachable and the check silently inert: a real run's
+# `cat /tmp/actionlint.log`, whose entire evidence was `exit: 0`, cleared it.
+aud_seed e2wrap; jq '.evidence=[{t:"a",kind:"go",cmd:"c",response:"{\"stdout\":\"exit: 0\",\"stderr\":\"\",\"interrupted\":false,\"isImage\":false,\"noOutputExpected\":false}",fingerprint:"fp1",verdict:"pass"}]' "$AUD_RUNS/e2wrap.json" > "$AUD_RUNS/t" && mv "$AUD_RUNS/t" "$AUD_RUNS/e2wrap.json"
+[ "$(aud_verdict e2wrap E2)" = "WARN" ] \
+  && pass "audit: E2 measures the OUTPUT, not the JSON envelope wrapped around it" \
+  || fail "audit: E2 still measures the envelope (got $(aud_verdict e2wrap E2))"
+# …and an unattested green (no exit code, no exit marker) is reported even when it is long.
+aud_seed e2unatt; jq '.evidence=[{t:"a",kind:"go",cmd:"c",response:"{\"stdout\":\"ok example 0.4s — a nice long line of real output with no exit marker anywhere in it\"}",fingerprint:"fp1",verdict:"pass",attested:false}]' "$AUD_RUNS/e2unatt.json" > "$AUD_RUNS/t" && mv "$AUD_RUNS/t" "$AUD_RUNS/e2unatt.json"
+aud_json e2unatt | jq -r '.checks[] | select(.id=="E2") | .message' | grep -q 'no exit code' \
+  && pass "audit: E2 reports greens that rest on 'printed no failure marker' alone" \
+  || fail "audit: E2 does not report unattested greens"
+
+# E4 — the vacuity flag finally has a reader. Undeclared is a FAIL: the run is asserting a
+# verification it does not have. Declared is a WARN: honest, but still worth a human's eye.
+aud_seed e4vac; jq '.evidence=[{t:"a",kind:"go-build",cmd:"go build ./...",response:"{\"stdout\":\"matched no packages — nothing at all was compiled here\"}",fingerprint:"fp1",verdict:"pass",vacuous:true}]' "$AUD_RUNS/e4vac.json" > "$AUD_RUNS/t" && mv "$AUD_RUNS/t" "$AUD_RUNS/e4vac.json"
+[ "$(aud_verdict e4vac E4)" = "FAIL" ] \
+  && pass "audit: E4 fails a required kind whose latest capture verified nothing" \
+  || fail "audit: E4 fails an undeclared vacuous capture (got $(aud_verdict e4vac E4))"
+jq '.evidence_na=[{kind:"go-build",why:"scaffold: no Go sources yet"}]' "$AUD_RUNS/e4vac.json" > "$AUD_RUNS/t" && mv "$AUD_RUNS/t" "$AUD_RUNS/e4vac.json"
+[ "$(aud_verdict e4vac E4)" = "WARN" ] \
+  && pass "audit: E4 downgrades to WARN once the vacuity is declared on the record" \
+  || fail "audit: E4 honors an evidence-na declaration (got $(aud_verdict e4vac E4))"
+aud_seed e4ok
+[ "$(aud_verdict e4ok E4)" = "PASS" ] \
+  && pass "audit: E4 passes when every kind's latest capture checked real files" \
+  || fail "audit: E4 passes on substantive evidence (got $(aud_verdict e4ok E4))"
 
 aud_seed f1none; jq 'del(.status)' "$AUD_RUNS/f1none.json" > "$AUD_RUNS/t" && mv "$AUD_RUNS/t" "$AUD_RUNS/f1none.json"
 [ "$(aud_verdict f1none F1)" = "WARN" ] && pass "audit: F1 warns when no terminal state was recorded" || fail "audit: F1 warns when no terminal state was recorded"
@@ -1918,6 +2167,23 @@ cmp_fire '{"hook_event_name":"Notification"}'
 [ "$(cmp_n '.compactions|length')" = "1" ] \
   && pass "compact: an unrelated event is a no-op" || fail "compact: an unrelated event is a no-op"
 
+# MOVING or PINNING the bundle is not READING it. All three of these appeared in one real
+# run's governance_reads[], where I4 reads them as proof the bundle was re-anchored into
+# context after a compaction. Nothing was read: a file was copied and a stamp was written.
+cmp_fire '{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"cp /wt/runs/c.governance.md /main/runs/c.governance.md"}}'
+[ "$(cmp_n '.governance_reads|length')" = "2" ] \
+  && pass "compact: cp'ing the bundle between checkouts is not a re-read" \
+  || fail "compact: a cp of the bundle counted as a read"
+cmp_fire '{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"bash .github/hooks/track-note.sh governance /main/runs/c.governance.md"}}'
+[ "$(cmp_n '.governance_reads|length')" = "2" ] \
+  && pass "compact: pinning the bundle is not a re-read of it" \
+  || fail "compact: the pin command counted as a read"
+# …and a genuine read still counts, so the exclusions did not blunt the recorder.
+cmp_fire '{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"grep -n Constitution runs/c.governance.md"}}'
+[ "$(cmp_n '.governance_reads|length')" = "3" ] \
+  && pass "compact: a real grep of the bundle is still recorded" \
+  || fail "compact: exclusions blunted the recorder"
+
 # No bundle pinned -> nothing a re-read could be recognised against; must not invent one.
 printf '{"run_id":"d","v":1,"trace":[],"evidence":[],"tool_calls":0}\n' > "$CMP_RUNS/d.json"
 printf '%s' '{"hook_event_name":"PostToolUse","tool_name":"Read","tool_input":{"file_path":"runs/d.governance.md"}}' \
@@ -1929,6 +2195,17 @@ printf '%s' '{"hook_event_name":"PostToolUse","tool_name":"Read","tool_input":{"
 printf '%s' '{"hook_event_name":"PostCompact"}' | RUNS_DIR="$CMP_RUNS" bash "$CMP" >/dev/null 2>&1 \
   && pass "compact: no RUN_ID -> silent no-op" || fail "compact: no RUN_ID -> silent no-op"
 rm -rf "$CMP_RUNS"
+
+# The dispatch tool is spelled `Task` on some surfaces and `Agent` on others, and a matcher
+# that names only one fails SILENTLY — track-brief.sh never runs, briefs[] stays empty, and
+# G6/I4/the scaffold fan-out guard all quietly degrade. track-brief.sh's own tool test
+# already accepts both; the template must not be narrower than the script it wires.
+_bmt="$(jq -r '.hooks.PreToolUse[] | select((.hooks[0].command // "") | test("track-brief")) | .matcher' \
+        "$SCRIPT_DIR/../templates/claude-settings.json" 2>/dev/null || echo "")"
+case "$_bmt" in
+  *Task*Agent* | *Agent*Task*) pass "compact: the dispatch-hook matcher covers both Task and Agent spellings" ;;
+  *) fail "compact: dispatch-hook matcher is narrower than track-brief.sh's own test (got '$_bmt')" ;;
+esac
 
 # Wired on BOTH surfaces, or the recorder never runs and I4 can only ever WARN.
 if grep -q 'track-compact' "$SCRIPT_DIR/../templates/claude-settings.json" 2>/dev/null \
@@ -2335,6 +2612,37 @@ if grep -q 'USER EDIT MARKER' "$IH_REPO/.github/hooks/track-env.base.sh" 2>/dev/
 else
   fail "install: re-apply never clobbers an existing track-env.base.sh"
 fi
+
+# --- a STALE MATCHER is repaired, and it fails silently if it is not -------------------
+# The hook is simply never invoked: no artifact, no error, and every check reading that
+# artifact degrades to "unwired" instead of failing. `track-brief.sh` shipped on
+# `"matcher": "Task"` while the dispatch tool on the current surface is `Agent`, and a real
+# client run recorded ZERO briefs — G6 (the only check that watches the brief hop) went to
+# WARN, I4's post-compaction half went inert, and the scaffold fan-out guard fell back to the
+# weaker trace[] signal its own comment warns hands a run "a free pass out of this gate".
+# An append-only merge cannot fix that, so re-apply must re-sync our own matchers.
+IH_CS="$IH_REPO/.claude/settings.json"
+mkdir -p "$IH_REPO/.claude"
+jq -n '{hooks:{PreToolUse:[
+    {matcher:"Task",hooks:[{type:"command",command:"$CLAUDE_PROJECT_DIR/.github/hooks/track-brief.sh",timeout:5}]},
+    {matcher:"Bash",hooks:[{type:"command",command:"/usr/local/bin/user-own-hook.sh"}]}]}}' > "$IH_CS"
+( cd "$IH_REPO" && bash "$INSTALL_HOOKS" --apply --surface claude >/dev/null 2>&1 ) || true
+_bm="$(jq -r '[.hooks.PreToolUse[] | select((.hooks[0].command // "") | test("track-brief")) | .matcher] | join(",")' "$IH_CS" 2>/dev/null || echo ERR)"
+[ "$_bm" = "Task|Agent" ] \
+  && pass "install: re-apply re-syncs a stale hook matcher (Task -> Task|Agent)" \
+  || fail "install: stale matcher not re-synced (got '$_bm')"
+[ "$(jq -r '[.hooks.PreToolUse[] | select((.hooks[0].command // "") | test("track-brief"))] | length' "$IH_CS")" = "1" ] \
+  && pass "install: re-sync updates in place, never leaves a duplicate firing twice" \
+  || fail "install: re-sync duplicated the hook entry"
+jq -e '[.hooks.PreToolUse[] | select(.matcher == "Bash" and ((.hooks[0].command // "") | test("user-own-hook")))] | length == 1' "$IH_CS" >/dev/null 2>&1 \
+  && pass "install: the user's own hook entries are left untouched" \
+  || fail "install: re-sync rewrote a hook that is not ours"
+# Idempotent: a second apply changes nothing.
+_before="$(cat "$IH_CS")"
+( cd "$IH_REPO" && bash "$INSTALL_HOOKS" --apply --surface claude >/dev/null 2>&1 ) || true
+[ "$(cat "$IH_CS")" = "$_before" ] \
+  && pass "install: a second --apply is a no-op on the settings block" \
+  || fail "install: --apply is not idempotent on .claude/settings.json"
 
 # drift is repaired: stale an installed script, --check must flag it, --apply must fix it
 printf '# STALE\n' > "$IH_REPO/.github/hooks/track-preflight.sh"
@@ -2759,6 +3067,23 @@ TN_AUDIT="$( cd "$TN_ELSEWHERE" && RUN_ID="$TN_ID" RUNS_DIR="$TN_RUNS" bash "$AU
 printf '%s' "$TN_AUDIT" | grep -q "G1.*MISSING from disk" \
   && fail "audit: a legacy relative pin is retried against RUNS_DIR before failing G1" \
   || pass "audit: a legacy relative pin is retried against RUNS_DIR before failing G1"
+# evidence-na — the declaration that clears a vacuity block. It must demand a REASON: a
+# waiver with no stated why is the silent no-op this whole bundle refuses.
+TN2_RUNS="$(mktemp -d)"; TN2_ID="tn2"
+printf '{"run_id":"%s","v":1,"trace":[],"evidence":[],"tool_calls":0}\n' "$TN2_ID" > "$TN2_RUNS/$TN2_ID.json"
+RUN_ID="$TN2_ID" RUNS_DIR="$TN2_RUNS" bash "$NOTE" evidence-na go-build "scaffold: no Go sources yet" >/dev/null 2>&1 || true
+[ "$(jq -r '.evidence_na[0].kind' "$TN2_RUNS/$TN2_ID.json")" = "go-build" ] \
+  && [ "$(jq -r '.evidence_na[0].why' "$TN2_RUNS/$TN2_ID.json")" = "scaffold: no Go sources yet" ] \
+  && pass "note: evidence-na records the kind AND the reason" \
+  || fail "note: evidence-na records kind + reason (got $(jq -c '.evidence_na' "$TN2_RUNS/$TN2_ID.json"))"
+( RUN_ID="$TN2_ID" RUNS_DIR="$TN2_RUNS" bash "$NOTE" evidence-na go-build >/dev/null 2>&1 ) \
+  && fail "note: evidence-na without a reason is rejected" \
+  || pass "note: evidence-na without a reason is rejected"
+[ "$(jq -r '.evidence_na | length' "$TN2_RUNS/$TN2_ID.json")" = "1" ] \
+  && pass "note: a rejected evidence-na writes nothing" \
+  || fail "note: a rejected evidence-na wrote a record anyway"
+rm -rf "$TN2_RUNS"
+
 rm -rf "$TN_RUNS" "$TN_ELSEWHERE"
 
 # ---------------------------------------------------------------------------
@@ -3008,6 +3333,105 @@ else
   fail "report: small diff renders a plain per-file table (no grouping)"
 fi
 rm -rf "$RPT_G"
+
+# --- the auto block attests to itself -------------------------------------------------
+# "Machine-rendered, do not hand-edit" was a request. On a real client PR the markers were
+# intact and everything between them had been RE-TYPED — summary singularised to
+# "1 warning · 0 failures", the findings table cut from four columns to three, the
+# <details> list of un-checked invariants deleted, and the audit's one WARN rewritten into a
+# paragraph asserting compliance no artifact showed. The END marker now carries a sha of the
+# block, so this is arithmetic rather than a guess about wording.
+RPT_V="$(mktemp -d)"
+RPT_A="$(mktemp -d)"    # own fixture: the shared RPT_REPO is torn down above
+(
+  cd "$RPT_A" && git init -q && git config user.email t@t && git config user.name t
+  echo hi > a.go && git add a.go && git commit -q -m init
+  echo more >> a.go && git add -A && git commit -q -m work
+  mkdir -p runs
+  jq -nc --arg r "$RID" '{run_id:$r,v:1,tool_calls:7,
+    evidence:[{kind:"go-test",cmd:"go test ./...",response:"ok pkg 0.4s all good",fingerprint:"abc123def456ghi"}]}' \
+    > "runs/$RID.json"
+)
+( cd "$RPT_A" && TRACK_BASE_REF=HEAD~1 RUNS_DIR=runs bash "$REPORT" "$RID" > "$RPT_V/body.md" 2>/dev/null ) || true
+grep -q 'END track-report auto block · sha=[0-9a-f]\{40\}' "$RPT_V/body.md" \
+  && pass "report: the END marker carries a sha of the block it closes" \
+  || fail "report: END marker carries no sha"
+bash "$REPORT" --verify-body "$RPT_V/body.md" >/dev/null 2>&1 \
+  && pass "report: --verify-body accepts its own render verbatim" \
+  || fail "report: --verify-body rejects a verbatim render"
+# The exact edit that shipped: "warning(s)" → "warning", "failure(s)" → "failures".
+sed 's/warning(s)/warning/; s/failure(s)/failures/' "$RPT_V/body.md" > "$RPT_V/retyped.md"
+rc=0; bash "$REPORT" --verify-body "$RPT_V/retyped.md" >/dev/null 2>&1 || rc=$?
+[ "$rc" = "3" ] \
+  && pass "report: --verify-body catches a re-typed summary line (the observed defect)" \
+  || fail "report: --verify-body missed a re-typed block (rc=$rc)"
+sed 's/ · sha=[0-9a-f]*//' "$RPT_V/body.md" > "$RPT_V/old.md"
+rc=0; bash "$REPORT" --verify-body "$RPT_V/old.md" >/dev/null 2>&1 || rc=$?
+[ "$rc" = "4" ] \
+  && pass "report: a pre-attestation render is 'unverifiable', not 'tampered'" \
+  || fail "report: no-sha body misclassified (rc=$rc)"
+rm -rf "$RPT_V"
+
+# A vacuous capture must not render as a bare ✅ — a real PR printed
+# `| go-build | go build ./... | ✅ pass |` for a build that compiled zero packages.
+RPT_VAC="$(mktemp -d)"
+( cd "$RPT_A" && jq '.evidence=[{kind:"go-build",cmd:"go build ./...",response:"matched no packages",fingerprint:"abc123def456ghi",verdict:"pass",vacuous:true}]' \
+    "runs/$RID.json" > "runs/$RID.vac" && mv "runs/$RID.vac" "runs/$RID.json"
+  TRACK_BASE_REF=HEAD~1 RUNS_DIR=runs bash "$REPORT" "$RID" > "$RPT_VAC/body.md" 2>/dev/null ) || true
+if grep -q 'go build' "$RPT_VAC/body.md" && grep -q 'verified nothing' "$RPT_VAC/body.md"; then
+  pass "report: a vacuous capture renders as 'passed, verified nothing', never a bare ✅"
+else
+  fail "report: vacuous capture still renders ✅ ($(grep 'go build' "$RPT_VAC/body.md" | head -1))"
+fi
+rm -rf "$RPT_VAC"
+
+# --- the evidence table shows what the gate READ, not every capture ever taken ----------
+# A real client PR rendered 31 rows for 7 kinds across 5 fingerprints, six of them ❌ — and
+# every one of those failures was a stale intermediate state a later capture of the same
+# kind had already fixed. Nothing in the table said so, so the author wrote a paragraph
+# underneath explaining which rows not to believe: hand-authored prose doing a renderer's
+# job, inside the block that is meant to be the un-authored half of the PR.
+RPT_E="$(mktemp -d)"
+( cd "$RPT_A" && jq '.evidence = [
+    {kind:"go-build",cmd:"go build ./... > /tmp/b.log 2>&1",response:"boom",fingerprint:"old111111111",verdict:"fail"},
+    {kind:"go-lint",cmd:"golangci-lint run",response:"boom",fingerprint:"old111111111",verdict:"fail"},
+    {kind:"go-build",cmd:"go build ./...",response:"ok compiled everything fine here",fingerprint:"new222222222",verdict:"pass"},
+    {kind:"go-lint",cmd:"golangci-lint run",response:"0 issues found across the tree",fingerprint:"new222222222",verdict:"pass"}]' \
+    "runs/$RID.json" > "runs/$RID.ev" && mv "runs/$RID.ev" "runs/$RID.json"
+  TRACK_BASE_REF=HEAD~1 RUNS_DIR=runs bash "$REPORT" "$RID" > "$RPT_E/body.md" 2>/dev/null ) || true
+# The main table is one row per kind — the latest — and carries neither ❌.
+_main="$(sed -n '/#### Evidence/,/^_Latest capture per kind/p' "$RPT_E/body.md")"
+[ "$(printf '%s' "$_main" | grep -c '^| go-')" = "2" ] \
+  && pass "report: the evidence table is one row per kind (the capture the gate read)" \
+  || fail "report: evidence table is not deduped to latest-per-kind ($(printf '%s' "$_main" | grep -c '^| go-') rows)"
+printf '%s' "$_main" | grep -q '❌' \
+  && fail "report: a superseded failure still shows in the main evidence table" \
+  || pass "report: superseded failures are out of the main table, not mixed into it"
+# …and they are KEPT, one click away, labelled for what they are. Never deleted.
+grep -q 'earlier capture(s) — superseded' "$RPT_E/body.md" \
+  && pass "report: earlier captures are collapsed under an explicit 'superseded' summary" \
+  || fail "report: earlier captures are not labelled superseded"
+_det="$(sed -n '/earlier capture(s)/,/<\/details>/p' "$RPT_E/body.md")"
+[ "$(printf '%s' "$_det" | grep -c '❌ FAIL')" = "2" ] \
+  && pass "report: both superseded failures are still on the record, still marked ❌" \
+  || fail "report: superseded failures were dropped rather than collapsed"
+rm -rf "$RPT_E"
+
+# A capture whose fingerprint is not the final one is the staleness E1 exists to catch —
+# marked in the row rather than left to a reader comparing twelve hex characters by eye.
+RPT_S="$(mktemp -d)"
+( cd "$RPT_A" && jq '.evidence = [
+    {kind:"py-lint",cmd:"ruff check .",response:"All checks passed on every file",fingerprint:"stale1111111",verdict:"pass"},
+    {kind:"go-build",cmd:"go build ./...",response:"ok compiled everything fine here",fingerprint:"final2222222",verdict:"pass"}]' \
+    "runs/$RID.json" > "runs/$RID.ev" && mv "runs/$RID.ev" "runs/$RID.json"
+  TRACK_BASE_REF=HEAD~1 RUNS_DIR=runs bash "$REPORT" "$RID" > "$RPT_S/body.md" 2>/dev/null ) || true
+grep -q 'py-lint.*⏱ stale' "$RPT_S/body.md" \
+  && pass "report: a latest capture at an older fingerprint is marked stale in its row" \
+  || fail "report: stale latest capture not marked"
+grep -q 'go-build.*⏱ stale' "$RPT_S/body.md" \
+  && fail "report: the final-tree capture was wrongly marked stale" \
+  || pass "report: the capture at the final fingerprint carries no stale marker"
+rm -rf "$RPT_S" "$RPT_A"
 
 # ---------------------------------------------------------------------------
 # SUITE 11 -- SKILL.md + track-hooks.json structural integrity
@@ -3505,6 +3929,56 @@ if [ -f "$AGENT_WF" ]; then
 | go-test | `go test` | pass | `abc` |
 <!-- END track-report auto block -->'
 
+  # A sha-bearing block, verified and then tampered with. This is the exact-arithmetic arm
+  # of the CI gate: every other check above infers tampering from wording a careful forger
+  # gets right, and the real PR that prompted it got the markers right while re-typing
+  # everything between them.
+  sha_inner='### Run `x`
+
+---
+
+### Discipline audit — mechanical invariants (derived from artifacts, not claimed)
+
+- **16 passed · 2 warning(s) · 0 failure(s)**  ⚠️ review the warnings below'
+  sha_block="<!-- BEGIN track-report auto block — machine-rendered, do not hand-edit -->
+$sha_inner"
+  sha_val="$(printf '%s\n' "$sha_block" | { command -v shasum >/dev/null 2>&1 && shasum || sha1sum; } | cut -d' ' -f1)"
+  sha_body="$sha_block
+<!-- END track-report auto block · sha=$sha_val -->"
+  sha_tampered="$(printf '%s' "$sha_body" | sed 's/warning(s)/warning(s) /')"
+  s1_sha=$(PR_BODY="$sha_body" META_ONLY=false TOUCHES_GATES=false FILES_N=1 bash /tmp/sbd-ci-step1.sh >/tmp/s1_sha.log 2>&1; echo $?)
+  s1_tam=$(PR_BODY="$sha_tampered" META_ONLY=false TOUCHES_GATES=false FILES_N=1 bash /tmp/sbd-ci-step1.sh >/tmp/s1_tam.log 2>&1; echo $?)
+  [ "$s1_sha" = "0" ] \
+    && pass "behavior: CI gate accepts a block whose content matches its own sha" \
+    || fail "behavior: CI gate rejects a genuine sha-bearing block (rc=$s1_sha, $(head -3 /tmp/s1_sha.log))"
+  [ "$s1_tam" != "0" ] && grep -q 'does not match the sha' /tmp/s1_tam.log \
+    && pass "behavior: CI gate hard-fails a block edited after rendering (sha mismatch)" \
+    || fail "behavior: CI gate missed an edited sha-bearing block (rc=$s1_tam)"
+
+  # END-TO-END, and the reason this test exists: the CI gate matched the END marker as an
+  # exact literal, so the moment track-report.sh started appending ` · sha=…` every genuine
+  # render would have failed CI with "No track-report Auto block". Feed the REAL renderer's
+  # output to the REAL gate rather than to a fixture that can drift away from both.
+  CIE="$(mktemp -d)"
+  (
+    cd "$CIE" && git init -q && git config user.email t@t && git config user.name t
+    echo hi > a.go && git add a.go && git commit -q -m init && echo x >> a.go && git commit -qam work
+    mkdir -p runs
+    jq -nc '{run_id:"cie",v:1,tool_calls:3,evidence:[{kind:"go-test",cmd:"go test",response:"ok pkg 0.4s all good",fingerprint:"f1"}]}' > runs/cie.json
+    TRACK_BASE_REF=HEAD~1 RUNS_DIR=runs bash "$SCRIPTS_DIR/track-report.sh" cie > body.md 2>/dev/null
+  ) || true
+  s1_e2e=$(PR_BODY="$(cat "$CIE/body.md" 2>/dev/null)" META_ONLY=false TOUCHES_GATES=false FILES_N=1 bash /tmp/sbd-ci-step1.sh >/tmp/s1_e2e.log 2>&1; echo $?)
+  s2_e2e=$(PR_BODY="$(cat "$CIE/body.md" 2>/dev/null)" bash /tmp/sbd-ci-step2.sh >/tmp/s2_e2e.log 2>&1; echo $?)
+  [ "$s1_e2e" = "0" ] \
+    && pass "behavior: a live track-report.sh render passes the live CI marker+sha gate" \
+    || fail "behavior: live render fails the live CI gate (rc=$s1_e2e; $(head -3 /tmp/s1_e2e.log))"
+  # Step 2 legitimately fails this fixture (its audit reports real FAILs — no bundle, no
+  # phase stamps). What must NOT happen is a complaint about the block's SHAPE.
+  grep -qiE 'summary line|Auto block|hand-authored' /tmp/s2_e2e.log \
+    && fail "behavior: live render trips CI's shape checks (got: $(head -2 /tmp/s2_e2e.log))" \
+    || pass "behavior: CI reads a live render's audit on its merits, not as a shape violation"
+  rm -rf "$CIE"
+
   s1_fab=$(PR_BODY="$fab_body" META_ONLY=false TOUCHES_GATES=false FILES_N=1 bash /tmp/sbd-ci-step1.sh >/tmp/s1_fab.log 2>&1; echo $?)
   s2_fab=$(PR_BODY="$fab_body" bash /tmp/sbd-ci-step2.sh >/tmp/s2_fab.log 2>&1; echo $?)
   s1_real=$(PR_BODY="$real_body" META_ONLY=false TOUCHES_GATES=false FILES_N=1 bash /tmp/sbd-ci-step1.sh >/tmp/s1_real.log 2>&1; echo $?)
@@ -3737,6 +4211,16 @@ _m=$(_deps_manifest '{"schema":1,"dependencies":{"nosuchbin_zzz":{"range":"","pr
 TRACK_DEPS_MANIFEST="$_m" RUNS_DIR="$_DEPS_TMP/r7" bash "$DEPS" --verify >/dev/null 2>&1 \
   && pass "deps: optional missing tool → exit 0 (no lock violation)" \
   || fail "deps: optional missing tool → exit 0 (got non-zero)"
+
+# …and it must not report a RANGE VERDICT for a version nobody observed. A real cache holds
+# `{"present":false,"version":null,"in_range":true}` — a green beside an absent tool, in the
+# one file whose whole job is proving versions. Absent means unknown.
+_m=$(_deps_manifest '{"schema":1,"dependencies":{"nosuchbin_zzz":{"range":"=6.2.0","probe":"nosuchbin_zzz --version","required":false}}}' optrange.json)
+TRACK_DEPS_MANIFEST="$_m" RUNS_DIR="$_DEPS_TMP/r7b" bash "$DEPS" --verify >/dev/null 2>&1 || true
+_ir="$(jq -r '.results.nosuchbin_zzz.in_range' "$_DEPS_TMP/r7b/.deps-cache.json" 2>/dev/null || echo MISSING)"
+[ "$_ir" = "null" ] \
+  && pass "deps: an absent tool reports in_range:null, never a range verdict it never made" \
+  || fail "deps: absent tool still claims in_range=$_ir"
 
 rm -rf "$_DEPS_TMP"
 

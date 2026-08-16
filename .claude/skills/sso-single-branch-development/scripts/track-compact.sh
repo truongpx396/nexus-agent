@@ -136,6 +136,18 @@ case "$ev" in
     # after a compaction (I4). The basename is run-scoped (<RUN_ID>.governance.md), so
     # it is specific enough not to collide.
     gov_base="${gov_path##*/}"
+    # A command that MOVES or PINS the bundle is not a command that READ it. `cp <worktree
+    # copy> <main copy>`, `mv`, and `track-note.sh governance <path>` all name the file, and
+    # all three appeared in one real run's governance_reads[] — where I4 reads them as proof
+    # the bundle was re-anchored into context after a compaction. It was not: nothing was
+    # read, a file was copied and a stamp was written. Same rule the evidence recorder now
+    # applies to `brew install <tool>`: naming a thing is not using it.
+    case "$target" in
+      *"track-note.sh governance"* | *"track-note.sh"*" govpath"*) exit 0 ;;
+    esac
+    case "$(printf '%s' "$target" | sed 's/^[[:space:]]*//')" in
+      cp[[:space:]]* | mv[[:space:]]* | rm[[:space:]]* | *"; cp "* | *"; mv "* | *" && cp "* | *" && mv "*) exit 0 ;;
+    esac
     case "$target" in
       *"$gov_path"* | *"$gov_base"*)
         # Record WHAT matched, not just that something did. `{t, tool}` alone reads as

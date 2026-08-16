@@ -39,6 +39,10 @@
 #                                            written to, creating the records dir first. Call it
 #                                            BEFORE writing the bundle, and write to exactly what it
 #                                            prints — see the subcommand for the two failures it removes.
+#   track-note.sh evidence-na <kind> <why>   DECLARE that a required evidence kind verifies nothing on
+#                                            this tree (an empty Go module, a suite that does not exist
+#                                            yet). Clears the gate's vacuity block for that kind, on
+#                                            record and with a reason — silence never does
 #   track-note.sh governance <file>          SET governance_bundle={path,sha,t} — the persisted bundle
 #                                            AND append the same to governance_stamps[] (the pin
 #                                            HISTORY, so a legitimate mid-core re-pin is on record)
@@ -159,6 +163,29 @@ case "$sub" in
        | .started_ts = (.started_ts // $t) | .last_ts = $t' \
       "$rec" >"$tmp" && mv "$tmp" "$rec"
     ;;
+  evidence-na)
+    # DECLARE that a required evidence kind cannot verify anything on this tree, and why.
+    #
+    # The vacuity flag alone cannot settle the gate. A scaffold that creates `backend-go/`
+    # with no .go files makes `go build ./...` print "matched no packages" and exit 0: that
+    # is the honest state of the world, so failing it would push the run into writing code
+    # to satisfy a gate — the "never edit the deliverable to make the gate green" trap. But
+    # passing it silently is what a real client PR did, printing `go-build ✅ pass` for a
+    # capture that compiled nothing.
+    #
+    # So it takes the same shape as every other no-op in this bundle (`ABSENT` lines in the
+    # governance bundle, `GOVERNANCE: n/a` in a brief): an EXPLICIT declaration clears it,
+    # silence does not. One command, on record, with a reason a reviewer can weigh.
+    kind="${2:-}"
+    why="${3:-}"
+    [ -n "$kind" ] && [ -n "$why" ] \
+      || { printf '%s\n' "track-note: 'evidence-na' needs <kind> \"<why nothing can be verified yet>\" (e.g. go-build \"Phase 1 scaffold: no .go sources exist yet\")." >&2; rm -f "$tmp"; exit 2; }
+    jq --arg t "$ts" --arg k "$kind" --arg w "$why" \
+      '.evidence_na = ((.evidence_na // []) + [{t:$t, kind:$k, why:$w, self_reported:true}])
+       | .started_ts = (.started_ts // $t) | .last_ts = $t' \
+      "$rec" >"$tmp" && mv "$tmp" "$rec"
+    printf 'declared: %s verifies nothing on this tree — %s\n' "$kind" "$why"
+    ;;
   govpath)
     # WHERE the governance bundle goes — one command, one answer, directory already made.
     # Two observed failures, both from the caller re-deriving this path by hand:
@@ -254,7 +281,7 @@ case "$sub" in
     ;;
   *)
     rm -f "$tmp"
-    printf '%s\n' "track-note: unknown subcommand '${sub:-<none>}' (want: skill | loop | phase | govpath | governance | status)." >&2
+    printf '%s\n' "track-note: unknown subcommand '${sub:-<none>}' (want: skill | loop | phase | evidence-na | govpath | governance | status)." >&2
     exit 2
     ;;
 esac

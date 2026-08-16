@@ -211,7 +211,7 @@ current_fp="$(
 fail_re="${TRACK_FAIL_PATTERN:-}"
 [ -n "$fail_re" ] || fail_re='\bFAIL\b|FAILED|panic:|Traceback|error TS[0-9]|\bERROR\b|✖|exit code [1-9]|[1-9][0-9]* (failed|error)'
 
-missing=""; stale=""; failed=""
+missing=""; stale=""; failed=""; hollow=""
 for kind in $required; do
   [ -n "$kind" ] || continue
   # Latest entry of this kind.
@@ -225,6 +225,22 @@ for kind in $required; do
   if [ "$fp" != "$current_fp" ]; then
     stale="$stale $kind"; continue
   fi
+  # A VACUOUS capture is a green that verified nothing — `go build ./...` on a module with
+  # no sources, or a `ci-lint` row whose command only installed actionlint. track-evidence.sh
+  # has flagged these since the vacuity work landed, and until now NOTHING read the flag:
+  # the gate passed them, the audit ignored them, and a real client PR printed
+  # `go-build | go build ./... | ✅ pass` for a capture that compiled zero packages — the
+  # exact outcome the flag was introduced to end.
+  #
+  # Not a hard failure of the run: sometimes there is genuinely nothing to verify yet. It is
+  # a failure to have said so. `track-note.sh evidence-na <kind> "<why>"` clears it, the same
+  # way an `ABSENT` line clears a governance no-op — an explicit declaration, never silence.
+  if jq -e '.vacuous == true' >/dev/null 2>&1 <<<"$entry"; then
+    if ! jq -e --arg k "$kind" '[.evidence_na[]? | select(.kind == $k)] | length > 0' \
+           >/dev/null 2>&1 "$rec"; then
+      hollow="$hollow $kind"; continue
+    fi
+  fi
   # Prefer the verdict track-evidence.sh settled at capture — it saw the exit code,
   # which the response text often does not carry. Re-grepping here is the fallback
   # for records written before verdicts existed; when both sides grep independently
@@ -237,11 +253,12 @@ for kind in $required; do
   fi
 done
 
-if [ -n "$missing" ] || [ -n "$stale" ] || [ -n "$failed" ]; then
+if [ -n "$missing" ] || [ -n "$stale" ] || [ -n "$failed" ] || [ -n "$hollow" ]; then
   reason="Evidence gate: the work is not done — the evidence the diff requires is incomplete for the current code."
   [ -n "$missing" ] && reason="$reason MISSING (never captured):$missing."
   [ -n "$stale" ]   && reason="$reason STALE (captured before later edits — re-run against the current tree):$stale."
   [ -n "$failed" ]  && reason="$reason FAILING (latest run shows a failure marker):$failed."
+  [ -n "$hollow" ]  && reason="$reason VERIFIED NOTHING (the capture passed but checked no files — an empty build, or a command that only installed/located the tool):$hollow. Either run the tool against real sources, or, if there is genuinely nothing to verify on this tree yet, say so on the record: track-note.sh evidence-na <kind> \"<why>\"."
   reason="$reason Produce fresh, passing output for each before finishing."
   block "$reason"
 fi

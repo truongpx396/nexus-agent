@@ -1,6 +1,6 @@
 ---
 name: sso-single-branch-development
-version: 0.8.0
+version: 0.10.0
 description: 'Run a full end-to-end implementation pipeline on one branch/worktree in one of three execution cores — scaffold (non-behavioral bootstrap batch), story (TDD for new/changed behavior), or refactor (behavior-preserving keep-green) — with two-stage spec-compliance + code-quality verification, evidence capture, optional Copilot hooks, and draft-PR handoff. Use when asked to implement one feature, fix one bug, refactor existing code, or do foundation/scaffold setup with strong quality gates but without multi-track parallel orchestration.'
 ---
 
