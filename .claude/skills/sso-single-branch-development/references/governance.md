@@ -144,15 +144,47 @@ the *check* must happen, and its outcome must be stated. Never no-op by omission
 discipline, applied to the largest single read in the pipeline.)*
 
 The matched set is large: `security-and-owasp` alone is ~1,100 lines, and a Go+React+compose surface
-can match ~3,000 lines across several files. Holding all of that raw in the main session for the whole
-core is the single biggest context-pressure source in this pipeline, and it is exactly what
-compaction evicts. (Scoping the review rubric out of the maker phase — step 5 — is part of the same
-budget: it is ~400 lines that only the reviewer needs.)
+can match ~3,000 lines across several files, before the SpecKit slice adds its own. Holding all of
+that raw in the main session for the whole core is the single biggest context-pressure source in this
+pipeline, and it is exactly what compaction evicts. (Scoping the review rubric out of the maker phase
+— step 5 — is part of the same budget: it is ~400 lines that only the reviewer needs.)
 
 So **read fully, then distil immediately**. What you carry forward is not the files — it is the set
 of *binding constraints that apply to this diff*, each one concrete enough to act on
-(`pin image tags, never :latest`, not `follow container best practice`). Typically 30–60 lines total.
-Write those to the bundle (Step 2) and let the raw text go.
+(`pin image tags, never :latest`, not `follow container best practice`). Write those to the bundle
+(Step 2) and let the raw text go.
+
+**The budget is up to ~500 lines for the whole bundle — a ceiling, not a target, and never a reason
+to drop a binding constraint.** Distilling means *compressing* the source text into actionable lines,
+not *sampling* it. A constitution principle, an instruction-file rule, an acceptance criterion, or a
+contract field that binds this diff goes into the bundle even when its section is already long. The
+opposite failure is the one this budget used to cause and it is the more expensive of the two: a
+40-line bundle that "summarized" three instruction files down to their headline themes ships briefs
+that are ungoverned in every specific that matters, with a bundle on disk standing as false proof
+that the gate ran. Write what actually binds; the ceiling exists so you *notice* when a bundle has
+gone sprawling, not so you trim the last rule out of it.
+
+Rough shape of a bundle at that ceiling, so the number is legible rather than arbitrary:
+
+| Section | Typical | Who consumes it |
+|---|---|---|
+| Constitution | 10–30 lines | every cluster |
+| Each matched `.github/instructions/*` | 20–60 lines — **≥5 substantive bullets is the floor** (`G5`) | the clusters whose files its glob covers |
+| `security-and-owasp` (trust-boundary surface) | 30–80 lines | trust-boundary clusters |
+| Design artefacts (frontend surface) | 10–40 lines | frontend clusters |
+| Feature context — the task's SpecKit slice | 30–120 lines | the clusters implementing it |
+| `## Conflicts` + `## Cluster → binding sections` | 10–30 lines | routing; read once |
+
+**A bigger bundle does not mean bigger briefs, and that is what makes the higher ceiling
+affordable.** The bundle is the main session's durable, re-readable record of everything binding this
+run; each fan-out brief embeds only the sections its cluster's row names in the `## Cluster → binding
+sections` map (Step 3). Detail lands once, in the bundle, and is routed per cluster — instead of
+every brief paying for every section, which is what a single flat 500-line paste into N briefs would
+cost.
+
+If an honest distillation runs well past ~500 lines, the signal is that **the batch surface is too
+broad**, not that the constraints should be cut: split the batch, or narrow the SpecKit slice to the
+task's own story (item 6), and re-distil.
 
 Feature context (item 6) follows the identical discipline with one filter applied *first*: scope
 **before** you read, not after. Locate the task's slice (user-story heading, named artifact) and read
@@ -198,6 +230,10 @@ vanished.
 
 ### Bundle format
 
+Sections carry the constraints themselves, not their themes. Every matched instruction file needs at
+least **5** substantive bullets (`G5`'s floor, `TRACK_GOV_MIN_BULLETS`) — and more whenever more of
+that file binds this diff. The example below is a floor, not a size limit:
+
 ```markdown
 # Governance bundle — run <RUN_ID>
 Surface: backend-go/**, deploy/compose.yml
@@ -205,22 +241,36 @@ Surface: backend-go/**, deploy/compose.yml
 ## Constitution (.specify/memory/constitution.md) — PRESENT
 - kernel/ must not import from internal/product/** (principle 3)
 - coverage floor 80% on new packages (principle 7)
+- every exported symbol carries a doc comment starting with its own name (principle 4)
+- no new third-party dependency without an ADR in docs/adr/ (principle 9)
+- schema changes ship with a forward migration AND a tested rollback (principle 11)
 
 ## go.instructions.md — matched **/*.go
 - errors wrapped with %w, never %v
 - no naked returns in exported funcs
+- context.Context is the first parameter of any call that does I/O; never stored in a struct
+- table-driven tests with subtests (t.Run) for anything with >2 input shapes
+- exported errors are sentinel vars (ErrFoo) or typed; never fmt.Errorf'd inline at the boundary
+- no panic in library code — return the error to the caller
 
 ## security-and-owasp.instructions.md — matched (compose touches secrets + network)
 - pinned image digests, never :latest
 - no default credentials committed; env placeholder + documented dev fallback
+- every service publishes only the ports it needs; databases stay on the internal network
+- secrets arrive via env/secret mounts, never baked into an image layer or a compose literal
+- HTTP handlers set the strict transport + content-type-options + frame-ancestors headers
+- all SQL parameterized; no string-built queries anywhere, including migrations and fixtures
 
 ## Design (.stitch/designs/…, design-system/…) — ABSENT (no frontend surface)
 
 ## Feature context — specs/003-rag-ingest/ (task T012, [US2] chunked ingestion) — PRESENT
 - spec.md §US2: chunks must preserve source-document boundaries; 800 tokens max per chunk
+- spec.md §US2 acceptance: re-ingesting an unchanged doc is a no-op (same doc_id + content hash)
+- spec.md §US2 acceptance: a failed chunk fails the whole doc; no partial ingest is visible
 - plan.md "Architecture": ingestion runs as a queued worker, never inline on upload
 - research.md: chunker = recursive-character-split (rejected fixed-token: loses semantic
   boundaries per spike 2026-06-02)
+- data-model.md: Chunk{id, doc_id, ordinal, text, token_count} — ordinal is dense and 0-based
 - contracts/rag-ingest.md: POST /ingest {doc_id, source_uri} -> emits IngestCompleted{doc_id,
   chunk_count}
 
@@ -342,7 +392,8 @@ constraints no brief provably carried.
 
 If the context was compacted (or the session crashed and resumed) at any point during the core:
 **re-read `runs/<RUN_ID>.governance.md` from disk before dispatching the next subagent.** It is a
-~50-line read, it is authoritative, and it costs nothing next to shipping an ungoverned — or
+single bounded read — ~500 lines at the ceiling, usually well under — it is authoritative, and one
+re-read costs a fraction of what it saves next to shipping an ungoverned — or
 context-blind — brief. One file, one re-read: the Feature-context section is re-anchored the same
 motion as the governance sections, since both live in the same pinned bundle.
 `track-reconcile.sh`'s `resume_action` says this explicitly on every resume.
@@ -407,8 +458,10 @@ neither is a lesser cousin of the other's rule:
 - [ ] Feature-context distilled to the task's own scope (user-story tag or named artifact) **before**
       reading, not transcribed from the whole `spec.md`/`plan.md`/`research.md`/`data-model.md`
 - [ ] Constraints distilled and written to the path `track-note.sh govpath` printed — never a bare
-      `runs/…` re-derived by hand — each matched file's section carrying ≥2 actionable bullets, not
-      just a heading (`G5` fails a hollow section)
+      `runs/…` re-derived by hand — each matched file's section carrying **≥5** actionable bullets,
+      not just a heading or a theme (`G5` fails a section thinner than `TRACK_GOV_MIN_BULLETS`)
+- [ ] Bundle carries everything that binds this diff, up to ~500 lines — nothing binding dropped to
+      stay short, and no whole file transcribed to fill it out
 - [ ] `## Cluster → binding sections` map added when the core fans out to parallel makers, and it
       slices Feature-context sections per-cluster the same way it slices instruction sections
 - [ ] `track-note.sh governance <path>` called — again after any mid-core re-distil (governance or

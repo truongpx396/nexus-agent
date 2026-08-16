@@ -96,6 +96,21 @@ claude_wired() {
 # merge_claude_wiring — create .claude/settings.json from the template, or append our hooks
 # block into an existing one. Append-only + dedup'd by exact block, so it never clobbers the
 # user's other settings/hooks and is idempotent across re-runs.
+#
+# MATCHER RE-SYNC, before the append. An append-only merge cannot fix a matcher that has
+# gone stale, and a stale matcher fails SILENTLY: the hook is simply never invoked, the
+# artifact it writes is absent, and every check reading that artifact degrades to "unwired"
+# instead of failing. That is not hypothetical — `track-brief.sh` shipped on `"matcher":
+# "Task"`, the dispatch tool on the current surface is `Agent`, and a real client run
+# recorded zero briefs: `G6` (the only check that observes the brief hop) went to WARN, I4's
+# post-compaction half went inert, and the scaffold fan-out guard fell back to the weaker
+# trace[] signal its own comment warns "would hand the run a free pass out of this gate".
+#
+# So for every event, any EXISTING entry whose hook command names one of our scripts adopts
+# the template's matcher for that same script. Entries pointing at anything else are left
+# untouched — this re-syncs our own wiring, it does not rewrite the user's. Without it a
+# repo installed before the fix keeps the broken matcher forever and gains a duplicate
+# alongside it (the objects differ, so `unique_by` keeps both).
 merge_claude_wiring() {
   local settings="$REPO_ROOT/.claude/settings.json"
   local tmpl="$SRC_TEMPLATES/claude-settings.json"
@@ -105,11 +120,31 @@ merge_claude_wiring() {
   fi
   local tmp; tmp="$(mktemp)"
   jq -s '
+    # The bundle script a hook entry points at, if any: "track-brief.sh" etc.
+    def ours: [ (.hooks // [])[] | (.command // "") ]
+              | map(capture("(?<s>track-[a-z-]+\\.sh)").s? // empty) | first // null;
     (.[0] | (.hooks //= {})) as $base
     | .[1] as $add
     | reduce ($add.hooks | to_entries[]) as $e
         ($base;
-          .hooks[$e.key] = (((.hooks[$e.key] // []) + $e.value) | unique_by(tojson)))
+          # 1. re-sync: an existing entry for one of our scripts adopts the template matcher
+          .hooks[$e.key] = ((.hooks[$e.key] // []) | map(
+              . as $cur
+              | (ours // "") as $s
+              | if $s == "" then $cur
+                else ([$e.value[] | select((. | ours) == $s)] | first) as $t
+                  | if $t == null or ($t | has("matcher") | not) then $cur
+                    else $cur + {matcher: $t.matcher} end
+                end))
+          # 2. append only what is genuinely missing, keyed by SCRIPT rather than by exact
+          #    block: a hand-written settings.json spells the command slightly differently
+          #    (unquoted $CLAUDE_PROJECT_DIR, an absolute path), so `unique_by(tojson)` sees
+          #    two distinct objects and installs a second copy — which fires the same hook
+          #    twice per tool call and double-counts everything it records.
+          | ([ (.hooks[$e.key] // [])[] | ours | select(. != null) ]) as $have
+          | .hooks[$e.key] = (((.hooks[$e.key] // [])
+              + [ $e.value[] | select((ours as $s | $s == null or ($have | index($s) | not))) ])
+              | unique_by(tojson)))
   ' "$settings" "$tmpl" > "$tmp" && mv "$tmp" "$settings"
 }
 

@@ -119,6 +119,74 @@ fi
 [ -n "$kind" ] && matched=1
 [ "$matched" -eq 1 ] || exit 0
 
+# --- did the command RUN the tool, or merely FETCH/LOCATE it? ------------------
+# The sanitiser above removes mentions shaped like DATA (heredoc bodies, quoted literals).
+# It has nothing to say about mentions shaped like ACQUISITION, and those match a kind
+# pattern just as well — the pattern is a tool name, and installing, downloading, locating
+# or `cat`-ing the log of a tool all contain its name in executable position. On one real
+# client run seven captures were exactly this, every one recorded `pass`:
+#
+#   which golangci-lint · golangci-lint version · cd …/golangci-lint-2.12.2 (the tarball)
+#   brew install actionlint (×2) · cat /tmp/actionlint.log
+#
+# and the run's PR printed `| ci-lint | brew install actionlint + cat actionlint.log | ✅ |`.
+# `.github/workflows/*` makes `ci-lint` mandatory, so a package install satisfied the gate
+# for the highest-risk cluster in the diff.
+#
+# Classify each SEGMENT (split on ; | && || &, so a redirect-then-read block is read the way
+# a shell reads it) that matches the kind pattern:
+#   NON-VERIFYING  the segment's leading word is a fetch/locate/read, or it is a bare
+#                  version probe — it cannot have verified anything
+#   NEUTRAL        a bare `VAR=value` assignment: not a command, so it is evidence of
+#                  nothing in EITHER direction and must not be read as either
+#   VERIFYING      anything else — the tool was actually invoked
+# One VERIFYING segment is enough (`go test > log 2>&1; cat log` verifies via its first
+# segment). The capture is dropped only when something was positively non-verifying and
+# nothing verified: all-NEUTRAL stays silent, because `GCL=/path/to/golangci-lint` followed
+# by `$GCL config verify` is a real run this must not fault.
+nonverifying_re="${TRACK_NONVERIFYING_PATTERN:-}"
+[ -n "$nonverifying_re" ] || nonverifying_re='^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(sudo[[:space:]]+)?(brew|apt|apt-get|yum|dnf|zypper|pacman|apk|port|pip|pip3|pipx|gem|cargo|choco|scoop|nix-env|asdf|nvm|which|command|type|whereis|whatis|cat|bat|head|tail|less|more|ls|cd|pushd|mkdir|cp|mv|curl|wget|tar|unzip|gunzip|chmod|export|echo|printf)([[:space:]]|$)|(^|[[:space:]])(npm|pnpm|yarn|bun)[[:space:]]+(i|install|add)[[:space:]]+(-g|--global)([[:space:]]|$)|(^|[[:space:]])go[[:space:]]+install([[:space:]]|$)|(^|[[:space:]])[^[:space:]|;&]+[[:space:]]+(--version|-version|-V|version)([[:space:]]|;|$)'
+neutral_re='^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]*$'
+
+# A redirection's ampersand (`2>&1`, `>&2`) is protected before the split — splitting it
+# turns `go test … 2>&1` into `go test … 2>` in the PR's evidence table. awk rather than sed
+# because inserting a newline from a replacement is not portable across BSD/GNU sed.
+segments="$(printf '%s\n' "$cmd_exec" | awk '{
+    line=$0
+    gsub(/>&/, ">\001", line)
+    gsub(/&&|\|\||[;|&]/, "\n", line)
+    gsub(/\001/, "\\&", line)
+    print line
+  }' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' || true)"
+seg_pat="$kind_pat"
+if [ -n "${TRACK_TEST_CMD_PATTERN:-}" ]; then
+  if [ -n "$seg_pat" ]; then seg_pat="($seg_pat)|(${TRACK_TEST_CMD_PATTERN})"
+  else seg_pat="$TRACK_TEST_CMD_PATTERN"; fi
+fi
+n_verifying=0; n_nonverifying=0; verifying_seg=""; last_seg=""
+if [ -n "$seg_pat" ] && [ -n "$segments" ]; then
+  while IFS= read -r seg; do
+    [ -n "$seg" ] || continue
+    printf '%s' "$seg" | grep -Eq "$seg_pat" || continue
+    last_seg="$seg"
+    if printf '%s' "$seg" | grep -Eq "$neutral_re"; then
+      continue
+    elif printf '%s' "$seg" | grep -Eq "$nonverifying_re"; then
+      n_nonverifying=$((n_nonverifying+1))
+    else
+      n_verifying=$((n_verifying+1)); verifying_seg="$seg"
+    fi
+  done <<<"$segments"
+fi
+# NOT EVIDENCE AT ALL — the same exit the heredoc/quote sanitiser takes, and for the same
+# reason: this command is not what it looks like. Recording it as a vacuous capture would be
+# worse than not recording it, because the gate reads the LATEST capture per kind — so the
+# perfectly normal `<tool> … > /tmp/x.log` in one call followed by `cat /tmp/x.log` in the
+# next would let the read clobber the real run and block the gate. Dropping it leaves the
+# real capture standing; and when there is no real capture, the gate says the kind is
+# MISSING, which is both true and clearer than "verified nothing".
+if [ "$n_nonverifying" -gt 0 ] && [ "$n_verifying" -eq 0 ]; then exit 0; fi
+
 # --- pick a concise, single-line command for display --------------------------
 # `cmd` (below, in the record write) is the RAW tool call verbatim — often a
 # whole shell block (cd / setup / debugging / the real invocation), not just
@@ -131,16 +199,30 @@ fi
 # (which can just as easily cut off before reaching the real invocation). The
 # full raw block is preserved as `cmd_full` (only when it actually differs) so
 # nothing is lost for an audit that wants the whole picture.
+#
+# Prefer the last VERIFYING segment over the last matching line. Picking by line put
+# `GCL=/…/golangci-lint-2.12.2/…/golangci-lint` — a bare variable assignment — into a real
+# PR's evidence table as the command proving the Go lint passed, because the actual run
+# (`$GCL config verify`) never spells the tool's name. Falling back to the last matching
+# segment, then to the last matching line, keeps the previous behaviour when nothing
+# classifies.
 cmd_display="$cmd"
 if [ "$(printf '%s\n' "$cmd" | wc -l)" -gt 1 ]; then
-  line_pat="$kind_pat"
-  if [ -n "${TRACK_TEST_CMD_PATTERN:-}" ]; then
-    if [ -n "$line_pat" ]; then line_pat="($line_pat)|(${TRACK_TEST_CMD_PATTERN})"
-    else line_pat="$TRACK_TEST_CMD_PATTERN"; fi
-  fi
-  if [ -n "$line_pat" ]; then
+  line_pat="$seg_pat"
+  if [ -n "$verifying_seg" ]; then
+    cmd_display="$verifying_seg"
+  elif [ -n "$last_seg" ]; then
+    cmd_display="$last_seg"
+  elif [ -n "$line_pat" ]; then
     picked="$(printf '%s\n' "$cmd_exec" | grep -E "$line_pat" | tail -1 || true)"
     [ -n "$picked" ] && cmd_display="$picked"
+  fi
+  # A bare assignment names no command. When the display resolved to one, show what the
+  # block did with it instead: the first later segment that dereferences the variable.
+  var="$(printf '%s' "$cmd_display" | sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)=.*$/\1/p')"
+  if [ -n "$var" ]; then
+    used="$(printf '%s\n' "$segments" | grep -F "\$$var" | grep -v "^[[:space:]]*$var=" | head -1 || true)"
+    [ -n "$used" ] && cmd_display="$used"
   fi
 fi
 
@@ -164,8 +246,16 @@ rci="$(jq -r '.tool_response.returnCodeInterpretation // empty' <<<"$input" 2>/d
 
 # Shared default. `exit[: ]N` catches the `echo "exit: $?"` idiom agents use to make
 # a status visible, which no previous pattern matched.
+# `\bERROR\b` is CASE-SENSITIVE, and most tools do not shout. On a real run
+#   `error while interpolating services.postgres.environment.POSTGRES_PASSWORD:
+#    required variable POSTGRES_PASSWORD is missing a value`
+# — `docker compose config` exiting 1 — was graded `pass / no-failure-signal`, while the
+# identical failure 30 seconds later graded `fail` only because that block happened to
+# `echo "exit: $?"`. The lowercase forms below close the gap; they are deliberately
+# punctuated or multi-word (`error:`, `error while`) rather than a bare case-insensitive
+# `error`, which would fail every capture that prints "0 errors".
 fail_re="${TRACK_FAIL_PATTERN:-}"
-[ -n "$fail_re" ] || fail_re='\bFAIL\b|FAILED|--- FAIL|panic:|Traceback|AssertionError|error TS[0-9]|\bERROR\b|npm ERR!|✖|✗|exit(_code)?:?[[:space:]]*(code|status)?[[:space:]]*[1-9][0-9]*\b|exit code [1-9]|[1-9][0-9]* (failed|error)'
+[ -n "$fail_re" ] || fail_re='\bFAIL\b|FAILED|--- FAIL|panic:|Traceback|AssertionError|error TS[0-9]|\bERROR\b|npm ERR!|✖|✗|exit(_code)?:?[[:space:]]*(code|status)?[[:space:]]*[1-9][0-9]*\b|exit code [1-9]|[1-9][0-9]* (failed|error)|(^|[^[:alnum:]_])[Ee]rror:|(^|[^[:alnum:]_])error while[[:space:]]|command not found|No such file or directory|[Pp]ermission denied|can.t load config'
 
 if [ -n "$exit_code" ] && [ "$exit_code" != "0" ] && [ "$exit_code" != "null" ]; then
   verdict="fail"; verdict_by="exit-code:$exit_code"
@@ -195,6 +285,20 @@ vacuous=false
 if [ "$verdict" = "pass" ] && printf '%s' "$resp" | grep -Eqi "$vacuous_re"; then
   vacuous=true
   verdict_by="vacuous-pass:nothing-verified"
+fi
+
+# --- attestation: is this green backed by an exit code, or only by silence? ----
+# PostToolUse on this surface carries no exit code (tool_response is {stdout, stderr,
+# interrupted, isImage, noOutputExpected}), so both stronger signals above are always empty
+# and every verdict falls through to text matching — where a PASS means "no failure marker
+# was printed", which is also what an empty string means. The agent-side idiom
+# `<cmd>; echo "<kind> exit: $?"` is what makes a green checkable, and the run that prompted
+# this recorded both shapes: its final convergence captures all carried the marker, its
+# earlier ones did not, and the two graded differently for that reason alone.
+# Recorded, never graded here — E2 reports the count.
+attested=true
+if [ -z "$exit_code" ] && [ -z "$rci" ] && ! printf '%s' "$resp" | grep -Eq 'exit(_code)?:?[[:space:]]*(code|status)?[[:space:]]*[0-9]+\b|exit code [0-9]'; then
+  attested=false
 fi
 
 RUNS_DIR="${RUNS_DIR:-runs}"
@@ -260,10 +364,11 @@ fingerprint="$(
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 tmp="$(mktemp)"
 jq --arg t "$ts" --arg k "$kind" --arg c "$cmd_display" --arg cf "$cmd" --arg r "$resp" --arg f "$fingerprint" \
-   --arg v "$verdict" --arg vb "$verdict_by" --argjson vac "$vacuous" \
+   --arg v "$verdict" --arg vb "$verdict_by" --argjson vac "$vacuous" --argjson att "$attested" \
   '.evidence = ((.evidence // []) + [
       {t:$t, kind:$k, cmd:$c, response:$r, fingerprint:$f, verdict:$v, verdict_by:$vb}
       + (if $c != $cf then {cmd_full:$cf} else {} end)
       + (if $vac then {vacuous:true} else {} end)
+      + (if $att then {} else {attested:false} end)
     ]) | .started_ts = (.started_ts // $t) | .last_ts = $t' "$rec" >"$tmp" && mv "$tmp" "$rec"
 exit 0

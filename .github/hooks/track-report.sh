@@ -70,6 +70,48 @@ case "$RUNS_DIR" in
     unset __rgcd
     ;;
 esac
+# --- the auto block's self-attestation ---------------------------------------
+# The block between the BEGIN/END markers is machine-rendered and says so. Nothing
+# enforced it. On a real client PR the markers were intact and everything between them had
+# been RE-TYPED: the summary singularised ("1 warning · 0 failures" for
+# "1 warning(s) · 0 failure(s)"), the findings table cut from four columns to three
+# (dropping "How to clear it"), the "not a clean bill of health" caveat paraphrased, the
+# <details> list of un-checked invariants deleted, and the one WARN rewritten into an
+# exculpatory paragraph asserting compliance no artifact showed. A reader has no way to tell
+# that from a render — the markers are the only signal, and they survived.
+#
+# So the END marker now carries a sha of the block content. Recomputing it is mechanical, so
+# `--verify-body` can settle it locally at `gh pr create` (track-guard.sh) and in CI
+# (agent-pr-audit.yml) instead of both re-deriving "what a genuine render looks like" from
+# its shape. This does not make forgery impossible — a determined caller can re-hash — but it
+# ends the SILENT case, which is the one that actually happened.
+block_sha() { # stdin → sha1 of the block content
+  if command -v shasum >/dev/null 2>&1; then shasum; else sha1sum; fi | cut -d' ' -f1
+}
+BEGIN_MARK='<!-- BEGIN track-report auto block — machine-rendered, do not hand-edit -->'
+
+# --verify-body <file> — exit 0 verified · 3 tampered · 4 no block / no sha / unreadable.
+# Deliberately BEFORE run-id recovery: verification reads only the file it is given, so it
+# works from a worktree, in CI, and for a run whose record is long gone.
+if [ "${1:-}" = "--verify-body" ]; then
+  body_file="${2:-}"
+  [ -n "$body_file" ] && [ -f "$body_file" ] \
+    || { printf 'track-report: --verify-body needs a readable file\n' >&2; exit 4; }
+  if ! grep -qF "$BEGIN_MARK" "$body_file"; then
+    printf 'no auto block in %s\n' "$body_file"; exit 4
+  fi
+  end_line="$(grep -n '^<!-- END track-report auto block' "$body_file" | head -1 || true)"
+  [ -n "$end_line" ] || { printf 'auto block has a BEGIN marker but no END marker\n' >&2; exit 3; }
+  claimed="$(printf '%s' "${end_line#*:}" | sed -n 's/.*sha=\([0-9a-f]\{40\}\).*/\1/p')"
+  [ -n "$claimed" ] || { printf 'auto block carries no sha= in its END marker — rendered by an older track-report.sh, or hand-authored\n' >&2; exit 4; }
+  begin_n="$(grep -nF "$BEGIN_MARK" "$body_file" | head -1 | cut -d: -f1)"
+  end_n="${end_line%%:*}"
+  actual="$(sed -n "${begin_n},$((end_n - 1))p" "$body_file" | block_sha)"
+  if [ "$claimed" = "$actual" ]; then printf 'auto block verified (sha=%s)\n' "$actual"; exit 0; fi
+  printf 'auto block does NOT match its own sha (claims %s, content hashes to %s)\n' "$claimed" "$actual" >&2
+  exit 3
+fi
+
 emit_json=0
 run_id="${RUN_ID:-}"
 for arg in "$@"; do
@@ -215,7 +257,13 @@ md_group_by_area() {
   '
 }
 
-printf '<!-- BEGIN track-report auto block — machine-rendered, do not hand-edit -->\n'
+# Buffered to a FILE rather than a `$( … )` capture: the block's own renderers contain jq
+# programs with parenthesised strings, and bash 3.2 (the system bash on macOS, where these
+# hooks run) mis-scans for the closing paren of a command substitution that encloses them.
+_ab="$(mktemp)"
+trap 'rm -f "$_ab"' EXIT
+{
+printf '%s\n' "$BEGIN_MARK"
 printf '### Run `%s`\n\n' "$run_id"
 [ -n "$d_branch" ] && printf -- '- **Branch:** `%s`\n' "$d_branch"
 [ -n "$d_tasks" ]  && printf -- '- **Tasks:** %s\n' "$d_tasks"
@@ -249,29 +297,80 @@ printf '\n_%s_\n' "$stat_line"
 # Evidence — pass/fail derived from the recorded response text, fingerprint shown.
 printf '\n#### Evidence\n\n'
 if [ -f "$rec" ] && [ "$(jq -r '.evidence | length' "$rec" 2>/dev/null || echo 0)" -gt 0 ]; then
-  printf '| Kind | Command | Result | Fingerprint |\n|---|---|---|---|\n'
   # Read the verdict track-evidence.sh recorded at capture; only fall back to
   # grepping for records written before verdicts existed. This script used to carry
   # its own default fail-pattern, which differed from the gate's — so the same
   # capture could be ❌ here and acceptable there, with neither side flagging it.
   fail_pat="${TRACK_FAIL_PATTERN:-FAIL|--- FAIL|Error:|panic:|Traceback|AssertionError|✗|npm ERR!}"
-  jq -r --arg fp "$fail_pat" '
-    # A captured command can be a whole multi-line shell block (cd / setup / the
-    # actual test), not a one-liner. `.cmd` is the RAW command verbatim — good for
-    # the JSON record, fatal for a GFM table cell: a literal newline ends the row,
-    # so everything after the first line loses its leading "|" and renders as a
-    # bare text blob with no visible Command/Result/Fingerprint columns. Collapse
-    # to one line for display only; the full command still lives in the record.
-    def display_cmd:
-      gsub("\r\n|\r|\n"; "; ")
-      | gsub("[ \t]+"; " ")
-      | sub("^[ \t;]+"; "") | sub("[ \t;]+$"; "")
-      | if (length > 240) then .[0:240] + " …" else . end;
-    .evidence[] |
-    (if (.verdict // "") != "" then (.verdict == "fail")
-     else ((.response // "") | test($fp)) end) as $failed |
-    "| \(.kind // "?") | `\((.cmd // "?") | display_cmd | gsub("\\|";"\\|"))` | \(if $failed then "❌ FAIL" else "✅ pass" end) | `\((.fingerprint // "?")[0:12])` |"
-  ' "$rec" 2>/dev/null || printf '| _(evidence unreadable)_ | | | |\n'
+
+  # LATEST PER KIND FIRST; everything else is superseded and collapsed.
+  #
+  # This used to dump `evidence[]` whole — every capture ever taken, in one flat table, with
+  # no marking of which rows anything actually read. On a real client run that was 31 rows
+  # for 7 kinds across 5 fingerprints, six of them ❌, and the six failures were all stale
+  # intermediate states that a later capture of the same kind had already fixed. Nothing in
+  # the table said so, so the run's author wrote a paragraph underneath explaining which
+  # failures didn't count — hand-authored prose doing the job of a renderer, inside the block
+  # that is supposed to be the un-authored half of the PR (and which the sha now freezes).
+  #
+  # The gate and `E1` only ever read ONE capture per kind: the latest. So that is the table,
+  # and the rest goes into a <details> labelled for what it is. Nothing is hidden — a
+  # superseded failure is still one click away, and still says ❌ — but a reviewer can see at
+  # a glance what the current tree proves without being told in prose which rows to ignore.
+  ev_rows() { # ev_rows latest|earlier
+    jq -r --arg fp "$fail_pat" --arg want "$1" '
+      # A captured command can be a whole multi-line shell block (cd / setup / the
+      # actual test), not a one-liner. `.cmd` is the RAW command verbatim — good for
+      # the JSON record, fatal for a GFM table cell: a literal newline ends the row,
+      # so everything after the first line loses its leading "|" and renders as a
+      # bare text blob with no visible Command/Result/Fingerprint columns. Collapse
+      # to one line for display only; the full command still lives in the record.
+      def display_cmd:
+        gsub("\r\n|\r|\n"; "; ")
+        | gsub("[ \t]+"; " ")
+        | sub("^[ \t;]+"; "") | sub("[ \t;]+$"; "")
+        | if (length > 240) then .[0:240] + " …" else . end;
+      (.evidence // []) as $ev
+      | ($ev | last | .fingerprint // "") as $final
+      | ($ev | to_entries | group_by(.value.kind) | map(last | .key)) as $keep
+      | $ev | to_entries[]
+      # Bind the index first: `index(.key)` would evaluate `.key` against $keep (the array
+      # index() is reading), not against this entry.
+      | .key as $i
+      | (($keep | index($i)) != null) as $is_latest
+      | select(if $want == "latest" then $is_latest else ($is_latest | not) end)
+      | .value
+      | (if (.verdict // "") != "" then (.verdict == "fail")
+         else ((.response // "") | test($fp)) end) as $failed
+      # A VACUOUS capture is a pass that checked nothing — an empty build, or a command that
+      # only installed/located the tool. Rendering it ✅ beside a real suite is how a client
+      # PR certified `go-build ✅ pass` for a build that compiled zero packages. Same row,
+      # different symbol: the gate and the audit treat these as unproven, and the PR must not
+      # read stronger than they do.
+      | (if $failed then "❌ FAIL"
+         elif (.vacuous // false) then "⚠️ passed, verified nothing"
+         else "✅ pass" end) as $result
+      # A latest capture at an OLD fingerprint is the staleness E1 exists to catch: it proves
+      # a tree that no longer exists. Say so in the row rather than leaving a reader to
+      # compare twelve hex characters by eye.
+      | (if ($want == "latest") and $final != "" and (.fingerprint // "") != $final
+         then " ⏱ stale" else "" end) as $stale
+      | "| \(.kind // "?") | `\((.cmd // "?") | display_cmd | gsub("\\|";"\\|"))` | \($result) | `\((.fingerprint // "?")[0:12])`\($stale) |"
+    ' "$rec" 2>/dev/null; }
+
+  n_earlier="$(jq -r '(.evidence // []) as $ev
+                      | (($ev | to_entries | group_by(.value.kind) | map(last.key)) | length) as $k
+                      | ($ev | length) - $k' "$rec" 2>/dev/null || echo 0)"
+  printf '| Kind | Command | Result | Fingerprint |\n|---|---|---|---|\n'
+  ev_rows latest || printf '| _(evidence unreadable)_ | | | |\n'
+  printf '\n_Latest capture per kind — the rows the Stop gate and `E1` actually read._\n'
+  if [ "${n_earlier:-0}" -gt 0 ]; then
+    printf '\n<details><summary>%s earlier capture(s) — superseded by a later run of the same kind</summary>\n\n' "$n_earlier"
+    printf '| Kind | Command | Result | Fingerprint |\n|---|---|---|---|\n'
+    ev_rows earlier
+    printf '\n_Kept because the record is append-only. A ❌ here was an intermediate state, not the state this PR ships — the row above it, for the same kind, is what the gate read. A ❌ that was deliberate (a negative test whose command MUST fail) is not something any artifact can distinguish; say so in your own section below the auto block._\n'
+    printf '</details>\n'
+  fi
 else
   printf '_No evidence rows recorded (evidence hooks not enabled, or none captured)._\n'
 fi
@@ -391,6 +490,11 @@ fi
 
 # The verdict, last in the machine-rendered zone — see the note above its definition.
 render_discipline_audit
+printf '\n'
+} > "$_ab"
 
-printf '\n<!-- END track-report auto block -->\n'
+# The sha covers everything from the BEGIN marker to the line before END, exactly as
+# --verify-body recomputes it. Emitted together so a body pasted verbatim always verifies.
+cat "$_ab"
+printf '<!-- END track-report auto block · sha=%s -->\n' "$(block_sha < "$_ab")"
 exit 0

@@ -149,7 +149,7 @@ remediation_for() {
     G2) printf 'Read the missing .github/instructions/* file(s) and add their binding constraints to the bundle, then re-pin it.' ;;
     G3) printf 'Governance must be discovered and pinned BEFORE any subagent is dispatched. Re-run the affected dispatches with the bundle content embedded in each brief.' ;;
     G4) printf 'Read security-and-owasp.instructions.md, add its relevant constraints to the bundle, and re-review the trust-boundary diff against them.' ;;
-    G5) printf 'The bundle names the file but distils nothing from it. Re-read the matched instruction file and write its binding constraints under that heading as concrete bullets (`pin image tags, never :latest`, not `follow container best practice`), then re-pin the bundle.' ;;
+    G5) printf 'The bundle names the file but distils too little from it. Re-read the matched instruction file and write its binding constraints under that heading as concrete bullets — at least 5 per matched file (TRACK_GOV_MIN_BULLETS), each actionable (`pin image tags, never :latest`, not `follow container best practice`). The bundle budget is ~500 lines total, so add what binds this diff rather than trimming to fit, then re-pin the bundle.' ;;
     G6) printf 'Embed the bundle CONTENT in every maker/reviewer brief — the constraint lines themselves, sliced to the cluster, never the filenames. Re-dispatch the affected briefs. A dispatch that genuinely needs no governance (read-only research) must say so in the brief: "GOVERNANCE: n/a — <why>". If the finding is that the hook is unwired, run install-hooks.sh --apply.' ;;
     I1) printf 'Isolate the work first: run using-git-worktrees to place it in a dedicated worktree on its own branch. Never work on the default branch; branch-in-place is allowed only when using-git-worktrees routes there AND that limitation was surfaced.' ;;
     I2) printf 'Re-run track-preflight.sh --persist for this track so the breadcrumb records the branch actually in use, or move the work to the approved branch. Do not let the approved plan and the real work diverge.' ;;
@@ -161,7 +161,8 @@ remediation_for() {
     T1) printf 'Story mode requires the RED suite to fail BEFORE implementation. Confirm the tests were authored first; if they were not, this is not TDD.' ;;
     T2) printf 'Never green a frozen test by weakening it. Restore the assertion / remove the skip, and route a genuinely wrong test back through its review gate.' ;;
     E1) printf 'Freeze edits, then re-run EVERY required evidence kind back-to-back so all captures share one fingerprint (the convergence gate).' ;;
-    E2) printf 'Re-run the suite and capture the full output. A truncated pass-looking response satisfies the evidence gate without proving anything.' ;;
+    E2) printf 'Re-run the suite and capture the full output, ending each evidence command with `; echo "<kind> exit: $?"`. A truncated pass-looking response satisfies the evidence gate without proving anything, and this surface reports no exit code of its own.' ;;
+    E4) printf 'The capture passed but checked nothing — an empty build, or a command that only installed/located the tool (`brew install actionlint`, `which golangci-lint`). Run the tool against real sources and re-capture. If there is genuinely nothing to verify on this tree yet (a scaffold with no sources), declare it instead: track-note.sh evidence-na <kind> "<why>".' ;;
     F1) printf 'Record the terminal state before finishing: track-note.sh status <success|blocked|no-progress|budget-exceeded> "<blocker>" "<next step>".' ;;
     *)  printf '' ;;
   esac
@@ -281,7 +282,13 @@ fi
 #
 # Deliberately not a judgement of quality — no regex knows whether "pin image tags" is the
 # right constraint for this diff. It bounds the floor: something actionable is there to embed.
-gov_min_bullets="${TRACK_GOV_MIN_BULLETS:-2}"
+#
+# The floor is 5, raised from 2 alongside the bundle's own ~500-line ceiling. Two bullets is
+# what a *theme* summary of an instruction file looks like ("wrap errors", "test things"); the
+# specifics a maker needs to avoid a review round-trip do not fit in two lines of a ~1,100-line
+# file. Raising the ceiling without raising this floor would have left the cheapest passing
+# bundle unchanged, which is the shape the gate keeps catching in real runs.
+gov_min_bullets="${TRACK_GOV_MIN_BULLETS:-5}"
 if [ -f "${gov_path:-/nonexistent}" ] && [ -n "$matched_instr" ]; then
   hollow=""
   while IFS= read -r base_name; do
@@ -617,10 +624,30 @@ if [ -n "$expected" ] && [ "$phase_count" -gt 0 ]; then
     printf '%s' "$seen" | grep -qi -- "$g" || gaps="$gaps $g"
   done
   gaps="$(printf '%s' "$gaps" | sed 's/^ *//')"
-  if [ -n "$gaps" ]; then
+  # ORDER, not just presence. This was a set-membership test, and a gate SEQUENCE that only
+  # checks membership is not checking the sequence: one real scaffold run stamped
+  # apply+materialize, then review+convergence, and only THEN generate — four minutes after
+  # its last subagent had already stopped — and P2 passed it because all five words appeared
+  # somewhere. Compare first occurrences: each canonical step must first appear no earlier
+  # than the one before it. Gaps are skipped rather than treated as position 0, so a
+  # legitimately collapsed run is reported by the gap arm above, not faulted twice here.
+  inversions=""
+  prev_step=""; prev_idx=-1
+  for g in $expected; do
+    idx="$(printf '%s\n' "$seen" | tr ' ' '\n' | grep -in -- "$g" | head -1 | cut -d: -f1 || true)"
+    [ -n "${idx:-}" ] || continue
+    if [ "$prev_idx" -ge 0 ] && [ "$idx" -lt "$prev_idx" ]; then
+      inversions="$inversions ${g}-before-${prev_step}"
+    fi
+    prev_step="$g"; prev_idx="$idx"
+  done
+  inversions="$(printf '%s' "$inversions" | sed 's/^ *//')"
+  if [ -n "$inversions" ]; then
+    add P2 WARN "mode '$run_mode' stamped its gates OUT OF ORDER:$inversions — the log says a later gate was entered before an earlier one, so either a step ran out of sequence or its stamp was written after the fact${gaps:+ (also unstamped:$gaps)}"
+  elif [ -n "$gaps" ]; then
     add P2 WARN "mode '$run_mode' has no phase stamp for:$gaps (collapsed steps, or a skipped gate)"
   else
-    add P2 PASS "phase log covers every canonical gate for $run_mode mode"
+    add P2 PASS "phase log covers every canonical gate for $run_mode mode, in order"
   fi
 else
   add P2 WARN "no execution core recorded in .phase.mode — cannot check the gate sequence"
@@ -766,17 +793,69 @@ fi
 # the gate only asserts a fingerprint match plus the absence of a failure marker, and
 # absence-of-marker is trivially true for a truncated string. Short FAILING captures are
 # not flagged — a terse failure is normal, and it can never fake its way past the gate.
+#
+# MEASURE THE OUTPUT, NOT THE ENVELOPE. `.response` holds `tool_response` as the surface
+# returned it, and on Claude Code that is a serialized object —
+# `{"stdout":"exit: 0","stderr":"","interrupted":false,"isImage":false,...}` is ~110 chars
+# of punctuation wrapped around 7 chars of proof. Measuring the string made the 40-char
+# floor unreachable, so this check has been silently inert on that surface: a real run's
+# `cat /tmp/actionlint.log` capture, whose entire evidence was `exit: 0`, cleared it. Unwrap
+# to stdout+stderr when the response parses as JSON; measure it verbatim when it does not.
+#
+# It also reports UNATTESTED greens. PostToolUse carries no exit code on this surface, so a
+# `pass` means "printed no failure marker" — which an empty string also does. The agent-side
+# `<cmd>; echo "<kind> exit: $?"` idiom is what turns that into a checkable claim, and
+# track-evidence.sh now records `attested:false` when it is absent.
 if [ "$ev_count" -gt 0 ]; then
   short=0
   while IFS= read -r resp; do
     [ -n "$resp" ] || continue
     printf '%s' "$resp" | grep -Eq "$fail_re" && continue   # a failure, not a false green
     [ "${#resp}" -lt 40 ] && short=$((short+1))
-  done <<<"$(jq -r '.evidence[]? | (.response // "") | gsub("\n"; " ")' "$rec" 2>/dev/null || true)"
+  done <<<"$(jq -r '.evidence[]?
+                    | ((.response // "") | (fromjson? // .))
+                    | (if type == "object" then ((.stdout // "") + (.stderr // "")) else (. | tostring) end)
+                    | gsub("\n"; " ")' "$rec" 2>/dev/null || true)"
+  unattested="$(jq -r '[.evidence[]? | select((.verdict // "") != "fail" and .attested == false)] | length' "$rec" 2>/dev/null || echo 0)"
+  unattested="${unattested:-0}"
   if [ "$short" -gt 0 ]; then
-    add E2 WARN "$short passing capture(s) under 40 chars — too short to prove a suite ran, and the gate cannot tell the difference; read the real output"
+    add E2 WARN "$short passing capture(s) under 40 chars of real output — too short to prove a suite ran, and the gate cannot tell the difference; read the real output"
+  elif [ "$unattested" -gt 0 ]; then
+    add E2 WARN "$unattested passing capture(s) carry no exit code — this surface reports none, so the verdict rests on 'printed no failure marker', which an empty output also satisfies; append '; echo \"<kind> exit: \$?\"' to each evidence command"
   else
-    add E2 PASS "passing captures are substantial enough to be worth reading"
+    add E2 PASS "passing captures are substantial enough to be worth reading, and each carries an exit code"
+  fi
+fi
+
+# E4 — did the LATEST capture for each required kind actually verify anything?
+#
+# track-evidence.sh flags a capture `vacuous` when its output says nothing was checked
+# ("matched no packages", "[no test files]") or when every segment naming the tool merely
+# fetched or located it (`brew install actionlint`, `which golangci-lint`). Until this check
+# the flag had no reader anywhere in the bundle: the Stop gate passed vacuous captures, the
+# report printed them ✅, and a real client PR certified `go-build ✅ pass` for a build that
+# compiled zero packages while `ci-lint ✅ pass` pointed at `brew install actionlint`.
+#
+# A declaration clears it — `track-note.sh evidence-na <kind> "<why>"` — because on a
+# scaffold there is sometimes genuinely nothing to build yet. Undeclared is a FAIL: the run
+# is asserting verification it does not have.
+if [ "$ev_count" -gt 0 ]; then
+  vac_bad=""; vac_ok=""
+  while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    jq -e --arg k "$k" '[.evidence[]? | select(.kind == $k)] | last | .vacuous == true' \
+       >/dev/null 2>&1 "$rec" || continue
+    if jq -e --arg k "$k" '[.evidence_na[]? | select(.kind == $k)] | length > 0' \
+         >/dev/null 2>&1 "$rec"; then vac_ok="$vac_ok $k"; else vac_bad="$vac_bad $k"; fi
+  done <<<"$(jq -r '[.evidence[]? | .kind] | unique | .[]' "$rec" 2>/dev/null || true)"
+  vac_bad="$(printf '%s' "$vac_bad" | sed 's/^ *//')"
+  vac_ok="$(printf '%s' "$vac_ok" | sed 's/^ *//')"
+  if [ -n "$vac_bad" ]; then
+    add E4 FAIL "the latest capture for these kinds passed while verifying nothing (empty build, or a command that only installed/located the tool):$vac_bad"
+  elif [ -n "$vac_ok" ]; then
+    add E4 WARN "verified nothing, but declared:$vac_ok — an explicit 'track-note.sh evidence-na' is on record for each; confirm the reason still holds"
+  else
+    add E4 PASS "every kind's latest capture checked real files"
   fi
 fi
 

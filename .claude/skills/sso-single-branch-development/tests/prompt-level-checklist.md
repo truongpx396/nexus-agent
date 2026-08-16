@@ -1,6 +1,6 @@
 # Prompt-Level Invariant Checklist
 
-*13 items automated · 4 partly automated · 13 human-only*
+*14 items automated · 4 partly automated · 13 human-only*
 
 **Most of this list is now automated — run [`../scripts/track-audit.sh`](../scripts/track-audit.sh)
 first.** It re-derives every ⚙️-marked item below from durable artifacts (the run record, the
@@ -41,12 +41,12 @@ What a reviewer sees in the PR body when a step is missed:
 | — Compaction mid-run | ⚙️ `I4` (a dispatch after a compaction with no bundle re-read in between, **or** a first post-compaction brief that carried none of the bundle) |
 | 3 Isolate | ⚙️ `I1` (on the default branch → FAIL; branch-in-place → WARN) |
 | 4 Governance gate | ⚙️ `G1`–`G6` (`G5` bundle substance, `G6` the brief actually carried it) |
-| 4 Mode guard + core | ⚙️ `P1`/`P2`, `T1`, `T2` |
+| 4 Mode guard + core | ⚙️ `P1`/`P2` (gates present **and in order**), `T1`, `T2` |
 | 5 Convergence | ⚙️ `E1` |
-| 6 Evidence gate | ⚙️ `E2` + the evidence table + compliance warnings |
+| 6 Evidence gate | ⚙️ `E2`/`E4` + the evidence table + compliance warnings |
 | 7 Run record | rendered in the Auto block |
 | 8 Terminal state | ⚙️ `F1` |
-| **the whole bundle** | 🏗 CI (`agent-pr-audit.yml`) — a run that skipped everything produces *no* Auto block, and a reporter cannot report on its own absence, so the check lives outside the agent. Scope comes from five signals, not the agent's own `agent-generated` label: a run that skips the bundle also skips the labeling step, so the load-bearing signal is the harness-written `Co-Authored-By` commit trailer. CI also cross-checks the block's declared counts against its rendered rows, since a hand-edited block is the last way a failing audit reaches a reviewer looking clean |
+| **the whole bundle** | 🏗 CI (`agent-pr-audit.yml`) — a run that skipped everything produces *no* Auto block, and a reporter cannot report on its own absence, so the check lives outside the agent. Scope comes from five signals, not the agent's own `agent-generated` label: a run that skips the bundle also skips the labeling step, so the load-bearing signal is the harness-written `Co-Authored-By` commit trailer. CI also cross-checks the block's declared counts against its rendered rows and re-hashes the block against the sha in its own END marker, since a hand-edited block is the last way a failing audit reaches a reviewer looking clean — and the guard now settles the same question locally, denying `gh pr create` when the body's block no longer matches its sha |
 
 ---
 
@@ -61,9 +61,11 @@ What a reviewer sees in the PR body when a step is missed:
 - [ ] ⚙️ **A3** `[G2, G4]` — Every `applyTo`-matching instruction file appears in the bundle for the
       actual diff surface; `security-and-owasp` whenever a trust-boundary path is touched.
 - [ ] ⚙️ **A4** `[G1]` — `runs/<RUN_ID>.governance.md` exists and its sha still matches the latest pin.
-- [ ] ⚙️ **A4b** `[G5]` — Each matched file's bundle section carries **actionable constraints**, not
-      just a heading. G2 is a substring test and a hollow section satisfies it; G5 reads the section
-      body and fails a bundle that names a file without distilling anything from it.
+- [ ] ⚙️ **A4b** `[G5]` — Each matched file's bundle section carries **≥5 actionable constraints**,
+      not just a heading. G2 is a substring test and a hollow section satisfies it; G5 reads the
+      section body and fails a bundle that names a file without distilling enough from it to brief a
+      maker. The bundle budget is ~500 lines, so a thin section is under-distillation, never a
+      necessary trade against context.
 - [ ] ⚙️✋ **A5** `[G6]` — Maker briefs embed governance **content**, not filenames.
       `track-brief.sh` (PreToolUse on the dispatch tool) reads the outgoing brief and counts how many
       bundle constraint lines it carries, so *"Follow `go.instructions.md`"* — zero lines — is now a
@@ -91,7 +93,9 @@ What a reviewer sees in the PR body when a step is missed:
 ## B. Compaction resilience (the invariant that silently degrades)
 
 - [ ] ⚙️ **B1** `[P1, P2]` — `phase` was stamped, and `phase_log[]` covers the canonical gate
-      sequence for the recorded core.
+      sequence for the recorded core **in order**. Presence alone is not the sequence: one real run
+      stamped apply → review → convergence → *generate*, four minutes after its last subagent had
+      already stopped, and a membership test passed it because every word was there somewhere.
 - [ ] ⚙️ **B2** `[I4]` — If the session was compacted: the bundle was **re-read from disk** before the
       next dispatch, **and the first brief after the compaction actually carried its constraints**.
       `track-compact.sh` records both halves of the re-read as hook-observed facts (`compactions[]`
@@ -138,11 +142,18 @@ What a reviewer sees in the PR body when a step is missed:
 
 - [ ] ⚙️ **E1** `[E1]` — Every kind's latest capture shares **one** fingerprint (the convergence
       gate), with no edit after it.
-- [ ] ⚙️✋ **E2** `[E2]` — The audit warns on suspiciously short *passing* captures, since a
-      truncated pass-looking response satisfies the gate trivially. Whether the output was actually
-      **read** is yours.
+- [ ] ⚙️✋ **E2** `[E2]` — The audit warns on suspiciously short *passing* captures — measured on the
+      command's **output**, not the JSON envelope wrapped around it — and on greens carrying no exit
+      code, since this surface reports none and "printed no failure marker" is also what an empty
+      output does. Whether the output was actually **read** is yours.
 - [ ] ✋ **E3** — No completion claimed before the creating command returned. "Draft PR opened"
       requires a printed PR URL.
+- [ ] ⚙️ **E4** `[E4]` — No kind's latest capture is a green that verified **nothing**: an
+      empty build (`matched no packages`) — a real invocation that checked nothing. (A command that
+      only installed or located the tool, like `brew install actionlint`, never becomes a capture at
+      all.) Undeclared is a FAIL and the Stop gate blocks it; if there is
+      genuinely nothing to verify on this tree yet, `track-note.sh evidence-na <kind> "<why>"` puts
+      that on the record and downgrades it to a WARN a reviewer can weigh.
 
 ## F. Terminal states
 
