@@ -410,21 +410,25 @@ func mustInsertTool(ctx context.Context, t *testing.T, pool *pgxpool.Pool, tenan
 	}
 
 	toolID := fmt.Sprintf("tenant-fixture/%s@1.0.0", name)
+	// descriptor_digest is bytea NOT NULL with no default (0001_config.sql);
+	// a deterministic per-fixture digest keeps this insert valid without
+	// pretending the value carries any real provenance.
+	descriptorDigest := []byte("test-fixture-descriptor-digest:" + toolID)
 	_, err = tx.Exec(ctx, `
 		INSERT INTO tools (
-			tool_id, namespace, name, tool_version, source_ref, tenant_id,
+			tool_id, namespace, name, tool_version, source_ref, descriptor_digest, tenant_id,
 			description, input_schema, disclosure, capability, concurrency_safe,
 			returns_untrusted, reads_private_data, mutates_external,
 			catalog_scan_status, scan_policy_version, scanned_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6,
-			$7, $8, $9, $10, $11,
-			$12, $13, $14,
-			$15, $16, now()
+			$1, $2, $3, $4, $5, $6, $7,
+			$8, $9, $10, $11, $12,
+			$13, $14, $15,
+			$16, $17, now()
 		)
 		ON CONFLICT (tool_id) DO NOTHING
 	`,
-		toolID, "tenant-fixture", name, "1.0.0", "builtin", tenantID,
+		toolID, "tenant-fixture", name, "1.0.0", "builtin", descriptorDigest, tenantID,
 		"integration test fixture tool", "{}", "resident", "read_only", "read_only",
 		false, false, false,
 		"clean", "v1",
