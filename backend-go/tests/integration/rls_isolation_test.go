@@ -23,9 +23,15 @@
 // indistinguishable in CI (see errDockerUnavailable).
 //
 // All queries whose results are asserted against run as a restricted
-// NOSUPERUSER NOBYPASSRLS role; a Postgres superuser bypasses RLS
-// unconditionally, which would make every assertion here vacuously true (see
-// appUser / createRestrictedAppRole).
+// NOSUPERUSER NOBYPASSRLS role (see appUser / createRestrictedAppRole); a
+// Postgres superuser bypasses RLS unconditionally. Under the first two
+// subtests below, a superuser connection would make cross-tenant rows
+// VISIBLE, so the isolation assertions would loudly FAIL rather than pass
+// vacuously. The third subtest is the genuinely vacuous case: a superuser
+// always sees every tenant's rows, so it would report a false "confirmed
+// leak" that is indistinguishable from the real session-level-SET leak it
+// exists to detect -- mustBeRLSEnforcedPool exists specifically to make
+// that failure mode structurally impossible, not just unlikely.
 package integration
 
 import (
@@ -78,10 +84,14 @@ func TestRLSIsolation(t *testing.T) {
 	// consecutive transactions.
 	//
 	// prodPool authenticates as the SUPERUSER bootstrap role and is used only
-	// to seed fixtures: mustInsertTenant/mustInsertTool insert rows for
-	// arbitrary tenants, which the RLS WITH CHECK clause added by
-	// 0004_rls_null_aware_write_check.sql would (correctly) reject for an
-	// ordinary role. Seeding is admin tooling; asserting is not.
+	// to seed fixtures: mustInsertTenant/mustInsertTool already scope each
+	// insert with setLocalTenant before writing, so the restricted appUser
+	// role below could perform these same inserts too (RLS's WITH CHECK
+	// would not reject them). Seeding still runs as the privileged role on
+	// purpose: fixture setup should not depend on the mechanism under test,
+	// so a bug in appUser's grants can never masquerade as a passing
+	// isolation assertion by silently failing to seed data in the first
+	// place. Seeding is admin tooling; asserting is not.
 	prodPool, err := newPooledClient(ctx, pooledDSN, 3)
 	if err != nil {
 		t.Fatalf("create pooled client through pgbouncer: %v", err)
