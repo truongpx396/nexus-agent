@@ -99,12 +99,14 @@ type Registry struct {
 }
 
 // NewRegistry constructs a Registry from zero or more adapter rows. Every
-// row is validated against the withheld-authority boundary (see Register)
-// -- if ANY row claims a withheld authority, construction fails with an
-// error wrapping ErrWithheldAuthority and the registry holds NONE of the
-// rows (fail closed, no partial admission). Called with no rows at all,
-// NewRegistry succeeds with an empty registry -- the platform must
-// initialize on built-in defaults alone (FR-131, FR-050).
+// row is validated against the closed Port enum and the withheld-authority
+// boundary (see Register) -- if ANY row claims a withheld authority,
+// construction fails with an error wrapping ErrWithheldAuthority; if any
+// row names an unenumerated port, construction fails with a plain error.
+// Either way the registry holds NONE of the rows (fail closed, no partial
+// admission). Called with no rows at all, NewRegistry succeeds with an
+// empty registry -- the platform must initialize on built-in defaults
+// alone (FR-131, FR-050).
 func NewRegistry(specs ...AdapterSpec) (*Registry, error) {
 	r := &Registry{}
 	for _, spec := range specs {
@@ -115,18 +117,41 @@ func NewRegistry(specs ...AdapterSpec) (*Registry, error) {
 	return r, nil
 }
 
-// Register adds spec to the registry after checking its CapabilityMatrix
-// against the withheld-authority boundary. A refused registration must
-// not partially admit the row -- Adapters() must be unchanged after a
-// failed Register call.
+// Register adds spec to the registry after checking (a) that its Port is
+// one of the twelve enumerated ports -- the enum is CLOSED, so an
+// unenumerated port must be refused, not silently admitted -- and (b) its
+// CapabilityMatrix against the withheld-authority boundary. A refused
+// registration must not partially admit the row -- Adapters() must be
+// unchanged after a failed Register call.
+//
+// The withheld-authority check is an ALLOWLIST, not a blocklist: for a
+// withheld dimension, ANY support value other than the explicit
+// FeatureUnsupported is refused. FeatureSupport is a named string type, not
+// a compiler-checked closed enum, so a future value ("partial", which the
+// type's own doc comment anticipates) would slip past an `== FeatureSupported`
+// blocklist. "Safety Is Per-Invocation and Fails Closed: deny unless
+// explicitly granted."
 func (r *Registry) Register(spec AdapterSpec) error {
+	if !validPort(spec.Port) {
+		return fmt.Errorf("integrations: adapter %q has unenumerated port %q", spec.Name, spec.Port)
+	}
 	for dim, support := range spec.Capabilities.Dimensions {
-		if support == FeatureSupported && withheldAuthorities[dim] {
-			return fmt.Errorf("integrations: adapter %q claims withheld authority %q: %w", spec.Name, dim, ErrWithheldAuthority)
+		if withheldAuthorities[dim] && support != FeatureUnsupported {
+			return fmt.Errorf("integrations: adapter %q claims withheld authority %q (support=%q): %w", spec.Name, dim, support, ErrWithheldAuthority)
 		}
 	}
 	r.adapters = append(r.adapters, spec)
 	return nil
+}
+
+// validPort reports whether p is one of the twelve enumerated ports.
+func validPort(p Port) bool {
+	for _, ap := range AllPorts {
+		if ap == p {
+			return true
+		}
+	}
+	return false
 }
 
 // Adapters returns every currently-registered adapter row.

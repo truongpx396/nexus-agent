@@ -175,7 +175,7 @@ func normalizeFieldName(s string) string {
 // implementer cannot defeat the scan by hiding a disallowed field inside a
 // nested type.
 func collectFieldPaths(t reflect.Type, prefix string, out map[string]string) {
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if t.Kind() != reflect.Struct {
@@ -190,7 +190,7 @@ func collectFieldPaths(t reflect.Type, prefix string, out map[string]string) {
 		out[path] = f.Tag.Get("json")
 
 		ft := f.Type
-		for ft.Kind() == reflect.Ptr {
+		for ft.Kind() == reflect.Pointer {
 			ft = ft.Elem()
 		}
 		switch ft.Kind() {
@@ -198,7 +198,7 @@ func collectFieldPaths(t reflect.Type, prefix string, out map[string]string) {
 			collectFieldPaths(ft, path, out)
 		case reflect.Slice, reflect.Array:
 			elem := ft.Elem()
-			for elem.Kind() == reflect.Ptr {
+			for elem.Kind() == reflect.Pointer {
 				elem = elem.Elem()
 			}
 			if elem.Kind() == reflect.Struct {

@@ -88,10 +88,19 @@ func (m Money) Currency() string {
 	return m.currency
 }
 
-// Rat returns m's exact, never-rounded internal rational value. Callers
-// must not mutate the returned *big.Rat.
+// Rat returns a copy of m's exact, never-rounded internal rational value.
+// The copy is defensive: Money is an immutable value type, so handing out
+// the internal *big.Rat would let any caller mutate m's amount in place
+// (m.Rat().SetInt64(...) previously did exactly that). Mutating the
+// returned *big.Rat is therefore harmless -- it cannot affect m.
+//
+// A zero-value Money (never produced by NewMoney) has a nil internal
+// amount; Rat returns nil for it, preserving the prior nil passthrough.
 func (m Money) Rat() *big.Rat {
-	return m.amount
+	if m.amount == nil {
+		return nil
+	}
+	return new(big.Rat).Set(m.amount)
 }
 
 // Add returns a new Money holding the exact sum of m and other, carried as

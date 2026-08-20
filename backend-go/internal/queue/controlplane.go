@@ -18,6 +18,12 @@ const (
 	SinkModeLocal    SinkMode = "local"
 )
 
+// MaxIdentifierFieldLen bounds every identifier field on EgressEnvelope,
+// matching internal/observability.MaxAttrValueLen's precedent for the same
+// reason: bounded metadata egress, never unbounded free text (constitution,
+// "Security & Trust Surface").
+const MaxIdentifierFieldLen = 256
+
 // Valid reports whether m is one of the two recognized sink modes. Any
 // other value (wrong case, an invented bypass string, empty) is invalid --
 // an unrecognized mode must fail the handshake closed, never silently
@@ -85,7 +91,25 @@ type EgressEnvelope struct {
 // event has a failure or a reclaim reason) but, when non-empty, MUST be an
 // EXACT match against its closed set -- an allowlist, never a substring
 // blocklist, because free text must never be trusted by construction.
+//
+// Validate ALSO bounds each of the six identifier fields at
+// MaxIdentifierFieldLen. The contract enumerates which identifiers may
+// cross the boundary; without a length bound each of them is still
+// unbounded free text, which is not "bounded metadata egress". This is a
+// length bound ONLY -- no field is required to be non-empty (not every
+// egress event carries every identifier).
 func (e EgressEnvelope) Validate() error {
+	for _, f := range []struct {
+		name  string
+		value string
+	}{
+		{"EventID", e.EventID}, {"TenantID", e.TenantID}, {"SessionID", e.SessionID},
+		{"UserID", e.UserID}, {"ToolID", e.ToolID}, {"ModelID", e.ModelID},
+	} {
+		if len(f.value) > MaxIdentifierFieldLen {
+			return fmt.Errorf("queue: EgressEnvelope.%s exceeds %d bytes (got %d)", f.name, MaxIdentifierFieldLen, len(f.value))
+		}
+	}
 	if e.TerminalReason != "" && !validTerminalReason(e.TerminalReason) {
 		return fmt.Errorf("queue: EgressEnvelope.TerminalReason %q is not a recognized terminal reason", e.TerminalReason)
 	}
@@ -186,16 +210,32 @@ func (h *ControlPlaneHandshake) Negotiate(ctx context.Context) (HandshakeRespons
 	}, nil
 }
 
+// The three methods below wrap the upstream call in a CLOSURE rather than
+// passing the method value `h.upstream.X` directly. This is load-bearing,
+// not style: a method value is evaluated when the argument list is built --
+// i.e. BEFORE route runs and gets a chance to check the sink mode -- and
+// evaluating it reads the concrete value out of the h.upstream interface.
+// A BYOC deployment with both sink modes set to `local` legitimately has no
+// upstream caller at all (nil), and the direct method-value form panicked
+// there before route's local-mode no-op could ever return. Inside a
+// closure, h.upstream is dereferenced only if route actually calls it.
+
 func (h *ControlPlaneHandshake) EmitAuditReceipt(ctx context.Context, e EgressEnvelope) error {
-	return h.route(ctx, h.cfg.AuditSinkMode, e, h.upstream.EmitAuditReceipt)
+	return h.route(ctx, h.cfg.AuditSinkMode, e, func(ctx context.Context, e EgressEnvelope) error {
+		return h.upstream.EmitAuditReceipt(ctx, e)
+	})
 }
 
 func (h *ControlPlaneHandshake) AnchorAuditChain(ctx context.Context, e EgressEnvelope) error {
-	return h.route(ctx, h.cfg.AuditSinkMode, e, h.upstream.AnchorAuditChain)
+	return h.route(ctx, h.cfg.AuditSinkMode, e, func(ctx context.Context, e EgressEnvelope) error {
+		return h.upstream.AnchorAuditChain(ctx, e)
+	})
 }
 
 func (h *ControlPlaneHandshake) ReportTelemetry(ctx context.Context, e EgressEnvelope) error {
-	return h.route(ctx, h.cfg.TelemetrySinkMode, e, h.upstream.ReportTelemetry)
+	return h.route(ctx, h.cfg.TelemetrySinkMode, e, func(ctx context.Context, e EgressEnvelope) error {
+		return h.upstream.ReportTelemetry(ctx, e)
+	})
 }
 
 // route is the ONE place Validate() is enforced and the sink-mode switch is
@@ -211,6 +251,13 @@ func (h *ControlPlaneHandshake) route(ctx context.Context, mode SinkMode, e Egre
 	}
 	if mode == SinkModeLocal {
 		return nil // documented no-op -- nothing crosses the boundary
+	}
+	// mode is `upstream` here, so a nil UpstreamCaller is a genuine
+	// misconfiguration (not the legitimate BYOC/local case above) -- report
+	// it as a clear error rather than letting the closure panic on a nil
+	// interface.
+	if h.upstream == nil {
+		return fmt.Errorf("queue: sink mode %q requires a non-nil UpstreamCaller", mode)
 	}
 	return upstreamCall(ctx, e)
 }

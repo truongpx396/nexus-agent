@@ -63,6 +63,17 @@ type eventEnvelope struct {
 // ToVersion is the requested currentSchemaVersion -- never a panic, never
 // a zero-valued Event alongside a non-nil error, except when returning the
 // error itself, where Event is the zero value.
+//
+// "No registered path" covers TWO distinct cases, both returning the same
+// *UpcastPathError:
+//   - a gap in the forward upcaster chain (some version between the event's
+//     schema_version and currentSchemaVersion has no registered upcaster);
+//   - an event whose schema_version is GREATER than currentSchemaVersion,
+//     i.e. written by a newer deployment than this reader (a rolling
+//     deploy). Upcasting is one-directional and no downcaster mechanism
+//     exists, so there is genuinely no path from a higher version down to
+//     currentSchemaVersion. This case MUST NOT silently relabel the event's
+//     version downward over an untransformed payload.
 func UpcastEvent(raw json.RawMessage, currentSchemaVersion int) (Event, error) {
 	var env eventEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
@@ -72,11 +83,21 @@ func UpcastEvent(raw json.RawMessage, currentSchemaVersion int) (Event, error) {
 	originalVersion := env.SchemaVersion
 
 	if env.SchemaVersion == currentSchemaVersion {
-		return Event{
-			SchemaVersion: env.SchemaVersion,
-			Type:          env.Type,
-			Payload:       env.Payload,
-		}, nil
+		// eventEnvelope and Event have identical field sets and types (the
+		// struct tags are ignored by a Go struct conversion), so this is an
+		// exact, field-for-field copy.
+		return Event(env), nil
+	}
+
+	if env.SchemaVersion > currentSchemaVersion {
+		// The event was written under a NEWER schema than this reader knows
+		// (a rolling deploy where an old worker reads an event a newer
+		// worker already wrote). Upcasting is one-directional and no
+		// downcaster mechanism exists, so there is genuinely no path from
+		// the higher version down to currentSchemaVersion -- refuse loudly
+		// rather than relabel the version downward over an untransformed
+		// payload.
+		return Event{}, &UpcastPathError{FromVersion: originalVersion, ToVersion: currentSchemaVersion}
 	}
 
 	payload := env.Payload
