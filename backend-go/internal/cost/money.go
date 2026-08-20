@@ -96,9 +96,15 @@ func (m Money) Rat() *big.Rat {
 
 // Add returns a new Money holding the exact sum of m and other, carried as
 // an unrounded rational -- no intermediate rounding occurs. Add fails with
-// ErrCurrencyMismatch if the two operands' currencies differ; currencies
-// are never silently coerced.
+// ErrNilAmount if either operand is the zero value (a zero-value Money has
+// a nil internal amount, which two zero-value operands' matching empty
+// currencies would otherwise let slip past the currency check into a
+// math/big nil-pointer panic), or ErrCurrencyMismatch if the two operands'
+// currencies differ; currencies are never silently coerced.
 func (m Money) Add(other Money) (Money, error) {
+	if m.amount == nil || other.amount == nil {
+		return Money{}, ErrNilAmount
+	}
 	if other.currency != m.currency {
 		return Money{}, ErrCurrencyMismatch
 	}
@@ -108,7 +114,11 @@ func (m Money) Add(other Money) (Money, error) {
 
 // Mul returns a new Money holding the exact product of m's amount and
 // factor, carried as an unrounded rational. The currency is unchanged.
+// Mul fails with ErrNilAmount if m is the zero value or factor is nil.
 func (m Money) Mul(factor *big.Rat) (Money, error) {
+	if m.amount == nil || factor == nil {
+		return Money{}, ErrNilAmount
+	}
 	product := new(big.Rat).Mul(m.amount, factor)
 	return Money{amount: product, currency: m.currency}, nil
 }
@@ -116,13 +126,17 @@ func (m Money) Mul(factor *big.Rat) (Money, error) {
 // Assert rounds m's exact amount to scale decimal digits using mode and
 // returns a new Money holding that rounded value, with the same currency
 // preserved. Assert is the ONLY place a Money value is ever rounded
-// (FR-180, SC-076). It returns ErrInvalidScale if scale is negative.
+// (FR-180, SC-076). It returns ErrNilAmount if m is the zero value, or
+// ErrInvalidScale if scale is negative.
 //
 // RoundHalfUp breaks an exact tie away from zero (0.125 at scale 2 ->
 // 0.13). RoundHalfEven breaks the same exact tie toward whichever
 // neighboring digit at the target scale is even (0.125 at scale 2 -> 0.12,
 // because 2 is even). Non-tie values round identically under both modes.
 func (m Money) Assert(scale int, mode RoundingMode) (Money, error) {
+	if m.amount == nil {
+		return Money{}, ErrNilAmount
+	}
 	if scale < 0 {
 		return Money{}, ErrInvalidScale
 	}
