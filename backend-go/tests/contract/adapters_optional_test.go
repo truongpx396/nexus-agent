@@ -53,6 +53,12 @@ func TestNoHardDependencyOnOptionalAdapters(t *testing.T) {
 	root := backendGoRoot(t)
 	adaptersPrefix := filepath.Join("internal", "integrations") + string(filepath.Separator)
 
+	_, selfPath, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller(0) failed; cannot resolve this test file's own path")
+	}
+	selfPath = filepath.Clean(selfPath)
+
 	assertNoThirdPartyImport := func(t *testing.T, path string, content []byte) {
 		t.Helper()
 		for i, line := range strings.Split(string(content), "\n") {
@@ -78,6 +84,17 @@ func TestNoHardDependencyOnOptionalAdapters(t *testing.T) {
 			return err
 		}
 		if d.IsDir() || !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		if filepath.Clean(path) == selfPath {
+			// This file's own fixture data (adapter names used as disabled-row
+			// examples in TestRegistryInitializesWithEveryAdapterDisabled) and
+			// its own detection regex necessarily mention the third-party
+			// names it exists to forbid elsewhere in the codebase. Excluding
+			// this one file does not weaken the property under test -- no
+			// OTHER file may reference these names outside
+			// internal/integrations/ -- it only fixes an unintended
+			// self-referential false positive.
 			return nil
 		}
 
