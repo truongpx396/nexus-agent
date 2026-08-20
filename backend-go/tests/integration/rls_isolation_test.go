@@ -17,7 +17,15 @@
 //	go test -tags=integration ./tests/integration/...
 //
 // Requires a working Docker daemon; the whole file skips (not fails) when
-// one is not available.
+// one is not available. It skips ONLY for that reason -- if Docker is
+// reachable but the container stack fails to come up, the test fails loudly
+// rather than skipping, because a skip and a broken harness are otherwise
+// indistinguishable in CI (see errDockerUnavailable).
+//
+// All queries whose results are asserted against run as a restricted
+// NOSUPERUSER NOBYPASSRLS role; a Postgres superuser bypasses RLS
+// unconditionally, which would make every assertion here vacuously true (see
+// appUser / createRestrictedAppRole).
 package integration
 
 import (
@@ -49,22 +57,49 @@ import (
 func TestRLSIsolation(t *testing.T) {
 	ctx := context.Background()
 
-	directDSN, pooledDSN, cleanup := mustStartStack(t, ctx)
+	directDSN, pooledDSN, appPooledDSN, cleanup := mustStartStack(t, ctx)
 	defer cleanup()
 
 	if err := applyMigrations(ctx, directDSN); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 
+	// The least-privilege application role every RLS assertion below runs as.
+	// Created after the migrations, still over the direct (non-pooled)
+	// superuser connection, because role creation -- like DDL -- is admin
+	// tooling. See createRestrictedAppRole.
+	if err := createRestrictedAppRole(ctx, directDSN); err != nil {
+		t.Fatalf("create restricted app role: %v", err)
+	}
+
 	// A small pool forces PgBouncer (and pgxpool) to reuse physical
 	// connections across tenants, which is the whole point: isolation must
 	// hold even when the same connection serves tenant A and tenant B in
 	// consecutive transactions.
+	//
+	// prodPool authenticates as the SUPERUSER bootstrap role and is used only
+	// to seed fixtures: mustInsertTenant/mustInsertTool insert rows for
+	// arbitrary tenants, which the RLS WITH CHECK clause added by
+	// 0004_rls_null_aware_write_check.sql would (correctly) reject for an
+	// ordinary role. Seeding is admin tooling; asserting is not.
 	prodPool, err := newPooledClient(ctx, pooledDSN, 3)
 	if err != nil {
 		t.Fatalf("create pooled client through pgbouncer: %v", err)
 	}
 	defer prodPool.Close()
+
+	// appPool authenticates as appUser (NOSUPERUSER NOBYPASSRLS) through the
+	// same PgBouncer tier. EVERY query whose result is asserted against for
+	// cross-tenant leakage runs on this pool -- run as the superuser above,
+	// RLS would never engage at all and those assertions would pass without
+	// testing anything.
+	appPool, err := newPooledClient(ctx, appPooledDSN, 3)
+	if err != nil {
+		t.Fatalf("create restricted-role pooled client through pgbouncer: %v", err)
+	}
+	defer appPool.Close()
+
+	mustBeRLSEnforcedPool(ctx, t, appPool)
 
 	t.Run("single tenant transaction sees only its own rows", func(t *testing.T) {
 		tenantA := mustNewTenantID(t)
@@ -75,7 +110,9 @@ func TestRLSIsolation(t *testing.T) {
 		mustInsertTool(ctx, t, prodPool, tenantA, "reader-a")
 		mustInsertTool(ctx, t, prodPool, tenantB, "reader-b")
 
-		tx, err := prodPool.Begin(ctx)
+		// appPool, not prodPool: the assertion below only means something if
+		// the querying role is actually subject to RLS.
+		tx, err := appPool.Begin(ctx)
 		if err != nil {
 			t.Fatalf("begin transaction: %v", err)
 		}
@@ -147,7 +184,8 @@ func TestRLSIsolation(t *testing.T) {
 			go func(self, other string) {
 				defer wg.Done()
 				for i := 0; i < iterationsPerWorker; i++ {
-					if err := runScopedIteration(ctx, prodPool, self, other); err != nil {
+					// appPool: RLS must be the thing filtering these rows.
+					if err := runScopedIteration(ctx, appPool, self, other); err != nil {
 						leaks <- err.Error()
 					}
 				}
@@ -214,11 +252,20 @@ func TestRLSIsolation(t *testing.T) {
 		// A dedicated single-connection pool maximizes the odds that
 		// consecutive logical transactions reuse the same physical
 		// connection through PgBouncer's own small backend pool.
-		narrowPool, err := newPooledClient(ctx, pooledDSN, 1)
+		//
+		// Built from appPooledDSN (the restricted NOSUPERUSER NOBYPASSRLS
+		// role), not the superuser DSN: the mechanism this subtest documents
+		// is an ORDINARY application connection wrongly inheriting another
+		// tenant's leftover session GUC through PgBouncer's pooling. A
+		// superuser connection bypasses RLS outright, so it could neither
+		// exhibit nor refute that leak -- it would see every tenant's rows
+		// no matter what app.tenant_id said, making the probe meaningless.
+		narrowPool, err := newPooledClient(ctx, appPooledDSN, 1)
 		if err != nil {
 			t.Fatalf("create narrow pooled client: %v", err)
 		}
 		defer narrowPool.Close()
+		mustBeRLSEnforcedPool(ctx, t, narrowPool)
 
 		const probes = 25
 		leakObserved := false
@@ -483,6 +530,96 @@ func newPooledClient(ctx context.Context, pooledDSN string, maxConns int32) (*pg
 	return pool, nil
 }
 
+// Credentials for the two roles this test uses.
+//
+// pgUser is the initdb bootstrap role the official postgres image creates. It
+// is a SUPERUSER, and a Postgres superuser bypasses row-level security
+// unconditionally -- more absolutely than the BYPASSRLS attribute, and
+// regardless of FORCE ROW LEVEL SECURITY. It is therefore usable ONLY for
+// migrations and fixture seeding (the "migration/admin tooling" carve-out in
+// backing-services.instructions.md), never for an assertion that claims to
+// observe RLS doing something.
+//
+// appUser is the least-privilege application role created by
+// createRestrictedAppRole: NOSUPERUSER NOBYPASSRLS, exactly as
+// backing-services.instructions.md requires of the app role ("the app role
+// must NOT have BYPASSRLS; only migration/admin tooling bypasses, via a
+// separate role"). Every query in this file whose result is asserted against
+// for cross-tenant leakage runs as appUser -- as superuser those assertions
+// would be vacuous, because RLS never engages for that role at all.
+const (
+	pgUser = "nexus"
+	pgPass = "nexus"
+	pgDB   = "nexus"
+
+	appUser = "approle"
+	appPass = "approle"
+)
+
+// createRestrictedAppRole creates the least-privilege application role that
+// every RLS assertion in this file runs as. It connects directly to Postgres
+// (not through PgBouncer) as the superuser, the same way applyMigrations does
+// and for the same reason: role creation is admin tooling, and admin tooling
+// is the one thing allowed to be privileged.
+//
+// The grants below are deliberately coarse (schema-wide) because this role
+// lives for the lifetime of a disposable test container and the property under
+// test is the role's ATTRIBUTES -- NOSUPERUSER NOBYPASSRLS -- not fine-grained
+// table scoping. RLS, not the grant list, is what must keep tenants apart.
+func createRestrictedAppRole(ctx context.Context, directDSN string) error {
+	conn, err := pgx.Connect(ctx, directDSN)
+	if err != nil {
+		return fmt.Errorf("connect direct to postgres to create the restricted app role: %w", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	stmts := []string{
+		fmt.Sprintf(`CREATE ROLE %s LOGIN PASSWORD %s NOSUPERUSER NOBYPASSRLS`,
+			pgx.Identifier{appUser}.Sanitize(), quoteLiteral(appPass)),
+		fmt.Sprintf(`GRANT USAGE ON SCHEMA public TO %s`, pgx.Identifier{appUser}.Sanitize()),
+		fmt.Sprintf(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %s`,
+			pgx.Identifier{appUser}.Sanitize()),
+	}
+	for _, stmt := range stmts {
+		if _, err := conn.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("creating restricted app role (%s): %w", stmt, err)
+		}
+	}
+	return nil
+}
+
+// quoteLiteral renders a Postgres string literal. CREATE ROLE ... PASSWORD does
+// not accept bind parameters, and neither does GRANT's role list, so the role
+// name and password have to be inlined -- quoted, never concatenated raw.
+func quoteLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+// mustBeRLSEnforcedPool fails the test unless the given pool authenticates as a
+// role that Postgres actually subjects to row-level security. This is a guard
+// against the exact regression this harness already suffered once: if the
+// assertion path silently reverts to a superuser or BYPASSRLS role, every
+// "expected zero cross-tenant rows" assertion in this file becomes vacuously
+// true, and the test reports a tenant-isolation guarantee it never evaluated.
+func mustBeRLSEnforcedPool(ctx context.Context, t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+
+	var role string
+	var isSuper, bypassRLS bool
+	err := pool.QueryRow(ctx, `
+		SELECT rolname, rolsuper, rolbypassrls
+		FROM pg_roles
+		WHERE rolname = current_user
+	`).Scan(&role, &isSuper, &bypassRLS)
+	if err != nil {
+		t.Fatalf("inspect the assertion pool's role privileges: %v", err)
+	}
+	if isSuper || bypassRLS {
+		t.Fatalf("assertion pool connects as role %q with rolsuper=%t rolbypassrls=%t; such a role bypasses RLS entirely, so every cross-tenant assertion in this test would be vacuous", role, isSuper, bypassRLS)
+	}
+	t.Logf("assertion pool role %q verified subject to RLS (rolsuper=%t rolbypassrls=%t)", role, isSuper, bypassRLS)
+}
+
 // applyMigrations connects directly to Postgres (bypassing PgBouncer, per
 // backing-services.instructions.md's migration guidance) and executes every
 // backend-go/migrations/*.sql file in lexical order.
@@ -517,51 +654,87 @@ func applyMigrations(ctx context.Context, directDSN string) error {
 	return nil
 }
 
+// errDockerUnavailable marks the single failure mode that legitimately skips
+// this test: no reachable Docker daemon at all. Everything else -- a container
+// that fails to start, an image that will not pull, a wait strategy that times
+// out because the container is listening on a different port than the harness
+// expects -- means Docker IS working and the stack itself is broken, which is
+// a real defect and must fail loudly.
+//
+// Conflating the two is exactly how this test silently reported "ok" for a
+// tenant-isolation guarantee it never actually evaluated: a 90s wait-for-port
+// timeout (see LISTEN_PORT in startStack) was reported as SKIP, which in CI is
+// indistinguishable from a Docker-less runner.
+var errDockerUnavailable = errors.New("docker daemon unavailable")
+
 // mustStartStack starts a Postgres container and a PgBouncer container
 // (configured for transaction-mode pooling) on a shared Docker network, and
-// returns a direct Postgres DSN, a PgBouncer-pooled DSN, and a cleanup
-// function. It skips the calling test (rather than failing it) if Docker is
-// unavailable or container startup panics, per the requirement that this
-// file compile cleanly and skip gracefully in a Docker-less environment.
-func mustStartStack(t *testing.T, ctx context.Context) (directDSN, pooledDSN string, cleanup func()) {
+// returns a direct Postgres DSN, a PgBouncer-pooled DSN for the privileged
+// bootstrap/fixture role, a PgBouncer-pooled DSN for the restricted
+// application role, and a cleanup function.
+//
+// It skips the calling test ONLY when Docker itself is unreachable, so that
+// this file still compiles and skips gracefully in a Docker-less environment.
+// Any other startup failure calls t.Fatalf: a broken harness must never
+// masquerade as "no Docker here".
+func mustStartStack(t *testing.T, ctx context.Context) (directDSN, pooledDSN, appPooledDSN string, cleanup func()) {
 	t.Helper()
 
 	var (
-		gotDirectDSN string
-		gotPooledDSN string
-		gotCleanup   func()
-		startErr     error
+		gotDirectDSN    string
+		gotPooledDSN    string
+		gotAppPooledDSN string
+		gotCleanup      func()
+		dockerReachable bool
+		startErr        error
 	)
 
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				startErr = fmt.Errorf("panic while starting test containers (docker likely unavailable): %v", r)
+				startErr = fmt.Errorf("panic while starting the test container stack: %v", r)
+				// Only a panic raised BEFORE Docker ever answered can be
+				// attributed to Docker being absent; once the network exists,
+				// Docker demonstrably works and a panic is a harness bug.
+				if !dockerReachable {
+					startErr = fmt.Errorf("%w: %w", errDockerUnavailable, startErr)
+				}
 			}
 		}()
-		gotDirectDSN, gotPooledDSN, gotCleanup, startErr = startStack(ctx)
+		gotDirectDSN, gotPooledDSN, gotAppPooledDSN, gotCleanup, startErr = startStack(ctx, &dockerReachable)
 	}()
 
 	if startErr != nil {
-		t.Skipf("docker not available or container startup failed: %v", startErr)
+		if errors.Is(startErr, errDockerUnavailable) {
+			t.Skipf("skipping T029: no reachable Docker daemon: %v", startErr)
+		}
+		if gotCleanup != nil {
+			gotCleanup()
+		}
+		t.Fatalf("docker is reachable but the T029 container stack failed to start; this is a harness/stack defect, not a reason to skip: %v", startErr)
 	}
-	return gotDirectDSN, gotPooledDSN, gotCleanup
+	return gotDirectDSN, gotPooledDSN, gotAppPooledDSN, gotCleanup
 }
 
 // startStack does the actual container orchestration for mustStartStack. It
 // is factored out so mustStartStack can wrap it in a panic recovery guard
 // without the recover/defer pattern obscuring the setup logic itself.
-func startStack(ctx context.Context) (directDSN, pooledDSN string, cleanup func(), err error) {
+//
+// Error contract (see errDockerUnavailable): the returned error wraps
+// errDockerUnavailable if and ONLY if creating the Docker network failed --
+// the one failure mode that genuinely means "there is no Docker daemon here".
+// Every other failure (image pull, container start, wait-for-port timeout,
+// port resolution) happens after Docker has already answered, so it is a real
+// defect in this harness or in the stack under test and must fail the test.
+//
+// dockerReachable is set to true the instant Docker answers, so mustStartStack
+// can classify a *panic* raised later in this function the same way.
+func startStack(ctx context.Context, dockerReachable *bool) (directDSN, pooledDSN, appPooledDSN string, cleanup func(), err error) {
 	nw, err := network.New(ctx)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("create docker network: %w", err)
+		return "", "", "", nil, fmt.Errorf("%w: create docker network: %w", errDockerUnavailable, err)
 	}
-
-	const (
-		pgUser = "nexus"
-		pgPass = "nexus"
-		pgDB   = "nexus"
-	)
+	*dockerReachable = true
 
 	pgReq := testcontainers.ContainerRequest{
 		Image:        "postgres:16-alpine",
@@ -580,33 +753,63 @@ func startStack(ctx context.Context) (directDSN, pooledDSN string, cleanup func(
 		Started:          true,
 	})
 	if err != nil {
-		return "", "", nil, fmt.Errorf("start postgres container: %w", err)
+		return "", "", "", nil, fmt.Errorf("start postgres container: %w", err)
 	}
 
 	pgHost, err := pgC.Host(ctx)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("resolve postgres host: %w", err)
+		return "", "", "", nil, fmt.Errorf("resolve postgres host: %w", err)
 	}
 	pgPort, err := pgC.MappedPort(ctx, "5432/tcp")
 	if err != nil {
-		return "", "", nil, fmt.Errorf("resolve postgres mapped port: %w", err)
+		return "", "", "", nil, fmt.Errorf("resolve postgres mapped port: %w", err)
 	}
 	directDSN = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", pgUser, pgPass, pgHost, pgPort.Port(), pgDB)
+
+	// PgBouncer credential store.
+	//
+	// postgres:16-alpine authenticates network clients with scram-sha-256
+	// (password_encryption = scram-sha-256; pg_hba "host all all all
+	// scram-sha-256"), so PgBouncer must hold a credential it can actually
+	// complete a SCRAM handshake with when it opens its OWN connection to
+	// Postgres. The image's entrypoint auto-generates a userlist entry only
+	// for DB_USER, and only as an md5 hash unless AUTH_TYPE is plain or
+	// scram-sha-256 -- an md5 hash cannot satisfy a SCRAM challenge, so
+	// PgBouncer fails every server login with "cannot do SCRAM
+	// authentication: wrong password type". Supplying the userlist ourselves,
+	// in plaintext, with AUTH_TYPE=plain fixes that and additionally lets a
+	// SECOND role authenticate through the pooler -- appUser, the restricted
+	// NOSUPERUSER NOBYPASSRLS role every RLS assertion in this file runs as
+	// (see createRestrictedAppRole). Postgres itself still enforces
+	// scram-sha-256 for both roles; only PgBouncer's own credential store is
+	// plaintext, and it lives in a disposable test container.
+	userlist := fmt.Sprintf("%q %q\n%q %q\n", pgUser, pgPass, appUser, appPass)
 
 	pgbReq := testcontainers.ContainerRequest{
 		Image:        "edoburu/pgbouncer:latest",
 		ExposedPorts: []string{"6432/tcp"},
 		Env: map[string]string{
-			"DB_HOST":           "postgres",
-			"DB_PORT":           "5432",
-			"DB_USER":           pgUser,
-			"DB_PASSWORD":       pgPass,
-			"DB_NAME":           pgDB,
+			"DB_HOST":     "postgres",
+			"DB_PORT":     "5432",
+			"DB_USER":     pgUser,
+			"DB_PASSWORD": pgPass,
+			"DB_NAME":     pgDB,
+			// edoburu/pgbouncer renders "listen_port = ${LISTEN_PORT:-5432}",
+			// so without this the container listens on 5432 while
+			// ExposedPorts/WaitingFor/MappedPort below all say 6432 -- the
+			// wait strategy then blocks on a port nothing is bound to until
+			// it times out. Keep this in sync with the 6432 references below.
+			"LISTEN_PORT":       "6432",
 			"POOL_MODE":         "transaction",
 			"MAX_CLIENT_CONN":   "100",
 			"DEFAULT_POOL_SIZE": "3",
-			"AUTH_TYPE":         "trust",
+			"AUTH_TYPE":         "plain",
 		},
+		Files: []testcontainers.ContainerFile{{
+			Reader:            strings.NewReader(userlist),
+			ContainerFilePath: "/etc/pgbouncer/userlist.txt",
+			FileMode:          0o644,
+		}},
 		Networks:   []string{nw.Name},
 		WaitingFor: wait.ForListeningPort("6432/tcp").WithStartupTimeout(90 * time.Second),
 	}
@@ -615,23 +818,24 @@ func startStack(ctx context.Context) (directDSN, pooledDSN string, cleanup func(
 		Started:          true,
 	})
 	if err != nil {
-		return "", "", nil, fmt.Errorf("start pgbouncer container: %w", err)
+		return "", "", "", nil, fmt.Errorf("start pgbouncer container: %w", err)
 	}
 
 	pgbHost, err := pgbC.Host(ctx)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("resolve pgbouncer host: %w", err)
+		return "", "", "", nil, fmt.Errorf("resolve pgbouncer host: %w", err)
 	}
 	pgbPort, err := pgbC.MappedPort(ctx, "6432/tcp")
 	if err != nil {
-		return "", "", nil, fmt.Errorf("resolve pgbouncer mapped port: %w", err)
+		return "", "", "", nil, fmt.Errorf("resolve pgbouncer mapped port: %w", err)
 	}
 	pooledDSN = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", pgUser, pgPass, pgbHost, pgbPort.Port(), pgDB)
+	appPooledDSN = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", appUser, appPass, pgbHost, pgbPort.Port(), pgDB)
 
 	cleanup = func() {
 		_ = pgbC.Terminate(ctx)
 		_ = pgC.Terminate(ctx)
 		_ = nw.Remove(ctx)
 	}
-	return directDSN, pooledDSN, cleanup, nil
+	return directDSN, pooledDSN, appPooledDSN, cleanup, nil
 }
