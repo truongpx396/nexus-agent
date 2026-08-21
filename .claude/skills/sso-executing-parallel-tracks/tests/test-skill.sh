@@ -1145,14 +1145,19 @@ fi
 suite "Suite 24 — Trace: Activation-Trace Append"
 
 if ! command -v jq &>/dev/null || ! test -f "$TRACE"; then
-  for n in 162 163 164 165; do skip "$n  trace/jq unavailable"; done
+  for n in 162 163 164 165 166; do skip "$n  trace/jq unavailable"; done
 else
   TRRUNS="$TMPDIR_ROOT/trruns"
   mkdir -p "$TRRUNS"
+  # track-trace.sh is OFF BY DEFAULT (TRACK_TRACE=1 required) — briefs[] covers dispatch
+  # timing for the checks that used to depend on trace[], and the lifecycle trace itself
+  # is never rendered into a PR body; the one thing it still buys is agent_id for
+  # maker/checker separation, opt-in. These tests exercise the recorder's OWN behavior,
+  # so they opt in explicitly rather than relying on the (now off) default.
   trace_event() { # $1=event $2=agent_id $3=agent_type ; RUN_ID=tr_run
     jq -nc --arg e "$1" --arg id "$2" --arg ty "$3" \
       '{hook_event_name:$e, agent_id:$id, agent_type:$ty}' | \
-      env RUN_ID="tr_run" RUNS_DIR="$TRRUNS" bash "$TRACE" >/dev/null 2>&1 || true
+      env RUN_ID="tr_run" RUNS_DIR="$TRRUNS" TRACK_TRACE=1 bash "$TRACE" >/dev/null 2>&1 || true
   }
 
   # 162 — a SubagentStart event creates the record + appends a trace entry
@@ -1180,6 +1185,16 @@ else
   after="$(ls "$TRRUNS" | wc -l | tr -d ' ')"
   [ "$before" = "$after" ] && pass "165 no RUN_ID → no-op (writes nothing)" \
                             || fail "165 no RUN_ID no-op (before=$before after=$after)"
+
+  # 166 — OFF BY DEFAULT: RUN_ID set, TRACK_TRACE unset → still no-op. This is the
+  # regression test for the recorder's own default, independent of the opted-in fixture
+  # above — a future edit to trace_event() could hide this from every OTHER test here.
+  TRDEF_RUNS="$TMPDIR_ROOT/trdefault"; mkdir -p "$TRDEF_RUNS"
+  printf '{"hook_event_name":"SubagentStart","agent_id":"z","agent_type":"y"}' | \
+    env RUN_ID="tr_default" RUNS_DIR="$TRDEF_RUNS" bash "$TRACE" >/dev/null 2>&1 || true
+  [ ! -f "$TRDEF_RUNS/tr_default.json" ] \
+    && pass "166 TRACK_TRACE unset (RUN_ID set) → no-op by default" \
+    || fail "166 trace should stay off by default (got: $(cat "$TRDEF_RUNS/tr_default.json" 2>/dev/null))"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════

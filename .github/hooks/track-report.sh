@@ -430,7 +430,7 @@ if [ -f "$_audit" ]; then
     # Second-order caveat: even some PASSing rows above rest on stamps the model wrote
     # itself. Naming which ones keeps a reviewer from reading the whole table as one
     # uniform grade of proof.
-    printf '\n_Also note the checks above are not all equally strong. `I1`/`I2`/`T2` (git state), `G2`/`G4`/`G5` (bundle vs. the real diff), `M1` (hook-written `trace[]`), `T1`/`E1`/`E2` (hook-written `evidence[]`), `I4` (hook-written `compactions[]`/`governance_reads[]`/`briefs[]`) and `G6` (hook-written `briefs[]` — the brief text as the dispatch tool received it) are derived from artifacts the model does not author. `P1`/`P2` (phase stamps) and `F1` (terminal status) read stamps the model wrote itself via `track-note.sh` — they detect an omitted step, not a misreported one. `G1` and `G3` are MIXED: both read model-written governance stamps. `G1` re-hashes the file it points at, so the content is real but the pointer is chosen; `G3` compares the model'"'"'s own stamps against hook-written `trace[]`, so lowering one satisfies it — read `G3`'"'"'s message, which says whether a hook-observed bundle read corroborated the ordering. `G6` is the one check that observes the brief itself, which is why `A5` narrowed from "did content make the hop" to "was it the right content"._\n'
+    printf '\n_Also note the checks above are not all equally strong. `I1`/`I2`/`T2` (git state), `G2`/`G4`/`G5` (bundle vs. the real diff), `M1` (hook-written `trace[]`), `T1`/`E1`/`E2` (hook-written `evidence[]`), `I4` (hook-written `compactions[]`/`governance_reads[]`/`briefs[]`), `G6` (hook-written `briefs[]` — the brief text as the dispatch tool received it), and `H1` (a plain directory listing of the anchored records dir) are derived from artifacts the model does not author. `P1`/`P2` (phase stamps) and `F1` (terminal status) read stamps the model wrote itself via `track-note.sh` — they detect an omitted step, not a misreported one. `G1` and `G3` are MIXED: both read model-written governance stamps. `G1` re-hashes the file it points at, so the content is real but the pointer is chosen; `G3` compares the model'"'"'s own stamps against hook-written `trace[]`, so lowering one satisfies it — read `G3`'"'"'s message, which says whether a hook-observed bundle read corroborated the ordering. `G6` is the one check that observes the brief itself, which is why `A5` narrowed from "did content make the hop" to "was it the right content"._\n'
     printf '\n_Full list: `tests/prompt-level-checklist.md`. A clean audit is necessary, not sufficient._\n'
     printf '</details>\n'
   fi
@@ -465,27 +465,59 @@ if [ -f "$rec" ] && [ "$(jq -r '.briefs | length' "$rec" 2>/dev/null || echo 0)"
               end)' \
     "$rec" 2>/dev/null || true
 fi
-if [ -f "$rec" ] && [ "$(jq -r '.trace | length' "$rec" 2>/dev/null || echo 0)" -gt 0 ]; then
-  printf -- '- **Subagent lifecycle trace (in order):**\n'
-  jq -r '.trace[] | "  - \(.t): \(.event) \(.agent_type // .agent_display_name // "") \((.agent_id // "") | if . == "" then "" else "(\(.))" end)\((.reason // .stop_reason // "") | if . == "" then "" else " — \(.)" end)"' \
-    "$rec" 2>/dev/null || true
-  # An empty reason column is a WIRING fact, not an absence of purpose — say which, so
-  # nobody reads a bare trace as "the agents had no stated goal".
-  if [ "$(jq -r '[.trace[]? | select((.reason // "") != "")] | length' "$rec" 2>/dev/null || echo 0)" -eq 0 ] \
-     && [ "$(jq -r '.briefs | length' "$rec" 2>/dev/null || echo 0)" -eq 0 ]; then
-    printf -- '  - _No "why" recorded for any agent: this surface did not supply `agent_description` on `SubagentStart`, and `track-brief.sh` is not wired (run `install-hooks.sh --apply`). Wire it and the dispatch list above fills in._\n'
-  fi
+# The raw lifecycle trace (trace[] — Start/Stop rows keyed on an opaque agent_id) is
+# deliberately NEVER rendered into the PR body, even when TRACK_TRACE=1 has it on record.
+# The dispatch list above already carries what a reviewer needs (what was asked, when,
+# governance content) at one row per dispatch; the trace was two rows per dispatch with no
+# task context on most surfaces — on a real run, 78 rows of `SubagentStart general-purpose
+# (a66acc…)` that mapped back to nothing. It stays in the run record for M1 (maker/checker
+# id separation, which briefs[] structurally cannot carry — a brief is written before its
+# subagent exists) but has no reason to cost a reviewer's read of the PR.
+
+# Guard denials — hook-observed friction. A reviewer today has no structured way to learn
+# that the run fought the guard four times, or hand-cp'd around a rule, unless the model
+# happens to narrate it — and the model narrating its own friction is exactly the kind of
+# thing an "everything went smoothly" summary omits under pressure to look done. Every
+# denial track-guard.sh has ever issued passes through one function now, so this costs
+# nothing to render and cannot be skipped by a run that would rather not mention it.
+if [ -f "$rec" ] && [ "$(jq -r '.denials | length' "$rec" 2>/dev/null || echo 0)" -gt 0 ]; then
+  printf -- '- **Guard denials this run hit (hook-observed):**\n'
+  jq -r '.denials[] | "  - \(.t): [\(.tool)] \(.reason)"' "$rec" 2>/dev/null || true
 fi
 
-# Self-reported — clearly fenced off from the mechanical facts above.
-if [ -f "$rec" ] && { [ "$(jq -r '.skills | length' "$rec" 2>/dev/null || echo 0)" -gt 0 ] || [ "${iterations:-0}" -gt 0 ]; }; then
+# Skill activations OBSERVED by track-skill.sh (PreToolUse on the Skill tool itself,
+# self_reported:false) render here, in the hook-observed zone — never under the
+# self-reported heading below, which would launder a mechanically-seen fact into a claim.
+if [ -f "$rec" ] && [ "$(jq -r '[.skills[]? | select(.self_reported == false)] | length' "$rec" 2>/dev/null || echo 0)" -gt 0 ]; then
+  printf -- '- **Skill activations (hook-observed, in order):**\n'
+  jq -r '.skills[]? | select(.self_reported == false)
+         | "  - \(.t): \(.skill)"' "$rec" 2>/dev/null || true
+fi
+
+# Self-reported — clearly fenced off from the mechanical facts above. Legacy records with
+# no self_reported flag on a skills[] entry are treated as self-reported (the field's own
+# original meaning before track-skill.sh existed), never silently upgraded.
+n_skills_self="$(jq -r '[.skills[]? | select(.self_reported != false)] | length' "$rec" 2>/dev/null || echo 0)"
+if [ -f "$rec" ] && { [ "$n_skills_self" -gt 0 ] \
+   || [ "${iterations:-0}" -gt 0 ] \
+   || [ "$(jq -r '.workarounds | length' "$rec" 2>/dev/null || echo 0)" -gt 0 ]; }; then
   printf '\n#### Trace (self-reported — model claim, not hook-observed)\n\n'
-  if [ "$(jq -r '.skills | length' "$rec" 2>/dev/null || echo 0)" -gt 0 ]; then
-    printf -- '- **Skill activations (in order):**\n'
-    jq -r '.skills[] | "  - \(.t): \(.skill)\((.step // "") | if . == "" then "" else " — \(.)" end)"' \
+  if [ "$n_skills_self" -gt 0 ]; then
+    printf -- '- **Skill activations (self-reported, in order):**\n'
+    jq -r '.skills[]? | select(.self_reported != false)
+           | "  - \(.t): \(.skill)\((.step // "") | if . == "" then "" else " — \(.)" end)"' \
       "$rec" 2>/dev/null || true
   fi
   [ "${iterations:-0}" -gt 0 ] && printf -- '- **Iterations (RED→GREEN→review cycles):** %s\n' "$iterations"
+  # Workarounds — the WHY behind the denials above, and what the run did instead. Pairs
+  # deliberately: denials[] proves a rule fired, this says what it cost and what the run
+  # routed through — including a sanctioned escape hatch, since a repeatedly-needed one is
+  # itself a signal the default belongs somewhere else. This is what a reviewer actually
+  # needs to decide whether the skill itself should change, not just whether the PR is good.
+  if [ "$(jq -r '.workarounds | length' "$rec" 2>/dev/null || echo 0)" -gt 0 ]; then
+    printf -- '- **Workarounds & discipline friction (root cause, as reported by the run):**\n'
+    jq -r '.workarounds[] | "  - \(.t): \(.what) — *\(.why)*"' "$rec" 2>/dev/null || true
+  fi
 fi
 
 # The verdict, last in the machine-rendered zone — see the note above its definition.

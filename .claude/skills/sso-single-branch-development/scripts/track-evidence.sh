@@ -357,6 +357,22 @@ fingerprint="$(
     fi
   } | hash_cmd | cut -d' ' -f1
 )"
+
+# WHERE did the command CLAIM to run — never a guess about where it actually ran. The
+# harness gives PostToolUse no reliable signal for the Bash tool's live CWD (fp_dir()
+# above already works around that same gap for fingerprinting, rather than trusting $PWD),
+# so this can only read what the COMMAND ITSELF says: an explicit absolute `cd <path>`
+# leading the block. A real run captured evidence from a mix of bare commands, `cd
+# backend-go && …`, and the full worktree path — silently indistinguishable at the Stop
+# gate, since the fingerprint alone cannot prove which tree the CAPTURED OUTPUT came from,
+# only that the run's OWN worktree currently looks a certain way. Left EMPTY (not a guess)
+# whenever the command has no such prefix or the prefix is relative — track-audit.sh's E5
+# only ever flags a hint that POSITIVELY contradicts the run's worktree, never an absence.
+cwd_hint="$(printf '%s\n' "$cmd" | head -1 | sed -E 's/^[[:space:]]*cd[[:space:]]+([^&;]+).*/\1/')"
+[ "$cwd_hint" = "$(printf '%s\n' "$cmd" | head -1)" ] && cwd_hint=""
+cwd_hint="$(printf '%s' "$cwd_hint" | sed -E "s/^['\"]//; s/['\"[:space:]]*\$//")"
+case "$cwd_hint" in /*) ;; *) cwd_hint="" ;; esac
+
 # Canonical skeleton — identical across track-evidence/-meter/-trace so whichever hook
 # fires first writes the same shape (v = run-record schema version).
 [ -f "$rec" ] || printf '{"run_id":"%s","v":1,"trace":[],"evidence":[],"tool_calls":0}\n' "$RUN_ID" >"$rec"
@@ -365,10 +381,12 @@ ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 tmp="$(mktemp)"
 jq --arg t "$ts" --arg k "$kind" --arg c "$cmd_display" --arg cf "$cmd" --arg r "$resp" --arg f "$fingerprint" \
    --arg v "$verdict" --arg vb "$verdict_by" --argjson vac "$vacuous" --argjson att "$attested" \
+   --arg cwd "$cwd_hint" \
   '.evidence = ((.evidence // []) + [
       {t:$t, kind:$k, cmd:$c, response:$r, fingerprint:$f, verdict:$v, verdict_by:$vb}
       + (if $c != $cf then {cmd_full:$cf} else {} end)
       + (if $vac then {vacuous:true} else {} end)
       + (if $att then {} else {attested:false} end)
+      + (if $cwd != "" then {cwd_hint:$cwd} else {} end)
     ]) | .started_ts = (.started_ts // $t) | .last_ts = $t' "$rec" >"$tmp" && mv "$tmp" "$rec"
 exit 0

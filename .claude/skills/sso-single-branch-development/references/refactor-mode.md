@@ -155,6 +155,33 @@ SDD's per-task maker subagent briefs. Subagents have isolated context — they w
 injected instructions unless the brief includes the content. Each per-task maker must satisfy the
 constitution + matched instructions *while restructuring*, not just satisfy them at review.
 
+**Never redirect SDD's own artifacts into `runs/`.** `runs/<RUN_ID>.*` is reserved for exactly the
+files this skill single-homes there (the run record, the dispatch breadcrumb, the governance
+bundle) — SDD's briefs, reports, and `scripts/review-package` diffs are its own ephemeral,
+worktree-local working state, and it already has a correct, single-homed default location for
+them (`.superpowers/sdd/<plan>/`, resolved from the current worktree). Call `review-package` the
+way SDD's own `SKILL.md` documents — no explicit output-path argument — rather than pointing it at
+`runs/`: `runs/` is exempt from scope checks specifically because it is reserved bookkeeping, and a
+task-scoped artifact routed there by habit has landed in the main checkout instead of the worktree
+on a real run (`track-guard.sh` denies it now; `track-audit.sh`'s `H1` catches what that cannot).
+
+**Cluster transform steps before dispatching — one maker + one reviewer per cluster, not per
+step.** "Incremental, keep-green" means the suite stays green at every reviewable checkpoint, not
+that every structural move gets its own round-trip. Build the ledger as clusters up front:
+
+- **Group by shared target file or module** a move touches — never split one file's transform
+  across two dispatches.
+- **Order clusters by dependency** (a rename must land before the callers that use the new name are
+  touched), and order steps within a cluster the same way.
+- **Bound cluster size by what one reviewer can hold at once**, not by step count — several small,
+  mechanical renames in related files is one cluster; two unrelated structural moves are two.
+
+Ledger entries read as clusters with their own steps and target, e.g. `1. Extract queue interface
+(T020, T020a) → internal/queue/*.go`, not a flat numbered list of individual steps. Each cluster is
+still ONE increment for the keep-green loop below — its own maker dispatch, its own review, then
+the next cluster; the batching changes how many round-trips a cluster costs, not whether the suite
+stays green at every checkpoint.
+
 Why incremental rather than one big transform:
 
 - **Localization.** If step 7 turns a test red, you know exactly which structural move broke it. A

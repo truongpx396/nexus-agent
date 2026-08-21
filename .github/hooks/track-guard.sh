@@ -82,6 +82,36 @@ if [ -f "$__env_dir/track-env.sh" ]; then . "$__env_dir/track-env.sh"; fi
 if [ -f "$__env_dir/track-env.base.sh" ]; then . "$__env_dir/track-env.base.sh"; fi
 unset __env_dir
 
+# Resolved ONCE (not per path): the worktree this SESSION is actually operating from, as
+# opposed to TRACK_MAIN_ROOT (the anchor). Used below to tell "a different worktree
+# genuinely exists to redirect to" from "there is none" (branch-in-place, where main IS
+# the only worktree) — see the task-scoped-artifact check.
+TRACK_SESSION_WT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+
+# The commit this run's branch started from. The immutable-prefix check uses it to tell a
+# HISTORICAL commit (protected — an applied migration someone else's release depends on)
+# from one THIS RUN made minutes ago (freely editable — still un-merged, un-applied work in
+# progress). Left EMPTY when it cannot be resolved, so the check fails closed on the older
+# all-history rule rather than silently opening up. Cached: the per-path loop below can run
+# many times per tool call and this shells out to jq/git.
+__base_ref_cache=""; __base_ref_done=0
+_run_base_ref() {
+  [ "$__base_ref_done" -eq 1 ] && { printf '%s' "$__base_ref_cache"; return 0; }
+  __base_ref_done=1
+  _b="${TRACK_BASE_REF:-}"
+  # The breadcrumb is the run's own record of what a human approved at preflight, so it
+  # outlives any env that happens (or fails) to reach this hook's process.
+  if [ -z "$_b" ] && [ -n "${RUN_ID:-}" ]; then
+    _rd="${RUNS_DIR:-runs}"
+    case "$_rd" in /*) ;; *) _rd="${TRACK_MAIN_ROOT:-$PWD}/${_rd%/}" ;; esac
+    if [ -f "$_rd/$RUN_ID.dispatch" ]; then
+      _b="$(jq -r '.base_ref // empty' "$_rd/$RUN_ID.dispatch" 2>/dev/null || true)"
+    fi
+  fi
+  __base_ref_cache="$_b"
+  printf '%s' "$_b"
+}
+
 # --- per-worktree scope override (the parallel-wave layer) --------------------------
 # The bootstrap above resolves ONE env, from the main checkout. That is right for a solo
 # run — the session works in a sibling worktree while hooks fire from the main checkout,
@@ -120,7 +150,34 @@ _wt_scope() { # _wt_scope <worktree-root> — echoes "allowed<TAB>frozen<TAB>imm
 input="$(cat)"
 tool="$(jq -r '.tool_name // empty' <<<"$input")"
 
+# Every denial this hook has ever issued is friction a run had to route around, and it is
+# the single richest signal for "does the skill need to change" — a PR reviewer today has
+# no structured way to see it unless the model happens to narrate it in prose. Recorded
+# HERE, not left to self-report: this is the one place every deny already passes through,
+# so it costs nothing extra to call and cannot be skipped by a run that would rather not
+# mention it. Deliberately best-effort — a jq failure or a read-only runs/ must never turn
+# a WORKING deny into a crash; the permission decision below is what actually matters.
+_record_denial() { # _record_denial <reason>
+  [ -n "${RUN_ID:-}" ] || return 0
+  (
+    _dr_runs="${RUNS_DIR:-runs}"
+    case "$_dr_runs" in
+      /*) ;;
+      *) [ -n "${TRACK_MAIN_ROOT:-}" ] && _dr_runs="${TRACK_MAIN_ROOT%/}/${_dr_runs%/}" ;;
+    esac
+    _dr_rec="$_dr_runs/$RUN_ID.json"
+    mkdir -p "$_dr_runs" 2>/dev/null || exit 0
+    [ -f "$_dr_rec" ] || printf '{"run_id":"%s","v":1,"trace":[],"evidence":[],"tool_calls":0}\n' "$RUN_ID" >"$_dr_rec" 2>/dev/null
+    _dr_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    _dr_tmp="$(mktemp 2>/dev/null)" || exit 0
+    jq --arg t "$_dr_ts" --arg tool "$tool" --arg r "$1" \
+      '.denials = ((.denials // []) + [{t:$t, tool:$tool, reason:$r}])' \
+      "$_dr_rec" >"$_dr_tmp" 2>/dev/null && mv "$_dr_tmp" "$_dr_rec" 2>/dev/null
+  ) 2>/dev/null || true
+}
+
 deny() {
+  _record_denial "$1"
   jq -nc --arg r "$1" '{
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
@@ -358,6 +415,22 @@ case "$tool" in
       done
       IFS="$saved_ifs"
 
+      # The dependency-skill scratch convention (.superpowers/<skill>/…) is ALSO exempt from
+      # scope, for the same reason runs/ is below: it is gitignored bookkeeping a subagent or
+      # the controller writes as part of FOLLOWING a skill — subagent-driven-development's
+      # per-task briefs/reports/review-package diffs, brainstorming's session state — never a
+      # deliverable a reviewer reads. Unlike runs/, it needs no main-checkout anchor: every
+      # dependency skill that uses it resolves the path from `git rev-parse --show-toplevel`
+      # in whatever worktree it is invoked from (see subagent-driven-development's
+      # scripts/sdd-workspace), so `rel` — already relative to the worktree THIS path belongs
+      # to — is the whole test. Without this, a scope narrowed to a deliverable prefix (e.g.
+      # TRACK_ALLOWED_PREFIXES=backend-go/) denies a dependency skill's own correct,
+      # worktree-local default location too — which is exactly what pushed a real run to
+      # redirect its artifacts into runs/ instead, the failure the task-scoped-artifact check
+      # further below now separately catches. Fixing only that check without this one would
+      # have told the model to do the right thing while leaving the right thing unreachable.
+      case "$rel" in .superpowers/*) ok=1 ;; esac
+
       # The run's OWN bookkeeping directory is always writable, regardless of scope. It
       # holds the governance bundle, the PR body and the run record — artifacts this skill
       # REQUIRES the model to write, which are gitignored and never part of the reviewed
@@ -407,12 +480,47 @@ case "$tool" in
               "${TRACK_MAIN_ROOT%/}/${_runs2%/}"/*) p_is_anchored_runs=1 ;; esac ;;
       esac
       unset _runs2
+      # STAGING is the one legal way to author the bundle on a surface whose file-writing
+      # tools are confined to the worktree (an agent isolating via a native worktree tool).
+      # Such a surface cannot write the anchored path AT ALL, so the deny below — correct
+      # in itself — left the intersection empty: an observed run spent its budget finding
+      # four refusals in a row and never wrote the bundle. The staged name is deliberately
+      # distinct from the bundle's, so a staged file can never be mistaken for the pinned
+      # one, and it is legal only inside a records dir; `track-note.sh governance` promotes
+      # it into the anchored dir at pin time and deletes it, which keeps the one-home
+      # invariant a property of the mechanism rather than of the model's care.
       case "${_abs##*/}" in
+        *.governance.staged.md)
+          if [ "$p_is_runs" -eq 0 ]; then
+            deny "'$rel' is a staged governance bundle outside any run's records dir. Staging is only for a surface that cannot write outside this worktree, and it has one place: bash .github/hooks/track-note.sh govpath --staged (it mkdir -p's this worktree's own gitignored runs/ and prints an absolute path). Write to exactly what it prints, then pin it with track-note.sh governance <that path> — the pin promotes it into the anchored records dir and removes the staged copy."
+          fi ;;
         *.governance.md)
           if [ "$p_is_anchored_runs" -eq 0 ]; then
-            deny "'$rel' is a governance bundle outside this run's records dir. runs/ is gitignored, so a copy written from a linked worktree is PRIVATE to that worktree — the main checkout, the run record's pin and the audit all read a different file, and the usual repair is a cp between the two until they diverge. Ask for the one correct path instead: bash .github/hooks/track-note.sh govpath (it mkdir -p's the dir and prints an absolute path), write to exactly what it prints, then pin it with track-note.sh governance <that path>."
+            deny "'$rel' is a governance bundle outside this run's records dir. runs/ is gitignored, so a copy written from a linked worktree is PRIVATE to that worktree — the main checkout, the run record's pin and the audit all read a different file, and the usual repair is a cp between the two until they diverge. Ask for the one correct path instead: bash .github/hooks/track-note.sh govpath (it mkdir -p's the dir and prints an absolute path), write to exactly what it prints, then pin it with track-note.sh governance <that path>. If your surface REFUSES that write because it confines file writes to this worktree, do not hand-cp and do not stage in the deliverable tree: write to track-note.sh govpath --staged and pin that path instead."
           fi ;;
       esac
+      # TASK-SCOPED ARTIFACTS BELONG IN THIS RUN'S OWN WORKTREE, NOT THE MAIN CHECKOUT.
+      # p_is_runs above exempts ALL of runs/ from scope, deliberately, for EITHER root —
+      # most of what lives there (briefs, reports, review packages a maker or a dependency
+      # skill like subagent-driven-development writes) is genuinely worktree-local working
+      # state with no reason to ever leave it. But nothing distinguished "the few files this
+      # run single-homes at the anchor" (record, dispatch, governance) from "anything named
+      # after this run" — and a real run generalized the governance bundle's anchor-write
+      # workaround to other artifacts too: 3 of 12 SDD review-package diffs landed in the
+      # MAIN checkout's runs/ (one of them 0 bytes) while the other 9 correctly stayed in
+      # the worktree, because nothing said they couldn't.
+      # Scoped to when a DIFFERENT worktree genuinely exists for this session
+      # (TRACK_SESSION_WT_ROOT != TRACK_MAIN_ROOT) — a solo/branch-in-place run has no
+      # alternative location, so nothing here is denied for it.
+      if [ -n "${RUN_ID:-}" ] && [ "$p_is_anchored_runs" -eq 1 ] \
+         && [ -n "${TRACK_SESSION_WT_ROOT:-}" ] && [ "$TRACK_SESSION_WT_ROOT" != "${TRACK_MAIN_ROOT:-}" ]; then
+        case "${_abs##*/}" in
+          "$RUN_ID.json"|"$RUN_ID.dispatch"|"$RUN_ID.governance.md"|"$RUN_ID.governance.staged.md") ;;
+          "$RUN_ID".*)
+            deny "'$rel' is a task-scoped artifact written to the MAIN checkout's records dir, not this run's own worktree's. Only the run record, the dispatch breadcrumb and the governance bundle are single-homed at the anchor — everything else this run writes under runs/ (briefs, reports, review packages) belongs in THIS worktree's own runs/, which is exempt from scope the same way. If this came from a dependency skill's script (e.g. subagent-driven-development's scripts/review-package), do not redirect its output into runs/ at all — call it with no OUTFILE argument so it uses its own default location, which is already worktree-local."
+            ;;
+        esac
+      fi
       unset _runs _abs _base
       if [ "$p_is_runs" -eq 1 ]; then ok=1; fi
       # A path outside EVERY worktree gets its own message. It is not a scope dispute — no
@@ -438,13 +546,38 @@ case "$tool" in
       # is append-only. A brand-new file under the prefix is allowed. Query the
       # worktree the path lives in (GIT_WT_ROOT), not $PWD, so a sibling-worktree
       # branch's history is checked — falling back to $PWD when root is unknown.
+      #
+      # "Already-committed" means committed by something OUTSIDE this run, not committed at
+      # all. The rule protects work the outside world may already depend on — a migration in
+      # a released branch — and a file THIS RUN has already been iterating on in its own
+      # base..HEAD commits is not that, REGARDLESS of whether the same path also predates
+      # base. On a real run this is exactly the shape that broke: migrations/README.md is a
+      # living index the run itself had already committed edits to earlier in the SAME
+      # session (adding 0001-0003), and the append-only rule then blocked the run from
+      # adding 0004/0005 to that same index it owned — twice — so it shipped a knowingly-
+      # stale file with a note asking the next person to fix it. Checking "did THIS run's
+      # own commits touch this path" rather than "did the path exist before base" is what
+      # makes an already-in-flight file free: the first commit that touches it under base..HEAD
+      # is the one moment it graduates from "someone else's history" to "this run's own".
       saved_ifs="$IFS"; IFS=:
       for m in ${p_immutable:-}; do
         case "$rel" in
           "$m"*)
             if git -C "${GIT_WT_ROOT:-$PWD}" log --oneline -1 -- "$rel" 2>/dev/null | grep -q .; then
-              IFS="$saved_ifs"
-              deny "'$rel' is an already-committed artifact under an immutable prefix ($m) — create a NEW file instead of editing it"
+              # It has history. Protected UNLESS this run's own base..HEAD range already
+              # contains a commit touching this path — i.e. this run has already taken
+              # ownership of it, however it looked before base.
+              _imm_base="$(_run_base_ref)"
+              _imm_protected=1
+              if [ -n "$_imm_base" ] \
+                 && git -C "${GIT_WT_ROOT:-$PWD}" rev-parse --verify --quiet "$_imm_base" >/dev/null 2>&1 \
+                 && git -C "${GIT_WT_ROOT:-$PWD}" log --oneline -1 "${_imm_base}..HEAD" -- "$rel" 2>/dev/null | grep -q .; then
+                _imm_protected=0
+              fi
+              if [ "$_imm_protected" -eq 1 ]; then
+                IFS="$saved_ifs"
+                deny "'$rel' is an already-committed artifact under an immutable prefix ($m) — this run has not yet committed any change to it, so it may be relied on outside this branch. Create a NEW file instead of editing it. (Once THIS run has committed even one change to a path here, further edits to it are freely allowed — this checks base..HEAD, not whether the path predates base.)"
+              fi
             fi ;;
         esac
       done
@@ -562,7 +695,18 @@ case "$tool" in
       esac
       _wt="${GIT_WT_ROOT:-$PWD}"
       # Tokens after `git push`, flags and blanks dropped: [<remote>] [<refspec>].
-      _toks="$(printf '%s' "$_c" | sed -n 's/.*git push//p' | tr ' \t' '\n\n' \
+      # Everything from the first REDIRECTION or control operator is cut first. Without
+      # that cut, `git push -u origin feat-x 2>&1` — the shape every agent writes, since
+      # the surface only returns stdout — tokenised to a trailing `2>&1`, which `tail -1`
+      # then read as THE REFSPEC. `refs/heads/2>&1` resolves to nothing, so the carve-out
+      # returned "not a first publish" and denied the skill's own documented handoff. The
+      # observed cost is precisely what this function's header warns about: the worker was
+      # right, the guard was wrong, and with no compliant path it escalated to
+      # self-granting TRACK_ALLOW_FF_PUSH and editing the shared track-env.sh.
+      # `[0-9]*[<>]` catches `2>&1`, `>file`, `>>file`, `<in`; `[|;&]` catches `&&`, `||`,
+      # `;` and a trailing `&` — so only the push's own words survive.
+      _toks="$(printf '%s' "$_c" | sed -n 's/.*git push//p' | head -1 \
+               | sed 's/[0-9]*[<>].*//; s/[|;&].*//' | tr ' \t' '\n\n' \
                | grep -v '^-' | grep -v '^$' || true)"
       # The first token is the remote only if git actually knows it as one — otherwise a
       # bare `git push mybranch` would have its BRANCH eaten as a remote name.

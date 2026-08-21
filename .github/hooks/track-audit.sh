@@ -139,17 +139,61 @@ SUBAGENT_SEL='select(((.kind // "") == "subagent")
   or ((((.event // "") | ascii_downcase)) as $e
       | ($e | test("subagent")) or $e == "start" or $e == "stop"))'
 
+# SUBAGENT_SEL matches BOTH SubagentStart and SubagentStop — right for "was there ANY
+# subagent activity", wrong for "how many subagents were DISPATCHED" or "WHEN was the next
+# one dispatched". A normal subagent writes one of each, so counting through SUBAGENT_SEL
+# roughly doubles the true dispatch count — confirmed on a real run's record (78 matched
+# trace entries, 39 actual dispatches by unique Start agent_id) — and picking the "first
+# trace entry after X" through it can select a Stop event instead of a Start: on that same
+# run, three PreCompact events fired while ONE review subagent (dispatched before all three)
+# was still in flight, and I4 named ITS Stop event as if it were "the next dispatch",
+# pairing a compaction with a completion that could not possibly have needed a fresh brief.
+# Chain this AFTER SUBAGENT_SEL (never replace it) wherever the question is "dispatched",
+# not "active": I4's next-dispatch-after-compaction, G6's dispatch count, M1's distinct-id
+# count. Skip it for G3 and for C2's fallback — see _dispatch_times_any below and the C2
+# fallback comment respectively; both want "activity", not "a fresh dispatch".
+SUBAGENT_START='select(((.event // "") | ascii_downcase) | test("start"))'
+
+# WHEN was each subagent DISPATCHED — the timeline G3/I4/G6/C2 all reason over. Two
+# hook-observed recorders can answer, and neither is authored by the model:
+#   briefs[]  track-brief.sh, PreToolUse on the dispatch tool — one row per dispatch, at
+#             the moment of dispatch. PREFERRED: it is exactly one row per dispatch, and it
+#             is the recorder that stays on when the lifecycle trace is disabled (which is
+#             now the default — see track-trace.sh's header for why).
+#   trace[]   track-trace.sh, SubagentStart — the fallback, for a run recorded before
+#             track-brief.sh was wired, or one that opts the trace back on.
+# Prefer briefs[] whenever it has anything to say; fall back to trace[] Starts otherwise.
+# Using briefs[] does NOT weaken any check: both are hook-written, and briefs[] is strictly
+# closer to the event (it fires before the subagent exists, so it cannot miss one).
+DISPATCH_DEF="def _dispatch_times:
+  ([.briefs[]?.t] | map(select(. != null and . != \"\"))) as \$_b
+  | ([.trace[]? | $SUBAGENT_SEL | $SUBAGENT_START | .t] | map(select(. != null and . != \"\"))) as \$_t
+  | (if (\$_b | length) > 0 then \$_b else \$_t end | sort);
+def _dispatch_times_any:
+  ([.briefs[]?.t] | map(select(. != null and . != \"\"))) as \$_b
+  | ([.trace[]? | $SUBAGENT_SEL | .t] | map(select(. != null and . != \"\"))) as \$_t
+  | (if (\$_b | length) > 0 then \$_b else \$_t end | sort);"
+# _dispatch_times_any is G3-only: it falls back to the BROAD trace selector (Start+Stop),
+# never SUBAGENT_START. G3 asks "did a governance pin exist at or before this dispatch" —
+# a SubagentStop is proof a dispatch happened at or before that moment (it cannot postdate
+# its own Start), so it is valid, if slightly late, evidence for that question. On a surface
+# that fires only SubagentStop (SubagentStart historically unwired, hooks.md's documented
+# gap) the Start-only _dispatch_times returns nothing at all, and G3 wrongly reports "no
+# subagent activity" over a run that plainly had some. I4 must NOT use this: there, the
+# question is "was THIS SPECIFIC dispatch fresh", and an unrelated Stop is not evidence of
+# that — see the SUBAGENT_START comment above for the incident that shape caused."
+
 # Remediation per check id. Kept as a lookup rather than a field on every add() call
 # because the fix depends on WHICH invariant broke, not on the instance. These strings
 # are rendered into the PR body by track-report.sh, so a reviewer seeing a ⚠️ also sees
 # what would clear it — a finding with no next step just becomes noise everyone scrolls past.
 remediation_for() {
   case "$1" in
-    G1) printf 'Run governance discovery (references/governance.md), write the distilled bundle to <RUNS_DIR>/<RUN_ID>.governance.md (the anchored records dir preflight prints, NOT a bare runs/ — from a linked worktree that is a private, gitignored copy the main checkout cannot see), then: track-note.sh governance <path>' ;;
+    G1) printf 'Run governance discovery (references/governance.md), write the distilled bundle to <RUNS_DIR>/<RUN_ID>.governance.md (the anchored records dir preflight prints, NOT a bare runs/ — from a linked worktree that is a private, gitignored copy the main checkout cannot see), then: track-note.sh governance <path>. If the surface refuses that write because it confines file writes to the worktree, write to track-note.sh govpath --staged and pin that path — the pin promotes it into the anchored dir' ;;
     G2) printf 'Read the missing .github/instructions/* file(s) and add their binding constraints to the bundle, then re-pin it.' ;;
     G3) printf 'Governance must be discovered and pinned BEFORE any subagent is dispatched. Re-run the affected dispatches with the bundle content embedded in each brief.' ;;
     G4) printf 'Read security-and-owasp.instructions.md, add its relevant constraints to the bundle, and re-review the trust-boundary diff against them.' ;;
-    G5) printf 'The bundle names the file but distils too little from it. Re-read the matched instruction file and write its binding constraints under that heading as concrete bullets — at least 5 per matched file (TRACK_GOV_MIN_BULLETS), each actionable (`pin image tags, never :latest`, not `follow container best practice`). The bundle budget is ~500 lines total, so add what binds this diff rather than trimming to fit, then re-pin the bundle.' ;;
+    G5) printf 'The bundle names the file but distils too little from it. Re-read the matched instruction file and write its binding constraints under that heading as concrete bullets — at least 10-15 per matched file (TRACK_GOV_MIN_BULLETS), more when the file genuinely has more binding constraints than that, each actionable (`pin image tags, never :latest`, not `follow container best practice`). The bundle budget is ~500 lines total, so add what binds this diff rather than trimming to fit, then re-pin the bundle.' ;;
     G6) printf 'Embed the bundle CONTENT in every maker/reviewer brief — the constraint lines themselves, sliced to the cluster, never the filenames. Re-dispatch the affected briefs. A dispatch that genuinely needs no governance (read-only research) must say so in the brief: "GOVERNANCE: n/a — <why>". If the finding is that the hook is unwired, run install-hooks.sh --apply.' ;;
     I1) printf 'Isolate the work first: run using-git-worktrees to place it in a dedicated worktree on its own branch. Never work on the default branch; branch-in-place is allowed only when using-git-worktrees routes there AND that limitation was surfaced.' ;;
     I2) printf 'Re-run track-preflight.sh --persist for this track so the breadcrumb records the branch actually in use, or move the work to the approved branch. Do not let the approved plan and the real work diverge.' ;;
@@ -163,7 +207,9 @@ remediation_for() {
     E1) printf 'Freeze edits, then re-run EVERY required evidence kind back-to-back so all captures share one fingerprint (the convergence gate).' ;;
     E2) printf 'Re-run the suite and capture the full output, ending each evidence command with `; echo "<kind> exit: $?"`. A truncated pass-looking response satisfies the evidence gate without proving anything, and this surface reports no exit code of its own.' ;;
     E4) printf 'The capture passed but checked nothing — an empty build, or a command that only installed/located the tool (`brew install actionlint`, `which golangci-lint`). Run the tool against real sources and re-capture. If there is genuinely nothing to verify on this tree yet (a scaffold with no sources), declare it instead: track-note.sh evidence-na <kind> "<why>".' ;;
+    E5) printf 'Re-run the named kind from inside the worktree this run owns (cd into it explicitly, or run the bare command from a session already rooted there) and re-capture the evidence — the flagged capture ran against a different tree, so its output does not verify this diff regardless of what the fingerprint says.' ;;
     F1) printf 'Record the terminal state before finishing: track-note.sh status <success|blocked|no-progress|budget-exceeded> "<blocker>" "<next step>".' ;;
+    H1) printf 'Move the stray file(s) into the current worktree records dir instead (or delete them if a correct copy already exists there) — only the run record, dispatch breadcrumb, and governance bundle are single-homed at the main-checkout anchor. If a dependency skill wrote them (e.g. subagent-driven-development scripts/review-package), call it with no explicit output-path argument so it uses its own worktree-local default instead of runs/.' ;;
     *)  printf '' ;;
   esac
 }
@@ -283,12 +329,16 @@ fi
 # Deliberately not a judgement of quality — no regex knows whether "pin image tags" is the
 # right constraint for this diff. It bounds the floor: something actionable is there to embed.
 #
-# The floor is 5, raised from 2 alongside the bundle's own ~500-line ceiling. Two bullets is
-# what a *theme* summary of an instruction file looks like ("wrap errors", "test things"); the
-# specifics a maker needs to avoid a review round-trip do not fit in two lines of a ~1,100-line
-# file. Raising the ceiling without raising this floor would have left the cheapest passing
-# bundle unchanged, which is the shape the gate keeps catching in real runs.
-gov_min_bullets="${TRACK_GOV_MIN_BULLETS:-5}"
+# The floor is 10, raised again from 5 alongside the bundle's own ~500-line ceiling. Five
+# bullets is still closer to a *theme* summary than a distillation once a matched file runs
+# past a few hundred lines — auth/secrets/persistence instructions routinely carry more than
+# 10 genuinely independent binding constraints, and a floor set at 5 lets a bundle stop
+# sampling well before it has covered them, silently dropping whichever constraints came
+# after the fifth. Raising the ceiling without raising this floor would have left the
+# cheapest passing bundle unchanged, which is the shape the gate keeps catching in real
+# runs. 10 is a FLOOR, not a target: a file with genuinely more than 10 binding constraints
+# should get all of them, not exactly 10 and stop.
+gov_min_bullets="${TRACK_GOV_MIN_BULLETS:-10}"
 if [ -f "${gov_path:-/nonexistent}" ] && [ -n "$matched_instr" ]; then
   hollow=""
   while IFS= read -r base_name; do
@@ -339,7 +389,7 @@ fi
 # pinned bundle before the first dispatch is real corroboration. It is not always present
 # — it only fires once a bundle is pinned and a later tool call names it — so its absence
 # downgrades the wording, never the verdict.
-first_sub_t="$(j "[.trace[]? | $SUBAGENT_SEL | .t] | sort | first // \"\"")"
+first_sub_t="$(j "$DISPATCH_DEF _dispatch_times_any | first // \"\"")"
 # Earliest pin, from the history when present and the overwritten field otherwise. A
 # governance-labelled phase stamp counts too: it is the same act, recorded by a different call.
 gov_t="$(j '[(.governance_stamps[]?.t), (.governance_bundle.t // empty)]
@@ -352,10 +402,11 @@ gov_read_t="$(j '[.governance_reads[]?.t] | sort | first // ""')"
 # have one-second resolution, and pinning then dispatching immediately lands in the same second
 # routinely — testing for strict "earlier" would fail exactly the runs that did it fastest.
 ungoverned_dispatches="$(jq -r --arg gp "$gov_phase_t" "
+  $DISPATCH_DEF
   def times(f): [f] | map(select(. != null and . != \"\")) | sort;
   ( times(.governance_stamps[]?.t) + times(.governance_bundle.t // empty)
     + (if \$gp == \"\" then [] else [\$gp] end) | sort ) as \$stamps
-  | times(.trace[]? | $SUBAGENT_SEL | .t) as \$d
+  | _dispatch_times_any as \$d
   | [ \$d[] as \$dt
       | select( ([\$stamps[] | select(. <= \$dt)] | length) == 0 )
       | \$dt ]
@@ -502,25 +553,34 @@ else
   # For each compaction: find the first subagent dispatch after it, then require a bundle
   # read strictly between the two. No dispatch after a compaction is fine — nothing was
   # briefed, so nothing could have been briefed thin.
-  violations="$(jq -r '
-    def times(f): [f] | map(select(. != null and . != "")) | sort;
-    (times(.compactions[]?.t))      as $c |
-    (times(.governance_reads[]?.t)) as $r |
-    (times(.trace[]? | '"$SUBAGENT_SEL"' | .t)) as $d |
-    [ $c[] as $ct
-      | ([$d[] | select(. > $ct)] | first) as $next
-      | select($next != null)
-      | select( ([$r[] | select(. > $ct and . < $next)] | length) == 0 )
-      | "\($ct)→\($next)" ]
-    | join(", ")' "$rec" 2>/dev/null || true)"
+  # $d is START events only (SUBAGENT_SEL then SUBAGENT_START): the first trace entry after
+  # a compaction must be a NEW dispatch, never the unrelated Stop of a subagent that was
+  # already briefed before the compaction and is simply finishing up. Using SUBAGENT_SEL
+  # alone here named a Stop event as "the next dispatch" on a real run — a compliant
+  # in-flight subagent completing shortly after a compaction is not what this gate exists
+  # to catch, and pairing a compaction with the wrong timestamp is how a real violation
+  # further downstream gets reported at the wrong place, or a compliant run gets flagged.
+  violations="$(jq -r "
+    $DISPATCH_DEF
+    def times(f): [f] | map(select(. != null and . != \"\")) | sort;
+    (times(.compactions[]?.t))      as \$c |
+    (times(.governance_reads[]?.t)) as \$r |
+    _dispatch_times as \$d |
+    [ \$c[] as \$ct
+      | ([\$d[] | select(. > \$ct)] | first) as \$next
+      | select(\$next != null)
+      | select( ([\$r[] | select(. > \$ct and . < \$next)] | length) == 0 )
+      | \"\(\$ct)→\(\$next)\" ]
+    | join(\", \")" "$rec" 2>/dev/null || true)"
   # How many compactions were actually followed by a dispatch? A compaction with nothing
   # briefed after it passes for a different reason than one that re-read the bundle, and
   # saying "each was followed by a re-read" when nothing was dispatched would overstate.
-  n_briefed="$(jq -r '
-    def times(f): [f] | map(select(. != null and . != "")) | sort;
-    (times(.compactions[]?.t)) as $c |
-    (times(.trace[]? | '"$SUBAGENT_SEL"' | .t)) as $d |
-    [ $c[] as $ct | select( ([$d[] | select(. > $ct)] | length) > 0 ) ] | length' "$rec" 2>/dev/null || echo 0)"
+  n_briefed="$(jq -r "
+    $DISPATCH_DEF
+    def times(f): [f] | map(select(. != null and . != \"\")) | sort;
+    (times(.compactions[]?.t)) as \$c |
+    _dispatch_times as \$d |
+    [ \$c[] as \$ct | select( ([\$d[] | select(. > \$ct)] | length) > 0 ) ] | length" "$rec" 2>/dev/null || echo 0)"
   n_briefed="${n_briefed:-0}"; [ "$n_briefed" = "null" ] && n_briefed=0
   # The re-read proves the bundle came back into context; it does not prove the next brief then
   # used it. track-brief.sh closes that join: the FIRST brief recorded after each compaction is
@@ -566,7 +626,12 @@ for _f in .claude/settings.json .github/hooks/track-hooks.json .vscode/hooks.jso
 done
 n_briefs="$(j '.briefs | length // 0')"; n_briefs="${n_briefs:-0}"
 [ "$n_briefs" = "null" ] && n_briefs=0
-n_dispatch="$(j "[.trace[]? | $SUBAGENT_SEL | .t] | length // 0")"; n_dispatch="${n_dispatch:-0}"
+# START events only: SUBAGENT_SEL alone counts a Stop for every Start, roughly doubling the
+# true dispatch count (confirmed on a real run: 78 matched trace entries, 39 actual
+# dispatches) — inflating the exact number this WARN shows a reviewer to gauge how much
+# brief content is unverified. This branch only runs when briefs[] is EMPTY, so
+# _dispatch_times resolves to the trace fallback by construction.
+n_dispatch="$(j "$DISPATCH_DEF _dispatch_times | length // 0")"; n_dispatch="${n_dispatch:-0}"
 [ "$n_dispatch" = "null" ] && n_dispatch=0
 
 if [ "$n_briefs" -eq 0 ]; then
@@ -664,10 +729,16 @@ fi
 # The narrower question — whether each applied body came from its own maker — is genuinely
 # unmechanizable and stays on the MANUAL list, reworded so the split is explicit.
 if [ "$run_mode" = "scaffold" ]; then
+  # "Wired" now means TWO things, not one: the hook registered AND TRACK_TRACE=1 (the
+  # lifecycle trace is off by default — see track-trace.sh's header). A repo with the hook
+  # registered but the env var unset would grep "wired" while trace[] stays permanently
+  # empty, which is a WARN masquerading as a config problem someone can actually fix by
+  # running install-hooks.sh — when the real fix is setting TRACK_TRACE=1.
   trace_wired=0
   for _f in .claude/settings.json .github/hooks/track-hooks.json .vscode/hooks.json; do
     [ -f "$_f" ] && grep -q 'track-trace' "$_f" 2>/dev/null && { trace_wired=1; break; }
   done
+  [ "${TRACK_TRACE:-0}" = "1" ] || trace_wired=0
   # Deliverables only. The run's own bookkeeping (governance bundle, PR body) is authored by
   # the controller by design, so it can never be evidence of a skipped fan-out. `runs/` is
   # normally gitignored and absent from `changed` anyway; filtering it is belt-and-braces for
@@ -680,6 +751,9 @@ if [ "$run_mode" = "scaffold" ]; then
   # check one dispatch before the fan-out it exists to require. track-brief.sh records the
   # discriminator, so prefer briefs[] when it has anything to say and fall back to trace[]
   # when the brief hook is unwired or did not recognise the dispatch tool.
+  # A bare nonzero check either way, so SUBAGENT_SEL (Start+Stop) vs. SUBAGENT_START
+  # (Start-only) changes nothing here — kept as the broad selector for consistency with
+  # G3's _dispatch_times_any (both want "was there activity", not "was there a dispatch").
   n_gen="$(jq -r '(.briefs // []) as $b
               | if ($b | length) > 0
                 then [$b[] | select((.declared_na // false) != true)] | length
@@ -692,7 +766,7 @@ if [ "$run_mode" = "scaffold" ]; then
   elif [ "$n_probe" -eq 1 ] && [ "$n_deliv" -gt 0 ]; then
     add C2 FAIL "scaffold run produced $n_deliv deliverable file(s) but every dispatch declared 'GOVERNANCE: n/a' — a read-only probe is not the GENERATE fan-out, and no maker returned a body to apply"
   elif [ "$trace_wired" -eq 0 ]; then
-    add C2 WARN "scaffold run with no subagent on record, but track-trace.sh is not wired — a compliant fan-out would leave the same empty trace[], so this cannot be judged (run install-hooks.sh --apply)"
+    add C2 WARN "scaffold run with no subagent on record, and briefs[] is empty too — a compliant fan-out would leave the same empty signal, so this cannot be judged (either track-brief.sh did not recognise the dispatch tool, or the lifecycle trace is off: set TRACK_TRACE=1, or run install-hooks.sh --apply if the hook itself is unwired)"
   elif [ "$n_deliv" -eq 0 ]; then
     add C2 PASS "scaffold run with no subagent dispatched and no deliverable in the diff — GENERATE has not been reached yet, nothing was authored"
   else
@@ -706,7 +780,18 @@ fi
 # MAKER / CHECKER — the reviewer must not be the implementer
 # ════════════════════════════════════════════════════════════════════════════════════
 
-sub_ids="$(j '[.trace[]? | .agent_id // empty] | unique | length')"; sub_ids="${sub_ids:-0}"
+# START events preferred. Counting BOTH Start and Stop `unique`s the common case away (they
+# usually share one id), but not always: on a real run one subagent's Stop carried a
+# DIFFERENT agent_id than its own Start (a surface quirk, not two subagents), inflating this
+# count by one per mismatch — in a degenerate small run that could show "2 distinct ids" for
+# what was genuinely a single subagent, the false PASS this check exists to prevent. Falls
+# back to counting every trace agent_id (Start+Stop) only when there are literally NO Start
+# events on record — the historical unwired-SubagentStart case (hooks.md's "One Claude Code
+# delta to know"), where Stop is the only signal there is; preferring Start elsewhere avoids
+# the mismatch inflation without losing that legacy surface's signal entirely.
+sub_ids="$(j "[.trace[]? | $SUBAGENT_SEL | $SUBAGENT_START | .agent_id // empty] | unique | length")"; sub_ids="${sub_ids:-0}"
+[ "$sub_ids" = "null" ] && sub_ids=0
+[ "$sub_ids" -eq 0 ] && sub_ids="$(j '[.trace[]? | .agent_id // empty] | unique | length')" && sub_ids="${sub_ids:-0}"
 [ "$sub_ids" = "null" ] && sub_ids=0
 sub_types="$(j '[.trace[]? | .agent_type // empty] | unique | length')"; sub_types="${sub_types:-0}"
 [ "$sub_types" = "null" ] && sub_types=0
@@ -714,6 +799,12 @@ if [ "$sub_ids" -ge 2 ]; then
   add M1 PASS "$sub_ids distinct subagent ids in trace[] (maker/checker separation is possible)"
 elif [ "$sub_ids" -eq 1 ]; then
   add M1 WARN "only 1 distinct subagent id — one agent may have both authored and reviewed"
+elif [ "${TRACK_TRACE:-0}" != "1" ]; then
+  # agent_id lives ONLY in trace[] — briefs[] is written before its subagent exists, so it
+  # structurally cannot carry one. With the trace off by default (see track-trace.sh), this
+  # is the honest, expected state on most runs now, not an anomaly to investigate — but it
+  # must read as a real reduction in what this check can prove, never as a silent PASS.
+  add M1 WARN "subagent id recording is off (TRACK_TRACE=1 enables it) — maker/checker separation is unverifiable, not confirmed"
 else
   add M1 WARN "trace[] records no subagent ids (Claude Code's SubagentStop payload omits them; unverifiable on this surface)"
 fi
@@ -859,6 +950,40 @@ if [ "$ev_count" -gt 0 ]; then
   fi
 fi
 
+# E5 — did the LATEST capture for each kind actually run in THIS run's own tree?
+#
+# A command's own explicit `cd <path>` prefix (track-evidence.sh's cwd_hint — never a
+# guess; absent when the command carries none) is the only signal a PostToolUse hook can
+# read for "where did this actually run" — the harness exposes no live CWD to it, the same
+# gap fp_dir() above already routes around for fingerprinting rather than trusting $PWD. A
+# real run's evidence mixed bare commands, `cd backend-go && …`, and the full worktree
+# path, indistinguishably at the Stop gate: the fingerprint is computed FRESH from this
+# run's own worktree regardless of where the captured command ran, so it cannot catch a
+# capture whose own cd target names a different tree entirely. FAILS only on a POSITIVE
+# contradiction; an absent hint is the common, honest case for a bare command and is never
+# judged — inventing a verdict from silence is exactly what this bundle's honesty rule
+# forbids.
+_e5_root="$(_wt_path_for_branch "$work_branch")"
+[ -n "$_e5_root" ] || _e5_root="${_main_root:-$PWD}"
+if [ "$ev_count" -gt 0 ] && [ -n "$_e5_root" ]; then
+  wrongdir=""
+  while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    hint="$(jq -r --arg k "$k" '[.evidence[]? | select(.kind == $k)] | last | .cwd_hint // empty' "$rec" 2>/dev/null || true)"
+    [ -n "$hint" ] || continue
+    case "$hint" in
+      "$_e5_root" | "$_e5_root"/*) ;;
+      *) wrongdir="$wrongdir $k(cwd=$hint)" ;;
+    esac
+  done <<<"$(jq -r '[.evidence[]? | .kind] | unique | .[]' "$rec" 2>/dev/null || true)"
+  wrongdir="$(printf '%s' "$wrongdir" | sed 's/^ *//')"
+  if [ -n "$wrongdir" ]; then
+    add E5 FAIL "the latest capture for these kinds names a 'cd' target OUTSIDE this run's own worktree ($_e5_root):$wrongdir — that evidence was captured against a different tree, whether or not the fingerprint matches"
+  else
+    add E5 PASS "no capture's own cd prefix contradicts this run's worktree (absent hints are not judged — a PostToolUse hook cannot see a bare command's actual CWD)"
+  fi
+fi
+
 # ════════════════════════════════════════════════════════════════════════════════════
 # TERMINAL STATE
 # ════════════════════════════════════════════════════════════════════════════════════
@@ -874,6 +999,36 @@ else
   else
     add F1 WARN "terminal status '$run_status' but no blocker recorded — the next session has nothing to route on"
   fi
+fi
+
+# ════════════════════════════════════════════════════════════════════════════════════
+# HOUSEKEEPING — did anything land in the main checkout's records dir that should not
+# have?
+# ════════════════════════════════════════════════════════════════════════════════════
+# H1 catches what track-guard.sh's single-home enforcement cannot: that guard only sees
+# Write/Edit-tool calls, and the incident this backstops went through Bash instead — a
+# dependency skill's own script (subagent-driven-development scripts/review-package),
+# invoked with a custom output path — invisible to any PreToolUse path check. This
+# audits the RESULT instead of the write: RUNS_DIR here is always the anchored
+# (main-checkout) records dir, so a file named after THIS run that is not one of the
+# few artifacts genuinely single-homed there is a stray. On one real run this was the
+# actual failure: 3 of 12 SDD review-package diffs landed in the main checkout while
+# the other 9 correctly stayed in the worktree, and one of the 3 was 0 bytes — a write
+# that landed nowhere useful at all.
+stray=""
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  base="${f##*/}"
+  case "$base" in
+    "$RUN_ID.json"|"$RUN_ID.dispatch"|"$RUN_ID.governance.md"|"$RUN_ID.governance.staged.md") ;;
+    "$RUN_ID".*) stray="$stray $base" ;;
+  esac
+done <<<"$(find "$RUNS_DIR" -maxdepth 1 -type f -name "$RUN_ID.*" 2>/dev/null || true)"
+stray="$(printf '%s' "$stray" | sed 's/^ *//')"
+if [ -n "$stray" ]; then
+  add H1 WARN "file(s) named after this run sit in the main checkout's records dir but are not one of the artifacts single-homed there (record/dispatch/governance):$stray — task-scoped working files (briefs, reports, review packages) belong in this run's own worktree instead; check whether a correct copy already exists there before deleting these"
+else
+  add H1 PASS "no stray task-scoped files in the main checkout's records dir"
 fi
 
 # ════════════════════════════════════════════════════════════════════════════════════
