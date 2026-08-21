@@ -402,6 +402,47 @@ if git -C "$GIT_TOP" log --oneline -1 -- "$REAL_COM" 2>/dev/null | grep -q .; th
     "TRACK_IMMUTABLE_PREFIXES=.github/instructions/"
 else skip "guard: immutable prefix (file not committed)"; fi
 
+# --- immutable prefix: a run may freely fix ITS OWN in-session commits -------------
+# The old rule denied on ANY history, so a run that created + committed a file twenty
+# minutes ago could not fix a typo in it either. On a real run this blocked the author
+# from correcting its own migrations/README.md index — twice — and it shipped stale,
+# with a note asking the next person to fix it. "Already-committed" must mean "existed
+# BEFORE THIS RUN'S BASE", not "has any git history at all".
+IMM_T="$(cd "$(mktemp -d)" && pwd -P)"
+( cd "$IMM_T" && git init -q -b main . && git config user.email t@t && git config user.name t \
+  && mkdir -p migrations \
+  && echo "-- 0001" > migrations/0001_config.sql \
+  && echo "historical readme" > migrations/README.md \
+  && git add -A && git commit -qm "historical migrations" \
+  && git checkout -qb feat/run \
+  && echo "-- 0002" > migrations/0002_runtime.sql \
+  && echo "this run's own readme edit" > migrations/README.md \
+  && git add -A && git commit -qm "this run's migration + readme" ) >/dev/null 2>&1
+imm_guard() { # imm_guard <path> <base-ref-or-empty>
+  jq -nc --arg p "$IMM_T/$1" '{tool_name:"Write",tool_input:{file_path:$p}}' \
+    | env TRACK_ALLOWED_PREFIXES=migrations/ TRACK_IMMUTABLE_PREFIXES=migrations/ \
+          TRACK_BASE_REF="${2:-}" bash "$GUARD" 2>&1
+}
+result=$(imm_guard migrations/0001_config.sql main)
+printf '%s' "$result" | grep -q '"deny"' \
+  && pass "guard: immutable prefix denies a HISTORICAL (pre-base) file" \
+  || fail "guard: immutable prefix should deny a historical file (got: $result)"
+result=$(imm_guard migrations/0002_runtime.sql main)
+[ -z "$result" ] \
+  && pass "guard: immutable prefix allows THIS RUN'S OWN migration (committed after base)" \
+  || fail "guard: immutable prefix denied this run's own in-session commit (got: $result)"
+result=$(imm_guard migrations/README.md main)
+[ -z "$result" ] \
+  && pass "guard: immutable prefix allows fixing a file this run edited, even if it pre-dates base" \
+  || fail "guard: immutable prefix denied this run's own edit to a historical file (got: $result)"
+# No base ref resolvable at all (no TRACK_BASE_REF, no RUN_ID/dispatch breadcrumb) -> fail
+# CLOSED to the old all-history rule, never silently open up.
+result=$(imm_guard migrations/0002_runtime.sql "")
+printf '%s' "$result" | grep -q '"deny"' \
+  && pass "guard: immutable prefix fails closed when no base ref can be resolved" \
+  || fail "guard: immutable prefix should fail closed with no base ref (got: $result)"
+rm -rf "$IMM_T"
+
 assert_deny "guard: multi_replace with one out-of-scope path -> deny" \
   "$GUARD" \
   "{\"tool_name\":\"multi_replace_string_in_file\",\"tool_input\":{\"replacements\":[{\"filePath\":\"${ABS}backend-go/kernel/auth.go\"},{\"filePath\":\"${ABS}backend-python/main.py\"}]}}" \
@@ -581,6 +622,39 @@ pub "publish must not push another branch"         "git push origin feat/other" 
 pub "publish must not delete a remote branch"      "git push origin --delete feat/mywork" DENY
 pub "publish must not be a bulk push (--all)"      "git push --all origin"               DENY
 pub "publish must not carry --force"               "git push --force origin feat/mywork" DENY
+
+# --- first-publish parsing must survive what an agent actually types ---------------
+# `is_first_publish` reads the REFSPEC as the last non-flag token after `git push`. Every
+# agent on this surface appends `2>&1` (it only sees stdout otherwise), and that token
+# tokenised right along with the real ones: `git push -u origin feat-x 2>&1` yielded a
+# refspec of `2>&1`, which resolves to no real branch, so the carve-out reported "not a
+# first publish" and denied a genuinely fresh push. The agent's own read of the guard's
+# logic was correct; the guard was wrong — and with no compliant path, the run escalated
+# to self-granting TRACK_ALLOW_FF_PUSH and editing the shared track-env.sh to force it in.
+pubj() { # pubj <label> <cmd-json-safe> <ALLOW|DENY> — jq handles embedded quotes/newlines
+  local out got
+  out="$( cd "$PUB/work" && jq -nc --arg c "$2" '{tool_name:"Bash",tool_input:{command:$c}}' \
+          | TRACK_ALLOWED_PREFIXES="src/" TRACK_DEFAULT_BRANCH=main bash "$GUARD" 2>&1 )"
+  got=DENY; printf '%s' "$out" | grep -q '"deny"' || got=ALLOW
+  [ "$got" = "$3" ] && pass "guard: $1" || fail "guard: $1 (got $got, want $3)"
+}
+pubj "first publish with 2>&1 (every agent writes this)" \
+     "git push -u origin feat/mywork 2>&1" ALLOW
+pubj "first publish piped to tail" \
+     "git push -u origin feat/mywork 2>&1 | tail -5" ALLOW
+pubj "first publish chained with &&" \
+     "git push -u origin feat/mywork && echo ok" ALLOW
+pubj "first publish redirected to a file" \
+     "git push -u origin feat/mywork >out.txt" ALLOW
+pubj "first publish preceded by a cd on its own line" \
+     "cd /some/worktree
+git push -u origin feat/mywork 2>&1" ALLOW
+# The redirect-stripping must not swallow a REAL denial reason — --force with 2>&1 stays denied.
+pubj "force push with 2>&1 still denied" \
+     "git push --force origin feat/mywork 2>&1" DENY
+pubj "publish of the base branch with 2>&1 still denied" \
+     "git push origin main 2>&1" DENY
+
 # Once the branch exists on the remote it is an UPDATE — the rework flag keeps its meaning.
 ( cd "$PUB/work" && git push -q -u origin feat/mywork ) >/dev/null 2>&1
 pub "second push of a published branch -> deny"    "git push origin feat/mywork"         DENY
@@ -635,6 +709,30 @@ assert_deny "guard: TRUNCATE TABLE -> deny" \
 assert_deny "guard: bare TRUNCATE via a SQL client -> deny" \
   "$GUARD" "$(mk_term "psql -c 'TRUNCATE users'")" "TRACK_GUARD_DESTRUCTIVE=1" "TRACK_ALLOWED_PREFIXES=src/"
 
+# --- the dependency-skill scratch convention is always writable, regardless of scope ------
+# A scope narrowed to a deliverable prefix (TRACK_ALLOWED_PREFIXES=backend-go/) does not
+# mention .superpowers/ — SDD's (and other dependency skills') own gitignored working dir —
+# so without this exemption a real run's own documented default location for review-package
+# diffs/briefs/reports was unreachable, and it redirected them into runs/ instead (the
+# failure the task-scoped-artifact check elsewhere catches). No worktree fixture needed: this
+# is a straight prefix match on `rel`, independent of TRACK_MAIN_ROOT resolution — but it
+# must be an ABSOLUTE path anchored at the real toplevel: this suite's own $REPO_ROOT (the
+# ambient CWD for a bare assert_allow/assert_deny call) resolves to .github, three `cd ..`s
+# up from tests/, not this checkout's true top — a bare relative path here relativizes
+# against THAT, not what a real Write/Edit call would send.
+SP_GIT_TOP="$(git rev-parse --show-toplevel)"
+assert_allow "guard: .superpowers/ scratch dir is writable outside the approved prefix -> allow" \
+  "$GUARD" "$(jq -nc --arg p "$SP_GIT_TOP/.superpowers/sdd/plan-x/task-1-brief.md" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
+  "TRACK_ALLOWED_PREFIXES=backend-go/"
+
+assert_deny "guard: a .superpowers-lookalike dir is NOT exempt -> deny" \
+  "$GUARD" "$(jq -nc --arg p "$SP_GIT_TOP/.superpowers-other/x.md" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
+  "TRACK_ALLOWED_PREFIXES=backend-go/"
+
+assert_deny "guard: .superpowers/ exemption does not open the rest of the tree -> deny" \
+  "$GUARD" "$(jq -nc --arg p "$SP_GIT_TOP/deploy/x.yml" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
+  "TRACK_ALLOWED_PREFIXES=backend-go/"
+
 # --- the run's own bookkeeping dir is always writable -------------------------------
 # `runs/` held the governance bundle and the PR body but was absent from the approved
 # prefixes, so the model composed the bundle into `backend-go/.gov.tmp2.md` — an in-scope
@@ -682,12 +780,93 @@ printf '%s' "$result" | grep -q 'govpath' \
 assert_allow "guard: a non-bundle file in a worktree runs/ is still bookkeeping -> allow" \
   "$GUARD" "$(jq -nc --arg p "$RUNS_ABS/pr-body.md" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
   "TRACK_ALLOWED_PREFIXES=src/" "RUNS_DIR=$RUNS_ABS"
+
+# ...but the denial above must not be the ONLY answer. A surface isolating via a native
+# worktree tool confines its file-writing tools to the worktree, so it cannot author the
+# anchored path at all — and with every non-anchored bundle denied, the intersection was
+# empty: one observed run hit four refusals in a row (anchored path, scratch dir, dotfile
+# at the worktree root, a chained Bash lookup+cp) and never wrote its bundle. The staged
+# name is the legal path through, and it is legal ONLY inside a records dir.
+assert_allow "guard: a STAGED bundle in a worktree runs/ -> allow (the sandboxed-surface route)" \
+  "$GUARD" "$(jq -nc --arg p "$RUNS_ABS/x.governance.staged.md" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
+  "TRACK_ALLOWED_PREFIXES=src/" "RUNS_DIR=$RUNS_ABS"
+assert_deny "guard: a staged bundle in the DELIVERABLE tree -> deny" \
+  "$GUARD" "$(jq -nc --arg p "$GIT_TOP/src/x.governance.staged.md" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
+  "TRACK_ALLOWED_PREFIXES=src/" "RUNS_DIR=$RUNS_ABS"
+result=$(printf '%s' "$(jq -nc --arg p "$GIT_TOP/src/x.governance.staged.md" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
+  | env "TRACK_ALLOWED_PREFIXES=src/" "RUNS_DIR=$RUNS_ABS" bash "$GUARD" 2>&1) || true
+printf '%s' "$result" | grep -q 'govpath --staged' \
+  && pass "guard: the staged-bundle denial names govpath --staged as the in-bounds move" \
+  || fail "guard: staged-bundle denial names no fix"
+# The anchored denial has to hand the sandboxed surface its way out, or the model rediscovers
+# the deadlock one refusal at a time — which is exactly what it cost last time.
+result=$(printf '%s' "$(jq -nc --arg p "$WT_RUNS_ABS/x.governance.md" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
+  | env "TRACK_ALLOWED_PREFIXES=src/" "RUNS_DIR=$RUNS_ABS" bash "$GUARD" 2>&1) || true
+printf '%s' "$result" | grep -q 'govpath --staged' \
+  && pass "guard: the bundle-fork denial also names the staged route for a confined surface" \
+  || fail "guard: bundle-fork denial leaves a worktree-confined surface with no legal path"
 rm -rf "$WT_RUNS_ABS"
 
 assert_deny "guard: runs/ allowance does not open the rest of the tree -> deny" \
   "$GUARD" '{"tool_name":"Write","tool_input":{"file_path":"deploy/x.yml"}}' \
   "TRACK_ALLOWED_PREFIXES=src/" "RUNS_DIR=runs"
 rm -rf "$RUNS_ABS"
+
+# --- task-scoped artifacts: SDD's own working files must not fork into the anchor --------
+# A real run generalized the governance-bundle workaround to OTHER files: 3 of 12 SDD
+# review-package diffs landed in the MAIN checkout's runs/ (one 0 bytes) while the other 9
+# correctly stayed in the worktree — because p_is_runs exempts EITHER root from scope with
+# no rule saying which artifacts belong at which one. Needs a REAL linked worktree (not a
+# bare mktemp dir standing in for RUNS_DIR) so TRACK_MAIN_ROOT and this session's own
+# worktree root genuinely diverge. `pwd -P` throughout: `git rev-parse` normalizes symlinks
+# in its own output (macOS's /var -> /private/var), so any hand-built path compared against
+# it must be normalized the same way or the comparison silently never matches.
+TSA_T="$(cd "$(mktemp -d)" && pwd -P)"; TSA_MAIN="$TSA_T/main"; mkdir -p "$TSA_MAIN"
+( cd "$TSA_MAIN" && git init -q . && git config user.email t@t && git config user.name t \
+  && echo seed > seed.txt && git add -A && git commit -qm seed \
+  && git worktree add -q -b tsa-wt "$TSA_T/wt" ) >/dev/null 2>&1
+mkdir -p "$TSA_MAIN/runs" "$TSA_T/wt/runs"
+
+tsa_guard() { ( cd "$TSA_T/wt" && printf '%s' "$1" \
+  | env TRACK_ALLOWED_PREFIXES=src/ RUNS_DIR=runs RUN_ID=tsa1 bash "$GUARD" 2>&1 ) || true; }
+
+result=$(tsa_guard "$(jq -nc --arg p "$TSA_MAIN/runs/tsa1.task-7-review-package.diff" '{tool_name:"Write",tool_input:{file_path:$p}}')")
+printf '%s' "$result" | grep -q '"deny"' \
+  && pass "guard: an SDD task artifact named after this run, written to the MAIN anchor -> deny" \
+  || fail "guard: task-scoped artifact at the main anchor was allowed (got: $result)"
+printf '%s' "$result" | grep -qi 'own worktree' \
+  && pass "guard: the task-artifact denial names the current worktree as the fix" \
+  || fail "guard: task-artifact denial names no fix"
+
+result=$(tsa_guard "$(jq -nc --arg p "$TSA_T/wt/runs/tsa1.task-7-review-package.diff" '{tool_name:"Write",tool_input:{file_path:$p}}')")
+[ -z "$result" ] \
+  && pass "guard: the SAME task artifact in THIS worktree's own runs/ -> allow" \
+  || fail "guard: task artifact in this worktree's own runs/ was denied (got: $result)"
+
+# The known-good, genuinely single-homed basenames stay allowed at the anchor.
+for _bn in tsa1.json tsa1.dispatch tsa1.governance.md tsa1.governance.staged.md; do
+  result=$(tsa_guard "$(jq -nc --arg p "$TSA_MAIN/runs/$_bn" '{tool_name:"Write",tool_input:{file_path:$p}}')")
+  [ -z "$result" ] \
+    && pass "guard: known-anchor artifact $_bn at the main anchor -> still allow" \
+    || fail "guard: known-anchor artifact $_bn was denied at the anchor (got: $result)"
+done
+
+# No RUN_ID -> the whole check is a no-op (existing tests never set one; must stay unaffected).
+result=$(printf '%s' "$(jq -nc --arg p "$TSA_MAIN/runs/tsa1.task-7-review-package.diff" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
+  | env TRACK_ALLOWED_PREFIXES=src/ RUNS_DIR=runs bash "$GUARD" 2>&1) || true
+[ -z "$result" ] \
+  && pass "guard: task-artifact check is a no-op with no RUN_ID set" \
+  || fail "guard: task-artifact check fired with no RUN_ID set (got: $result)"
+
+# Solo / branch-in-place: no OTHER worktree exists to redirect to, so nothing is denied.
+result=$(cd "$TSA_MAIN" && printf '%s' "$(jq -nc --arg p "$TSA_MAIN/runs/tsa1.task-7-review-package.diff" '{tool_name:"Write",tool_input:{file_path:$p}}')" \
+  | env TRACK_ALLOWED_PREFIXES=src/ RUNS_DIR=runs RUN_ID=tsa1 bash "$GUARD" 2>&1) || true
+[ -z "$result" ] \
+  && pass "guard: branch-in-place (no separate worktree) -> task-artifact check does not fire" \
+  || fail "guard: branch-in-place session was denied with no alternative location (got: $result)"
+
+( cd "$TSA_MAIN" && git worktree remove --force "$TSA_T/wt" ) >/dev/null 2>&1 || true
+rm -rf "$TSA_T"
 
 # --- elision markers: a truncated body that reads as a complete one -----------------
 # The controller applies a maker's returned body VERBATIM, so a placeholder left in it writes
@@ -941,6 +1120,32 @@ kind_seen=$(jq -r '.evidence[-1].kind // empty' "$PROD_RUNS/$PROD_RID.json" 2>/d
 [ "$kind_seen" = "test" ] \
   && pass "evidence(producer): TEST_CMD_PATTERN match -> kind=test recorded" \
   || fail "evidence(producer): TEST_CMD_PATTERN match -> kind=test (got: $kind_seen)"
+
+# cwd_hint: read ONLY from the command's own explicit cd prefix — never a guess about
+# where the Bash tool actually ran, which no PostToolUse hook can see.
+printf '%s' '{"tool_name":"run_in_terminal","tool_input":{"command":"cd /abs/worktree/backend-go && go test ./..."},"tool_response":"ok"}' \
+  | RUN_ID="$PROD_RID" RUNS_DIR="$PROD_RUNS" TRACK_TEST_CMD_PATTERN="go test" \
+    bash "$EVIDENCE" >/dev/null 2>&1 || true
+cwd_seen=$(jq -r '.evidence[-1].cwd_hint // empty' "$PROD_RUNS/$PROD_RID.json" 2>/dev/null)
+[ "$cwd_seen" = "/abs/worktree/backend-go" ] \
+  && pass "evidence(producer): cwd_hint reads an explicit absolute 'cd &&' prefix" \
+  || fail "evidence(producer): cwd_hint from absolute cd prefix (got: $cwd_seen)"
+
+printf '%s' '{"tool_name":"run_in_terminal","tool_input":{"command":"go test ./..."},"tool_response":"ok"}' \
+  | RUN_ID="$PROD_RID" RUNS_DIR="$PROD_RUNS" TRACK_TEST_CMD_PATTERN="go test" \
+    bash "$EVIDENCE" >/dev/null 2>&1 || true
+cwd_seen=$(jq -r '.evidence[-1] | has("cwd_hint")' "$PROD_RUNS/$PROD_RID.json" 2>/dev/null)
+[ "$cwd_seen" = "false" ] \
+  && pass "evidence(producer): a bare command with no cd prefix carries NO cwd_hint field at all" \
+  || fail "evidence(producer): bare command should omit cwd_hint entirely (got: $cwd_seen)"
+
+printf '%s' '{"tool_name":"run_in_terminal","tool_input":{"command":"cd backend-go && go test ./..."},"tool_response":"ok"}' \
+  | RUN_ID="$PROD_RID" RUNS_DIR="$PROD_RUNS" TRACK_TEST_CMD_PATTERN="go test" \
+    bash "$EVIDENCE" >/dev/null 2>&1 || true
+cwd_seen=$(jq -r '.evidence[-1] | has("cwd_hint")' "$PROD_RUNS/$PROD_RID.json" 2>/dev/null)
+[ "$cwd_seen" = "false" ] \
+  && pass "evidence(producer): a RELATIVE cd prefix carries no cwd_hint (nothing absolute to compare)" \
+  || fail "evidence(producer): relative cd prefix should omit cwd_hint (got: $cwd_seen)"
 
 # Vacuity: a green that verified NOTHING must not read as proof. Both fixtures below are
 # verbatim from the scaffold run whose PR reported 3/3 required evidence kinds passing
@@ -1414,15 +1619,26 @@ section "track-trace.sh"
 
 jq -nc '{"run_id":"'"${RUN1_ID:-test}"'","v":1,"trace":[],"evidence":[],"tool_calls":0}' \
   > "$TMPDIR_RUNS/${RUN1_ID:-test}.json"
-jq -nc '{"hook_event_name":"SubagentStart","agent_id":"a001","agent_type":"impl"}' | \
+
+# OFF BY DEFAULT: RUN_ID set, TRACK_TRACE unset -> still a no-op. This is the whole point
+# of the change (briefs[] carries dispatch content now; the raw lifecycle trace costs
+# readability for little the audit cannot get elsewhere) — assert it before any test below
+# proves the opposite by explicitly opting in.
+jq -nc '{"hook_event_name":"SubagentStart","agent_id":"a000","agent_type":"impl"}' | \
   RUN_ID="${RUN1_ID:-test}" RUNS_DIR="$TMPDIR_RUNS" bash "$TRACE" >/dev/null 2>&1 || true
+trace_len0=$(jq '.trace | length' "$TMPDIR_RUNS/${RUN1_ID:-test}.json" 2>/dev/null || echo 0)
+[ "$trace_len0" -eq 0 ] && pass "trace: off by default (TRACK_TRACE unset -> no-op)" \
+  || fail "trace: off by default (TRACK_TRACE unset -> no-op, got $trace_len0 entries)"
+
+jq -nc '{"hook_event_name":"SubagentStart","agent_id":"a001","agent_type":"impl"}' | \
+  RUN_ID="${RUN1_ID:-test}" RUNS_DIR="$TMPDIR_RUNS" TRACK_TRACE=1 bash "$TRACE" >/dev/null 2>&1 || true
 trace_len=$(jq '.trace | length' "$TMPDIR_RUNS/${RUN1_ID:-test}.json" 2>/dev/null || echo 0)
-[ "$trace_len" -ge 1 ] && pass "trace: SubagentStart -> appended to run record" \
-  || fail "trace: SubagentStart -> appended to run record"
+[ "$trace_len" -ge 1 ] && pass "trace: TRACK_TRACE=1 + SubagentStart -> appended to run record" \
+  || fail "trace: TRACK_TRACE=1 + SubagentStart -> appended to run record"
 
 # enriched: agent_description (SubagentStart-only "why") is captured as reason
 jq -nc '{"hook_event_name":"SubagentStart","agent_id":"a002","agent_type":"Explore","agent_description":"map the auth flow"}' | \
-  RUN_ID="${RUN1_ID:-test}" RUNS_DIR="$TMPDIR_RUNS" bash "$TRACE" >/dev/null 2>&1 || true
+  RUN_ID="${RUN1_ID:-test}" RUNS_DIR="$TMPDIR_RUNS" TRACK_TRACE=1 bash "$TRACE" >/dev/null 2>&1 || true
 if jq -e '[.trace[] | select(.reason == "map the auth flow")] | length == 1' \
      "$TMPDIR_RUNS/${RUN1_ID:-test}.json" >/dev/null 2>&1; then
   pass "trace: agent_description captured as reason"
@@ -1432,7 +1648,7 @@ fi
 
 # camelCase surface: agentName + stop_reason are read too
 jq -nc '{"hook_event_name":"SubagentStop","agentName":"Explore","stop_reason":"end_turn"}' | \
-  RUN_ID="${RUN1_ID:-test}" RUNS_DIR="$TMPDIR_RUNS" bash "$TRACE" >/dev/null 2>&1 || true
+  RUN_ID="${RUN1_ID:-test}" RUNS_DIR="$TMPDIR_RUNS" TRACK_TRACE=1 bash "$TRACE" >/dev/null 2>&1 || true
 if jq -e '[.trace[] | select(.agent_type == "Explore" and .stop_reason == "end_turn")] | length == 1' \
      "$TMPDIR_RUNS/${RUN1_ID:-test}.json" >/dev/null 2>&1; then
   pass "trace: camelCase agentName + stop_reason captured"
@@ -1442,6 +1658,62 @@ fi
 
 result=$(jq -nc '{"hook_event_name":"SubagentStart"}' | bash "$TRACE" 2>&1) || true
 [ -z "$result" ] && pass "trace: no RUN_ID -> no-op" || fail "trace: no RUN_ID -> no-op"
+
+result=$(jq -nc '{"hook_event_name":"SubagentStart","agent_id":"a999"}' \
+  | RUN_ID="${RUN1_ID:-test}" RUNS_DIR="$TMPDIR_RUNS" TRACK_TRACE=0 bash "$TRACE" 2>&1) || true
+[ -z "$result" ] && pass "trace: TRACK_TRACE=0 explicitly -> no-op" || fail "trace: TRACK_TRACE=0 explicitly -> no-op"
+
+# ---------------------------------------------------------------------------
+# SUITE 8b -- track-skill.sh (HOOK-OBSERVED skills[], self_reported:false)
+# ---------------------------------------------------------------------------
+# Before this hook, skills[] was reachable only via track-note.sh skill — a manual call
+# the model has to remember to make. On a real run that drove four different skills in
+# sequence, skills[] recorded exactly one. This is the PreToolUse-on-Skill-tool fix that
+# makes activation a mechanical fact instead of whatever the model happened to narrate.
+section "track-skill.sh"
+SKILLH="$SCRIPTS_DIR/track-skill.sh"
+[ -x "$SKILLH" ] || chmod +x "$SKILLH"
+SKH_RUNS="$(mktemp -d)"; SKH_RID="skh-run"
+jq -nc '{"run_id":"'"$SKH_RID"'","v":1,"trace":[],"evidence":[],"tool_calls":0}' \
+  > "$SKH_RUNS/$SKH_RID.json"
+
+jq -nc '{"hook_event_name":"PreToolUse","tool_name":"Skill","tool_input":{"skill":"dispatching-parallel-agents"}}' \
+  | RUN_ID="$SKH_RID" RUNS_DIR="$SKH_RUNS" bash "$SKILLH" >/dev/null 2>&1 || true
+if jq -e '[.skills[] | select(.skill == "dispatching-parallel-agents" and .self_reported == false)] | length == 1' \
+     "$SKH_RUNS/$SKH_RID.json" >/dev/null 2>&1; then
+  pass "skill(hook): a Skill tool call is recorded with self_reported:false"
+else
+  fail "skill(hook): Skill tool call recorded (got: $(jq -c '.skills' "$SKH_RUNS/$SKH_RID.json" 2>/dev/null))"
+fi
+
+# args, when present, are captured and bounded — never let one runaway payload balloon the record.
+jq -nc --arg args "$(head -c 300 </dev/zero | tr '\0' 'x')" \
+  '{"hook_event_name":"PreToolUse","tool_name":"Skill","tool_input":{"skill":"loop",args:$args}}' \
+  | RUN_ID="$SKH_RID" RUNS_DIR="$SKH_RUNS" bash "$SKILLH" >/dev/null 2>&1 || true
+args_len="$(jq -r '[.skills[] | select(.skill=="loop")][0].args | length' "$SKH_RUNS/$SKH_RID.json" 2>/dev/null || echo 0)"
+[ "$args_len" -le 200 ] && [ "$args_len" -gt 0 ] \
+  && pass "skill(hook): args captured and bounded to 200 chars" \
+  || fail "skill(hook): args should be captured and bounded (got length $args_len)"
+
+# A non-Skill tool call must be a no-op — this fires on every PreToolUse on surfaces that
+# cannot scope by matcher (Copilot).
+jq -nc '{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"x.go"}}' \
+  | RUN_ID="$SKH_RID" RUNS_DIR="$SKH_RUNS" bash "$SKILLH" >/dev/null 2>&1 || true
+[ "$(jq -r '.skills | length' "$SKH_RUNS/$SKH_RID.json" 2>/dev/null)" = "2" ] \
+  && pass "skill(hook): a non-Skill tool call is a no-op" \
+  || fail "skill(hook): non-Skill tool call should not append (got: $(jq -c '.skills' "$SKH_RUNS/$SKH_RID.json"))"
+
+# A Skill call with no name field is a no-op — nothing legible to record.
+jq -nc '{"hook_event_name":"PreToolUse","tool_name":"Skill","tool_input":{}}' \
+  | RUN_ID="$SKH_RID" RUNS_DIR="$SKH_RUNS" bash "$SKILLH" >/dev/null 2>&1 || true
+[ "$(jq -r '.skills | length' "$SKH_RUNS/$SKH_RID.json" 2>/dev/null)" = "2" ] \
+  && pass "skill(hook): a Skill call with no name field is a no-op" \
+  || fail "skill(hook): nameless Skill call should not append"
+
+result=$(jq -nc '{"hook_event_name":"PreToolUse","tool_name":"Skill","tool_input":{"skill":"x"}}' \
+  | bash "$SKILLH" 2>&1) || true
+[ -z "$result" ] && pass "skill(hook): no RUN_ID -> no-op" || fail "skill(hook): no RUN_ID -> no-op"
+rm -rf "$SKH_RUNS"
 
 # ---------------------------------------------------------------------------
 # SUITE 9b -- track-note.sh (SELF-REPORTED skills[] + iterations)
@@ -1529,14 +1801,71 @@ esac
 printf 'x\n' > "$GOVP_OUT" 2>/dev/null \
   && pass "note: the path govpath prints is writable without a manual mkdir" \
   || fail "note: the path govpath prints is writable without a manual mkdir"
+
+# --- govpath --staged + promotion: the worktree-confined surface -------------------
+# A surface that isolates via a native worktree tool cannot write the anchored path at all,
+# and the guard denies every other bundle path — an empty intersection, which cost one run
+# its budget. --staged prints a path INSIDE this worktree; the pin then promotes it across.
+# The cross-boundary write moves back into a script, where the run record and the evidence
+# captures already do it.
+GOVS_OUT="$( cd "$GOVP_T/wt" && RUN_ID=govp RUNS_DIR=runs bash "$NOTE" govpath --staged 2>/dev/null )"
+case "$GOVS_OUT" in
+  */wt/runs/govp.governance.staged.md) pass "note: govpath --staged stays inside the CURRENT worktree" ;;
+  *) fail "note: govpath --staged stays inside the current worktree (got: $GOVS_OUT)" ;;
+esac
+printf '# staged bundle\n' > "$GOVS_OUT" 2>/dev/null \
+  && pass "note: the staged path is writable without a manual mkdir" \
+  || fail "note: the staged path is writable without a manual mkdir"
+( cd "$GOVP_T/wt" && RUN_ID=govp RUNS_DIR=runs bash "$NOTE" governance "$GOVS_OUT" ) >/dev/null 2>&1
+GOVS_PIN="$(jq -r '.governance_bundle.path // ""' "$GOVP_MAIN/runs/govp.json" 2>/dev/null || echo '')"
+case "$GOVS_PIN" in
+  */main/runs/govp.governance.md) pass "note: pinning a staged bundle records the ANCHORED path, not the staged one" ;;
+  *) fail "note: pinning a staged bundle records the anchored path (got: $GOVS_PIN)" ;;
+esac
+[ -f "$GOVP_MAIN/runs/govp.governance.md" ] \
+  && grep -q 'staged bundle' "$GOVP_MAIN/runs/govp.governance.md" 2>/dev/null \
+  && pass "note: promotion moves the CONTENT, not just the path" \
+  || fail "note: promotion moves the content, not just the path"
+# One home means one file. Leaving the staged copy behind recreates the fork this prevents.
+[ ! -e "$GOVS_OUT" ] \
+  && pass "note: promotion removes the staged copy — the bundle keeps exactly one home" \
+  || fail "note: promotion left a staged copy behind (the fork this exists to prevent)"
+# Re-pinning the already-anchored path (the sanctioned mid-core re-pin) must stay a quiet
+# no-op: no relocation warning, and above all no attempt to copy the bundle onto itself.
+# Both were live wherever the checkout is reached through a symlink — /tmp and /var/folders
+# on macOS — because the caller's path is logical while every path it is compared against
+# comes back from git as physical. This fixture IS that case (mktemp -d under /var).
+GOVS_REPIN="$( cd "$GOVP_T/wt" && RUN_ID=govp RUNS_DIR=runs bash "$NOTE" governance "$GOVP_MAIN/runs/govp.governance.md" 2>&1 )"
+[ -z "$GOVS_REPIN" ] && [ -s "$GOVP_MAIN/runs/govp.governance.md" ] \
+  && pass "note: re-pinning the anchored path is silent and never copies the bundle onto itself" \
+  || fail "note: re-pinning the anchored path warned or self-copied ($GOVS_REPIN)"
+
+# Narrow by design: only THIS run's own bundle basenames are relocated. Anything else the
+# caller points at is pinned where it lies, with the existing warning.
+printf '# not the bundle\n' > "$GOVP_T/wt/notes.md"
+( cd "$GOVP_T/wt" && RUN_ID=govp RUNS_DIR=runs bash "$NOTE" governance "$GOVP_T/wt/notes.md" ) >/dev/null 2>&1
+GOVS_PIN2="$(jq -r '.governance_bundle.path // ""' "$GOVP_MAIN/runs/govp.json" 2>/dev/null || echo '')"
+case "$GOVS_PIN2" in
+  */wt/notes.md)
+    [ -f "$GOVP_T/wt/notes.md" ] \
+      && pass "note: promotion is narrow — an unrelated pinned file is not relocated" \
+      || fail "note: promotion is narrow — an unrelated pinned file was moved" ;;
+  *) fail "note: promotion is narrow — an unrelated pinned file was relocated (pin: $GOVS_PIN2)" ;;
+esac
 ( cd "$GOVP_MAIN" && git worktree remove --force "$GOVP_T/wt" ) >/dev/null 2>&1 || true
 rm -rf "$GOVP_T"
 
 # --- governance: pin the persisted bundle (must exist on disk) -----------------
 GOV_FILE="$NOTE_RUNS/gov.md"; printf 'binding constraints\n' > "$GOV_FILE"
 RUN_ID="$NOTE_RID" RUNS_DIR="$NOTE_RUNS" bash "$NOTE" governance "$GOV_FILE" >/dev/null 2>&1 || true
-if jq -e --arg p "$GOV_FILE" '.governance_bundle.path == $p
-          and (.governance_bundle.sha | length == 40)
+# The pin is asserted as a FILE, not as a string: it is recorded physically (`pwd -P`), so a
+# caller's logical path — anything under /tmp or /var/folders on macOS — is recorded in its
+# resolved form. That is the point. Every reader that compares it (the promotion check here,
+# the guard's records-dir test, the audit's existence test) gets its own side from git, which
+# is always physical, and a logical pin compares unequal to its own directory.
+GOV_PIN="$(jq -r '.governance_bundle.path // ""' "$NOTE_RUNS/$NOTE_RID.json" 2>/dev/null || echo '')"
+if [ -n "$GOV_PIN" ] && [ "$GOV_PIN" -ef "$GOV_FILE" ] \
+   && jq -e '(.governance_bundle.sha | length == 40)
           and .governance_bundle.self_reported == true' \
      "$NOTE_RUNS/$NOTE_RID.json" >/dev/null 2>&1; then
   pass "note: governance pins bundle path + sha"
@@ -1615,6 +1944,10 @@ aud_seed() { # aud_seed <run-id> — a clean, fully-disciplined story run
 # call site brings the flakiness back. G4's own behaviour is asserted below in an isolated
 # repo that sets the pattern explicitly, which overrides this.
 export TRACK_TRUST_BOUNDARY_PATTERN="__no_such_trust_boundary_path__"
+# M1 (maker/checker id separation) now needs TRACK_TRACE=1 to see agent_id at all — off by
+# default (track-trace.sh's header). Exported section-wide for the same reason as above:
+# M1 never FAILs (WARN only), so this cannot turn a passing fixture into a failing one.
+export TRACK_TRACE=1
 
 # Pinning the trust-boundary pattern was only half the leak. `changed` also drives G2 and G5
 # (bundle coverage / bundle substance), which resolve `.github/instructions/*` globs against the
@@ -1722,7 +2055,7 @@ c2_seed() { # c2_seed <mode> <trace-json> [briefs-json]
       phase_log:[{t:"a",mode:$m,step:"governance"}],
       governance_bundle:{path:$p},trace:$tr,briefs:$br,evidence:[]}' > "$C2_ISO/runs/c2.json"
 }
-_c2() { ( cd "$C2_ISO" && RUN_ID=c2 RUNS_DIR=runs TRACK_BASE_REF=main \
+_c2() { ( cd "$C2_ISO" && RUN_ID=c2 RUNS_DIR=runs TRACK_BASE_REF=main TRACK_TRACE=1 \
           bash "$AUDIT" --json --warn-only 2>/dev/null ) \
         | jq -r '.checks[] | select(.id=="C2") | .verdict'; }
 echo deliverable > "$C2_ISO/app.go"
@@ -1755,6 +2088,19 @@ echo deliverable > "$C2_ISO/app.go"; rm -f "$C2_ISO/.claude/settings.json"; c2_s
 [ "$(_c2)" = "WARN" ] \
   && pass "audit: C2 WARNs rather than fails when track-trace.sh is unwired" \
   || fail "audit: C2 WARNs rather than fails when track-trace.sh is unwired (got $(_c2))"
+
+# The hook CAN be registered while TRACK_TRACE stays unset (the new default) — that must
+# WARN exactly like "unwired", not silently pass an unobserved run because a settings.json
+# happens to mention the script. TRACK_TRACE explicitly CLEARED here, not just left off the
+# env line: the section exports TRACK_TRACE=1 above (for the M1 tests further down) and a
+# subshell inherits an exported var unless the var is itself reassigned for that command.
+printf '{"hooks":{"SubagentStart":[{"command":"bash .github/hooks/track-trace.sh"}]}}\n' \
+  > "$C2_ISO/.claude/settings.json"
+c2warn_verdict="$( ( cd "$C2_ISO" && RUN_ID=c2 RUNS_DIR=runs TRACK_BASE_REF=main TRACK_TRACE= \
+  bash "$AUDIT" --json --warn-only 2>/dev/null ) | jq -r '.checks[] | select(.id=="C2") | .verdict' )"
+[ "$c2warn_verdict" = "WARN" ] \
+  && pass "audit: C2 WARNs when the hook is registered but TRACK_TRACE is unset" \
+  || fail "audit: C2 registered-but-disabled trace should WARN (got $c2warn_verdict)"
 rm -rf "$C2_ISO"
 
 # G5 — bundle SUBSTANCE, both directions. G2 is a substring test: a bare heading satisfies it
@@ -1788,16 +2134,20 @@ g5_seed '# bundle
   && pass "audit: G5 fails a section whose only bullet is a pointer, not a constraint" \
   || fail "audit: G5 fails a pointer-only section (got $(_g5 G5))"
 # Two bullets is a THEME summary of a ~1,100-line instruction file, not its binding constraints,
-# and it used to clear this check. The floor is 5 now that the bundle's own budget is ~500 lines —
-# a thin section is under-distillation, never a context trade-off — so the old passing shape is
-# pinned as a FAIL to keep the floor from silently regressing.
+# and it used to clear this check. The floor is 10 now that the bundle's own budget is ~500
+# lines — a thin section is under-distillation, never a context trade-off — so the old passing
+# shape is pinned as a FAIL to keep the floor from silently regressing.
 g5_seed '# bundle
 ## go.instructions.md — matched **/*.go
 - errors wrapped with %w, never %v
 - no naked returns in exported funcs'
 [ "$(_g5 G5)" = "FAIL" ] \
   && pass "audit: G5 fails a two-bullet theme summary (the old default floor)" \
-  || fail "audit: G5 fails a two-bullet section under the default floor of 5 (got $(_g5 G5))"
+  || fail "audit: G5 fails a two-bullet section under the default floor of 10 (got $(_g5 G5))"
+# Five bullets cleared the OLD floor and is pinned as a FAIL now too — the floor was raised
+# specifically because 5 still under-covers a matched file with more than 5 real constraints
+# (auth/secrets/persistence files routinely have far more), and a bundle that stops at 5
+# regardless of how much more genuinely binds the diff is exactly the shape that regressed.
 g5_seed '# bundle
 ## go.instructions.md — matched **/*.go
 - errors wrapped with %w, never %v
@@ -1805,8 +2155,23 @@ g5_seed '# bundle
 - context.Context is the first parameter of any call that does I/O
 - table-driven tests with subtests for anything with more than two input shapes
 - exported errors are sentinel vars or typed, never fmt.Errorf at the boundary'
+[ "$(_g5 G5)" = "FAIL" ] \
+  && pass "audit: G5 still fails five bullets — cleared the old floor, not the raised one" \
+  || fail "audit: G5 should fail 5 bullets under the default floor of 10 (got $(_g5 G5))"
+g5_seed '# bundle
+## go.instructions.md — matched **/*.go
+- errors wrapped with %w, never %v
+- no naked returns in exported funcs
+- context.Context is the first parameter of any call that does I/O
+- table-driven tests with subtests for anything with more than two input shapes
+- exported errors are sentinel vars or typed, never fmt.Errorf at the boundary
+- no panic in library code — return the error to the caller
+- goroutines launched by a handler are bounded by the request context, no fire-and-forget
+- mutex-guarded fields are unexported and never returned by reference
+- log lines carry a request id; no bare fmt.Println in non-test code
+- interfaces are defined at the consumer, not the producer'
 [ "$(_g5 G5)" = "PASS" ] \
-  && pass "audit: G5 passes once the section carries real distilled constraints" \
+  && pass "audit: G5 passes once the section carries real distilled constraints (10+)" \
   || fail "audit: G5 passes on a substantive section (got $(_g5 G5))"
 # The floor is repo-policy, not a constant: a repo that wants the old behaviour tunes it back.
 _g5_min() { ( cd "$G5_ISO" && RUN_ID=g5 RUNS_DIR=runs TRACK_BASE_REF=main \
@@ -1853,6 +2218,28 @@ g6_seed g6na "[$(g6_brief 0 4 true false false)]"
 [ "$(aud_verdict clean G6)" = "WARN" ] \
   && pass "audit: G6 warns rather than passing when track-brief.sh is unwired" \
   || fail "audit: G6 warns when the brief hook is unwired (got $(aud_verdict clean G6))"
+
+# G6's OTHER WARN branch — wired but no briefs recorded — names $n_dispatch in its message.
+# SUBAGENT_SEL alone counts a Stop for every Start, roughly doubling that number: a real
+# run's record had 78 matched trace entries for 39 actual dispatches. Isolated fixture (not
+# AUD_DIFF_ISO) because it needs a committed .claude/settings.json naming track-brief, which
+# would change brief_wired for every OTHER test sharing that fixture.
+G6D_T="$(mktemp -d)"
+( cd "$G6D_T" && git init -q . && git config user.email t@t && git config user.name t \
+  && mkdir -p .claude && printf '{"hooks":{"PreToolUse":[{"matcher":"Agent","hooks":[{"command":"track-brief.sh"}]}]}}' > .claude/settings.json \
+  && git add -A && git commit -qm seed ) >/dev/null 2>&1
+jq -nc '{run_id:"g6dispcount", v:1, tool_calls:2,
+         trace:[{t:"2026-01-01T00:00:00Z",kind:"subagent",event:"SubagentStart",agent_id:"a1"},
+                {t:"2026-01-01T00:05:00Z",kind:"subagent",event:"SubagentStop",agent_id:"a1"},
+                {t:"2026-01-01T00:10:00Z",kind:"subagent",event:"SubagentStart",agent_id:"a2"},
+                {t:"2026-01-01T00:15:00Z",kind:"subagent",event:"SubagentStop",agent_id:"a2"}],
+         evidence:[], briefs:[]}' > "$G6D_T/g6dispcount.json"
+g6d_msg="$( cd "$G6D_T" && RUN_ID=g6dispcount RUNS_DIR="$G6D_T" bash "$AUDIT" --json --warn-only 2>/dev/null \
+  | jq -r '.checks[] | select(.id=="G6") | .message' )"
+printf '%s' "$g6d_msg" | grep -q 'no brief for 2 dispatch' \
+  && pass "audit: G6's dispatch count is the true 2, not the 4 raw trace entries" \
+  || fail "audit: G6 miscounted dispatches (got: $g6d_msg)"
+rm -rf "$G6D_T"
 
 # G3 — a deliberate mid-core RE-PIN must stay legal. The old check compared the single
 # overwritten governance_bundle.t against the first dispatch, so re-distilling after a later
@@ -1923,6 +2310,36 @@ jq '.phase = {mode:"scaffold",step:"convergence"}
 aud_seed m1one; jq '.trace=[.trace[0]]' "$AUD_RUNS/m1one.json" > "$AUD_RUNS/t" && mv "$AUD_RUNS/t" "$AUD_RUNS/m1one.json"
 [ "$(aud_verdict m1one M1)" = "WARN" ] && pass "audit: M1 warns when one agent may have made and reviewed" || fail "audit: M1 warns when one agent may have made and reviewed"
 
+# A Start/Stop agent_id MISMATCH must not inflate the distinct-id count. Real-run evidence:
+# one subagent's Stop carried a different agent_id than its own Start (a surface quirk) —
+# counting every trace agent_id unique(!)'d that stray id as a THIRD subagent, when only 2
+# were ever dispatched. In a degenerate single-subagent run this shape could show "2
+# distinct ids" — a false PASS for the exact thing M1 exists to catch.
+aud_seed m1mismatch
+jq '.trace=[{t:"2026-01-01T00:00:00Z",kind:"subagent",event:"SubagentStart",agent_id:"a1"},
+             {t:"2026-01-01T00:05:00Z",kind:"subagent",event:"SubagentStop",agent_id:"a1"},
+             {t:"2026-01-01T00:10:00Z",kind:"subagent",event:"SubagentStart",agent_id:"a2"},
+             {t:"2026-01-01T00:15:00Z",kind:"subagent",event:"SubagentStop",agent_id:"MISMATCHED-STOP-ID"}]' \
+  "$AUD_RUNS/m1mismatch.json" > "$AUD_RUNS/t" && mv "$AUD_RUNS/t" "$AUD_RUNS/m1mismatch.json"
+# Captured before grepping (never a live pipe) — aud_json exits non-zero on a real FAIL
+# elsewhere in the same record, which under this file's set -o pipefail would override
+# grep's own successful match regardless of what it found.
+m1mm_msg="$(aud_json m1mismatch 2>/dev/null | jq -r '.checks[]|select(.id=="M1")|.message' || true)"
+printf '%s' "$m1mm_msg" | grep -q '^2 distinct' \
+  && pass "audit: M1's distinct-id count ignores a Start/Stop agent_id mismatch" \
+  || fail "audit: M1 counted a mismatched Stop id as a third subagent (got: $m1mm_msg)"
+
+# Fallback: a surface where SubagentStart was never wired at all (hooks.md's documented
+# historical Claude Code gap) leaves ONLY Stop events — preferring Start must not zero out
+# a real signal that exists nowhere else.
+aud_seed m1stoponly
+jq '.trace=[{t:"2026-01-01T00:05:00Z",kind:"subagent",event:"SubagentStop",agent_id:"a1"},
+             {t:"2026-01-01T00:15:00Z",kind:"subagent",event:"SubagentStop",agent_id:"a2"}]' \
+  "$AUD_RUNS/m1stoponly.json" > "$AUD_RUNS/t" && mv "$AUD_RUNS/t" "$AUD_RUNS/m1stoponly.json"
+[ "$(aud_verdict m1stoponly M1)" = "PASS" ] \
+  && pass "audit: M1 falls back to Stop-only ids when no Start was ever recorded" \
+  || fail "audit: M1 lost its signal on a Stop-only (unwired-Start) surface (got $(aud_verdict m1stoponly M1))"
+
 # T1 — story mode with no failing capture means the tests never ran red.
 aud_seed t1nored; jq '.evidence=[.evidence[1]]' "$AUD_RUNS/t1nored.json" > "$AUD_RUNS/t" && mv "$AUD_RUNS/t" "$AUD_RUNS/t1nored.json"
 [ "$(aud_verdict t1nored T1)" = "WARN" ] && pass "audit: T1 warns when story mode never recorded a RED" || fail "audit: T1 warns when story mode never recorded a RED"
@@ -1966,8 +2383,88 @@ aud_seed e4ok
   && pass "audit: E4 passes when every kind's latest capture checked real files" \
   || fail "audit: E4 passes on substantive evidence (got $(aud_verdict e4ok E4))"
 
+# E5 — evidence captured from the wrong tree. A PostToolUse hook cannot see a Bash tool's
+# live CWD (fp_dir() in track-evidence.sh already routes around that same gap for
+# fingerprinting), so this can only read what the command's OWN cd prefix says — absent
+# entirely for a bare command, which must never be judged as a violation.
+[ -z "$(jq -r '.evidence[]?.cwd_hint // empty' "$AUD_RUNS/e4ok.json")" ] \
+  && [ "$(aud_verdict e4ok E5)" = "PASS" ] \
+  && pass "audit: E5 passes when no capture carries a cwd_hint (nothing to judge)" \
+  || fail "audit: E5 should pass silently absent any cwd_hint (got $(aud_verdict e4ok E5))"
+
+E5_T="$(cd "$(mktemp -d)" && pwd -P)"
+( cd "$E5_T" && git init -q -b main . && git config user.email t@t && git config user.name t \
+  && echo seed > seed.txt && git add -A && git commit -qm seed \
+  && git worktree add -q -b feat/e5 "$E5_T/wt" ) >/dev/null 2>&1
+mkdir -p "$E5_T/runs"
+printf '{"branch":"feat/e5"}\n' > "$E5_T/runs/e5t.dispatch"
+e5_seed() { # e5_seed <bad-cwd-or-empty> <good-cwd-or-empty>
+  jq -nc --arg bad "$1" --arg good "$2" \
+    '{run_id:"e5t", v:1, status:"success",
+      evidence:( [{kind:"go-build",cmd:"go build",response:"ok",fingerprint:"f1",verdict:"pass"}
+                   + (if $bad  != "" then {cwd_hint:$bad}  else {} end)]
+               + [{kind:"go-test", cmd:"go test", response:"ok",fingerprint:"f1",verdict:"pass"}
+                   + (if $good != "" then {cwd_hint:$good} else {} end)] )}' \
+    > "$E5_T/runs/e5t.json"; }
+e5_verdict() { ( cd "$E5_T/wt" && RUN_ID=e5t RUNS_DIR=runs bash "$AUDIT" --json --warn-only 2>/dev/null ) \
+  | jq -r '.checks[] | select(.id=="E5") | .verdict'; }
+e5_msg() { ( cd "$E5_T/wt" && RUN_ID=e5t RUNS_DIR=runs bash "$AUDIT" --json --warn-only 2>/dev/null ) \
+  | jq -r '.checks[] | select(.id=="E5") | .message'; }
+
+e5_seed "/Users/x/nexus-agent/backend-go" "$E5_T/wt/backend-go"
+[ "$(e5_verdict)" = "FAIL" ] \
+  && pass "audit: E5 fails a capture whose cd target is OUTSIDE this run's worktree" \
+  || fail "audit: E5 should fail a wrong-directory capture (got $(e5_verdict))"
+printf '%s' "$(e5_msg)" | grep -q 'go-build' \
+  && pass "audit: E5 names WHICH kind was captured in the wrong tree" \
+  || fail "audit: E5 should name the offending kind (got $(e5_msg))"
+printf '%s' "$(e5_msg)" | grep -q 'go-test' \
+  && fail "audit: E5 should not also flag the kind whose hint was correct" \
+  || pass "audit: E5 does not flag a capture whose cd target IS this run's worktree"
+
+e5_seed "$E5_T/wt/backend-go" ""
+[ "$(e5_verdict)" = "PASS" ] \
+  && pass "audit: E5 passes when every present hint matches this run's worktree" \
+  || fail "audit: E5 should pass when hints are correct or absent (got $(e5_verdict))"
+
+( cd "$E5_T" && git worktree remove --force "$E5_T/wt" ) >/dev/null 2>&1 || true
+rm -rf "$E5_T"
+
 aud_seed f1none; jq 'del(.status)' "$AUD_RUNS/f1none.json" > "$AUD_RUNS/t" && mv "$AUD_RUNS/t" "$AUD_RUNS/f1none.json"
 [ "$(aud_verdict f1none F1)" = "WARN" ] && pass "audit: F1 warns when no terminal state was recorded" || fail "audit: F1 warns when no terminal state was recorded"
+
+# --- H1: stray task-scoped files in the main checkout's records dir ------------
+# The backstop for what track-guard.sh's Write/Edit-only check cannot see: on the real
+# incident this catches, the write went through Bash (a dependency skill's own script,
+# invoked with a custom output path), which no PreToolUse path check observes at all.
+# AUD_RUNS here IS the anchored records dir (passed straight through as RUNS_DIR), so
+# dropping a file there directly is exactly what a stray Bash-driven write would leave.
+aud_seed h1clean
+[ "$(aud_verdict h1clean H1)" = "PASS" ] \
+  && pass "audit: H1 passes when the records dir holds only this run's own files" \
+  || fail "audit: H1 passes on a clean records dir (got $(aud_verdict h1clean H1))"
+
+aud_seed h1stray
+printf 'diff --git a/x b/x\n' > "$AUD_RUNS/h1stray.task-7-review-package.diff"
+: > "$AUD_RUNS/h1stray.task-8-review-package.diff"
+h1_msg="$(aud_json h1stray | jq -r '.checks[] | select(.id=="H1") | .message')"
+[ "$(aud_verdict h1stray H1)" = "WARN" ] \
+  && pass "audit: H1 warns on a task-scoped file stray in the main checkout's records dir" \
+  || fail "audit: H1 warns on a stray file (got $(aud_verdict h1stray H1))"
+printf '%s' "$h1_msg" | grep -q 'task-7-review-package.diff' \
+  && printf '%s' "$h1_msg" | grep -q 'task-8-review-package.diff' \
+  && pass "audit: H1 names every stray file, not just the first" \
+  || fail "audit: H1 did not name both strays (got: $h1_msg)"
+rm -f "$AUD_RUNS/h1stray.task-7-review-package.diff" "$AUD_RUNS/h1stray.task-8-review-package.diff"
+
+# The genuinely single-homed basenames must never be flagged as strays.
+aud_seed h1known
+: > "$AUD_RUNS/h1known.dispatch"
+printf '# staged\n' > "$AUD_RUNS/h1known.governance.staged.md"
+[ "$(aud_verdict h1known H1)" = "PASS" ] \
+  && pass "audit: H1 does not flag the run own known-anchor basenames (record/dispatch/governance/staged)" \
+  || fail "audit: H1 flagged a known-anchor basename as a stray (got $(aud_verdict h1known H1))"
+rm -f "$AUD_RUNS/h1known.dispatch" "$AUD_RUNS/h1known.governance.staged.md"
 
 # --- Isolation & resume (the early bracket) ------------------------------------
 # Before these existed, a run that never isolated and never reconciled audited
@@ -2043,7 +2540,8 @@ aud_compact() { # aud_compact <run-id> <compactions> <reads> <trace>
      '.compactions = $c | .governance_reads = $r | .trace = $tr' \
      "$AUD_RUNS/$1.json" > "$AUD_RUNS/$1.tmp" && mv "$AUD_RUNS/$1.tmp" "$AUD_RUNS/$1.json"
 }
-_disp='[{"t":"2026-01-01T11:00:00Z","kind":"subagent","event":"SubagentStop","agent_id":"a1"}]'
+# A DISPATCH is a Start, not a Stop — a subagent's own completion cannot need a fresh brief.
+_disp='[{"t":"2026-01-01T11:00:00Z","kind":"subagent","event":"SubagentStart","agent_id":"a1"}]'
 
 # A dispatch after a compaction with no re-read in between — the silent failure itself.
 aud_compact i4bad '[{"t":"2026-01-01T10:00:00Z"}]' '[]' "$_disp"
@@ -2084,6 +2582,38 @@ jq '.briefs[0] |= (.lines_matched = 4 | .thin = false)' \
 [ "$(aud_verdict i4used I4)" = "PASS" ] \
   && pass "audit: I4 passes when the post-compaction brief carried the re-read bundle" \
   || fail "audit: I4 passes when the re-read was actually used (got $(aud_verdict i4used I4))"
+
+# I4 must never mistake a SubagentSTOP for "the next dispatch". A real run's record showed
+# exactly this: three compactions fired while ONE already-briefed subagent was still
+# in-flight, and its Stop (unrelated to any fresh brief) got named as the violation. A
+# subagent's own completion cannot need a re-read that predates its own dispatch.
+aud_compact i4stopnotdisp '[{"t":"2026-01-01T10:00:00Z"}]' '[]' \
+  '[{"t":"2026-01-01T09:00:00Z","kind":"subagent","event":"SubagentStart","agent_id":"a1"},
+    {"t":"2026-01-01T10:30:00Z","kind":"subagent","event":"SubagentStop","agent_id":"a1"}]'
+[ "$(aud_verdict i4stopnotdisp I4)" = "PASS" ] \
+  && pass "audit: I4 does not mistake an in-flight subagent's Stop for a fresh dispatch" \
+  || fail "audit: I4 mistook a Stop for a dispatch (got $(aud_verdict i4stopnotdisp I4))"
+# Captured into a variable before grepping, never piped live: aud_json calls track-audit.sh
+# WITHOUT --warn-only, so it exits 2 whenever the record has a real FAIL — under this file's
+# own `set -o pipefail` (line ~2376 already warns of this), that exit code propagates through
+# a live pipe and overrides grep's own successful match, regardless of what grep found.
+i4nd_msg="$(aud_json i4stopnotdisp 2>/dev/null | jq -r '.checks[]|select(.id=="I4")|.message' || true)"
+printf '%s' "$i4nd_msg" | grep -q '10:30' \
+  && fail "audit: I4 still names the irrelevant Stop timestamp" \
+  || pass "audit: I4 does not name the irrelevant Stop timestamp"
+# ...but a GENUINE new Start after the same compaction, with no read, must still fail —
+# and must be named correctly, not conflated with the unrelated Stop from the case above.
+aud_compact i4stopthenreal '[{"t":"2026-01-01T10:00:00Z"}]' '[]' \
+  '[{"t":"2026-01-01T09:00:00Z","kind":"subagent","event":"SubagentStart","agent_id":"a1"},
+    {"t":"2026-01-01T10:30:00Z","kind":"subagent","event":"SubagentStop","agent_id":"a1"},
+    {"t":"2026-01-01T11:00:00Z","kind":"subagent","event":"SubagentStart","agent_id":"a2"}]'
+[ "$(aud_verdict i4stopthenreal I4)" = "FAIL" ] \
+  && pass "audit: I4 still fails a genuine new dispatch after the same compaction" \
+  || fail "audit: I4 missed a genuine post-compaction dispatch (got $(aud_verdict i4stopthenreal I4))"
+i4real_msg="$(aud_json i4stopthenreal 2>/dev/null | jq -r '.checks[]|select(.id=="I4")|.message' || true)"
+printf '%s' "$i4real_msg" | grep -q '11:00' \
+  && pass "audit: I4 names the real Start, not the unrelated Stop, as the violation" \
+  || fail "audit: I4 named the wrong timestamp for the real violation (got: $i4real_msg)"
 
 # Regression: track-trace.sh stores the RAW hook event name ("SubagentStop"), never
 # "start"/"stop". The old selector matched neither, so every check reading trace[] for a
@@ -2274,6 +2804,58 @@ brf_fire 'Constraints: (a) errors wrapped with `%w`, never `%v`; (b) pinned imag
 [ "$(brf_last '.briefs[-1].lines_matched')" = "2" ] \
   && pass "brief: matching tolerates re-wording, back-ticks and punctuation" \
   || fail "brief: tolerant matching (got matched=$(brf_last '.briefs[-1].lines_matched'))"
+
+# The bundle's OWN lead-in label must not push a faithfully-quoted constraint out of the
+# signature window. A real run habitually prefixed quoted lines with
+# "<filename>.instructions.md:" instead of the bundle's own bullet text, scoring 11 of 38
+# otherwise-compliant dispatches as thin. Isolated bundle path — $BRF_GOV is shared by every
+# OTHER test in this section, and overwriting it in place would corrupt them all.
+BRFSIG_GOV="$BRF_RUNS/gov-sig.md"
+cat > "$BRFSIG_GOV" <<'BRFSIGGOV'
+# Governance bundle — run bsig
+Surface: **/*.go
+
+## go.instructions.md — matched **/*.go
+- **Error handling** — wrap errors with %w for context, never discard them silently
+- no naked returns in exported funcs
+BRFSIGGOV
+brfsig_reset() {
+  jq -nc --arg p "$BRFSIG_GOV" '{run_id:"bsig",v:1,trace:[],evidence:[],tool_calls:0,
+     governance_bundle:{path:$p,sha:"s1",t:"2026-01-01T00:00:00Z",self_reported:true}}' \
+    > "$BRF_RUNS/bsig.json"; }
+brfsig_fire() { # brfsig_fire <prompt>
+  jq -nc --arg pr "$1" '{hook_event_name:"PreToolUse",tool_name:"Task",tool_input:{prompt:$pr}}' \
+    | RUN_ID=bsig RUNS_DIR="$BRF_RUNS" bash "$BRF" >/dev/null 2>&1 || true; }
+brfsig_last() { jq -r "$1" "$BRF_RUNS/bsig.json" 2>/dev/null || echo ERR; }
+
+brfsig_reset
+brfsig_fire 'wrap errors with %w for context, never discard them silently'
+[ "$(brfsig_last '.briefs[-1].lines_matched')" = "1" ] && [ "$(brfsig_last '.briefs[-1].thin')" = "false" ] \
+  && pass "brief: matches a constraint quoted without the bundle's own bold label" \
+  || fail "brief: bold-label stripping (got $(brfsig_last '.briefs[-1]'))"
+
+# The specific habit the real run named as root cause: prefixing the quoted line with the
+# INSTRUCTION FILE'S OWN NAME instead of the bundle's bullet text.
+brfsig_reset
+brfsig_fire 'go.instructions.md: wrap errors with %w for context, never discard them silently'
+[ "$(brfsig_last '.briefs[-1].lines_matched')" = "1" ] && [ "$(brfsig_last '.briefs[-1].thin')" = "false" ] \
+  && pass "brief: matches a constraint quoted behind an '<file>.instructions.md:' prefix" \
+  || fail "brief: instructions.md-prefix stripping (got $(brfsig_last '.briefs[-1]'))"
+
+# A generic "Word:" heading in front of the same content.
+brfsig_reset
+brfsig_fire 'Errors: wrap errors with %w for context, never discard them silently'
+[ "$(brfsig_last '.briefs[-1].lines_matched')" = "1" ] \
+  && pass "brief: matches a constraint quoted behind a generic 'Word:' heading" \
+  || fail "brief: generic-label stripping (got $(brfsig_last '.briefs[-1]'))"
+
+# The stripping must not go the other way: a brief that carries NOTHING of the bundle still
+# scores zero, label-stripping or not — this is not a general fuzzy-match escape hatch.
+brfsig_reset
+brfsig_fire 'Implement the feature. Follow the instructions.'
+[ "$(brfsig_last '.briefs[-1].thin')" = "true" ] && [ "$(brfsig_last '.briefs[-1].lines_matched')" = "0" ] \
+  && pass "brief: label-stripping does not turn into a general fuzzy match — still flags a real filename-only brief" \
+  || fail "brief: label-stripping over-matched (got $(brfsig_last '.briefs[-1]'))"
 
 # A fan-out brief carries only its cluster — below the threshold but NOT a violation.
 brf_reset
@@ -3150,6 +3732,74 @@ printf '%s' "$RPT_REC" | grep -q "$RID" \
   && pass "report: recovers RUN_ID from newest breadcrumb" \
   || fail "report: recovers RUN_ID from newest breadcrumb"
 
+# 10b.7 — guard denials (hook-observed) and workarounds (self-reported root cause) render
+# as two clearly separated blocks, so a reviewer can see where the skill itself created
+# friction without taking a "clean run" narrative on faith.
+jq '.denials = [{t:"2026-01-02T03:10:00Z",tool:"Bash",reason:"blocked by autonomy boundary: workers stop at gh pr create --draft"}]
+    | .workarounds = [{t:"2026-01-02T03:12:00Z",what:"set TRACK_ALLOW_FF_PUSH=1 for the first publish",why:"the guard denied a genuine first-time push; refspec parsing dropped the trailing redirect",self_reported:true}]' \
+  "$RPT_REPO/runs/$RID.json" > "$RPT_REPO/runs/$RID.json.tmp" \
+  && mv "$RPT_REPO/runs/$RID.json.tmp" "$RPT_REPO/runs/$RID.json"
+RPT_FRICTION="$(cd "$RPT_REPO" && TRACK_BASE_REF=HEAD~1 RUNS_DIR=runs bash "$REPORT" "$RID" 2>&1 || true)"
+if printf '%s' "$RPT_FRICTION" | grep -qi 'Guard denials' \
+   && printf '%s' "$RPT_FRICTION" | grep -q 'autonomy boundary'; then
+  pass "report: guard denials render as a hook-observed block"
+else
+  fail "report: guard denials render as a hook-observed block"
+fi
+if printf '%s' "$RPT_FRICTION" | grep -qi 'Workarounds' \
+   && printf '%s' "$RPT_FRICTION" | grep -q 'TRACK_ALLOW_FF_PUSH' \
+   && printf '%s' "$RPT_FRICTION" | grep -q 'refspec parsing dropped the trailing redirect'; then
+  pass "report: workarounds render with both WHAT happened and the reported root cause"
+else
+  fail "report: workarounds render with what+why (got: $(printf '%s' "$RPT_FRICTION" | grep -A2 -i workaround))"
+fi
+# The workaround block must be a self-reported claim, not laundered as fact — it sits under
+# the same "self-reported" heading the skills/iterations block already uses.
+printf '%s' "$RPT_FRICTION" | awk '/self-reported.*model claim/{f=1} f' | grep -q 'TRACK_ALLOW_FF_PUSH' \
+  && pass "report: workarounds render UNDER the self-reported heading, not as fact" \
+  || fail "report: workarounds must render under the self-reported heading"
+# Absent entirely when there is nothing to report — no empty headings on a clean run.
+jq '.denials = [] | .workarounds = []' "$RPT_REPO/runs/$RID.json" > "$RPT_REPO/runs/$RID.json.tmp" \
+  && mv "$RPT_REPO/runs/$RID.json.tmp" "$RPT_REPO/runs/$RID.json"
+RPT_CLEAN="$(cd "$RPT_REPO" && TRACK_BASE_REF=HEAD~1 RUNS_DIR=runs bash "$REPORT" "$RID" 2>&1 || true)"
+printf '%s' "$RPT_CLEAN" | grep -qi 'Guard denials\|Workarounds & discipline' \
+  && fail "report: an empty denials/workarounds run should render neither heading" \
+  || pass "report: no denials/workarounds -> neither block is rendered"
+
+# 10b.6b — skills[] provenance split: track-skill.sh's hook-observed entries
+# (self_reported:false) must NEVER render under the "self-reported" heading — that would
+# launder a mechanically-seen fact into a model claim, the exact confusion the heading
+# exists to prevent. track-note.sh's entries (self_reported:true, or a legacy record with
+# no flag at all) stay under it, unchanged.
+jq '.skills = [
+      {t:"2026-01-02T03:02:00Z", skill:"dispatching-parallel-agents", self_reported:false},
+      {t:"2026-01-02T03:01:00Z", skill:"sso-single-branch-development", step:"scaffold", self_reported:true}
+    ]' "$RPT_REPO/runs/$RID.json" > "$RPT_REPO/runs/$RID.json.tmp" \
+  && mv "$RPT_REPO/runs/$RID.json.tmp" "$RPT_REPO/runs/$RID.json"
+RPT_SKILLS="$(cd "$RPT_REPO" && TRACK_BASE_REF=HEAD~1 RUNS_DIR=runs bash "$REPORT" "$RID" 2>&1 || true)"
+if printf '%s' "$RPT_SKILLS" | grep -q 'Skill activations (hook-observed' \
+   && printf '%s' "$RPT_SKILLS" | grep -q 'Skill activations (self-reported'; then
+  pass "report: skills[] renders as two separately-labelled blocks by provenance"
+else
+  fail "report: skills[] provenance split (got: $(printf '%s' "$RPT_SKILLS" | grep -i 'skill activ'))"
+fi
+# The hook-observed entry must appear BEFORE the "self-reported" heading text, and the
+# self-reported entry must appear AFTER it — not just present somewhere in the body.
+RPT_BEFORE_HEADING="$(printf '%s' "$RPT_SKILLS" | awk '/model claim, not hook-observed/{exit} {print}')"
+RPT_AFTER_HEADING="$(printf '%s' "$RPT_SKILLS" | awk '/model claim, not hook-observed/{f=1} f')"
+if printf '%s' "$RPT_BEFORE_HEADING" | grep -q 'dispatching-parallel-agents' \
+   && ! printf '%s' "$RPT_BEFORE_HEADING" | grep -q 'sso-single-branch-development'; then
+  pass "report: the hook-observed skill sits before the self-reported heading"
+else
+  fail "report: hook-observed skill must render before the self-reported heading"
+fi
+if printf '%s' "$RPT_AFTER_HEADING" | grep -q 'sso-single-branch-development' \
+   && ! printf '%s' "$RPT_AFTER_HEADING" | grep -q 'dispatching-parallel-agents'; then
+  pass "report: the self-reported skill sits after the self-reported heading, and only it"
+else
+  fail "report: self-reported skill must render after the heading, hook-observed must not repeat there"
+fi
+
 # 10b.7 — --json emits valid JSON carrying the same facts
 RPT_JSON="$(cd "$RPT_REPO" && TRACK_BASE_REF=HEAD~1 RUNS_DIR=runs bash "$REPORT" --json "$RID" 2>/dev/null || true)"
 if printf '%s' "$RPT_JSON" | jq -e '.tool_calls == 42 and (.evidence | length) == 2' >/dev/null 2>&1; then
@@ -3638,6 +4288,16 @@ if [ -f "$GOVERNANCE_MD" ] \
   pass "struct: governance bundle is persisted to runs/<RUN_ID>.governance.md + pinned"
 else
   fail "struct: governance bundle is persisted to runs/<RUN_ID>.governance.md + pinned"
+fi
+# 10.19b — the sandboxed-worktree route is documented where the model reads it. The gate is
+# mandatory, so a surface that cannot author the anchored path has to find the staged one in
+# the instructions rather than by exhausting refusals: SKILL.md is what it holds at the gate,
+# governance.md is the reference the gate sends it to.
+if grep -q 'govpath --staged' "$GOVERNANCE_MD" 2>/dev/null \
+   && grep -q 'govpath --staged' "$SKILL_MD" 2>/dev/null; then
+  pass "struct: the staged-bundle route is documented at the gate and in its reference"
+else
+  fail "struct: the staged-bundle route is documented at the gate and in its reference"
 fi
 _gov_refs=1
 for _md in "$STORY_MD" "$REFACTOR_MD"; do

@@ -35,20 +35,37 @@
 #   track-note.sh skill <name> [step]        append {t, skill, step, self_reported:true} to skills[]
 #   track-note.sh loop  [phase]              iterations += 1  (+ optional phase label on the mark)
 #   track-note.sh phase <mode> <step>        SET phase={mode,step,t} (overwritten) + append phase_log[]
-#   track-note.sh govpath                    PRINT the anchored path the governance bundle must be
+#   track-note.sh govpath [--staged]         PRINT the anchored path the governance bundle must be
 #                                            written to, creating the records dir first. Call it
 #                                            BEFORE writing the bundle, and write to exactly what it
 #                                            prints — see the subcommand for the two failures it removes.
+#                                            --staged prints a path inside the CURRENT worktree
+#                                            instead, for a surface that confines its file-writing
+#                                            tools to the worktree (a native/sandboxed worktree tool)
+#                                            and so cannot author the anchored path at all. Pin the
+#                                            staged path and `governance` promotes it across.
 #   track-note.sh evidence-na <kind> <why>   DECLARE that a required evidence kind verifies nothing on
 #                                            this tree (an empty Go module, a suite that does not exist
 #                                            yet). Clears the gate's vacuity block for that kind, on
 #                                            record and with a reason — silence never does
 #   track-note.sh governance <file>          SET governance_bundle={path,sha,t} — the persisted bundle
 #                                            AND append the same to governance_stamps[] (the pin
-#                                            HISTORY, so a legitimate mid-core re-pin is on record)
+#                                            HISTORY, so a legitimate mid-core re-pin is on record).
+#                                            A staged copy of THIS run's bundle is promoted into the
+#                                            anchored records dir first, and the pin names the
+#                                            promoted file — the bundle keeps exactly one home.
 #   track-note.sh status <state> [blocker] [next_step]
 #                                            SET status (+ blocker/next_step). state must be one of
 #                                            success | blocked | no-progress | budget-exceeded
+#   track-note.sh workaround <what> <why>    APPEND {t, what, why, self_reported:true} to
+#                                            workarounds[] — call whenever a rule this skill
+#                                            enforces had to be routed around, even via the
+#                                            sanctioned escape hatch. Pairs with track-guard.sh's
+#                                            hook-observed denials[]: one records WHAT was
+#                                            refused, this records WHY and what the run did
+#                                            about it. track-report.sh renders both in the PR
+#                                            body so a reviewer can see where the skill itself
+#                                            created friction, not just what the model claims.
 #
 # Opt-in via env:
 #   RUN_ID    stable run-id for this worker  (REQUIRED — no-op when unset)
@@ -97,6 +114,9 @@ fi
 
 sub="${1:-}"
 RUNS_DIR="${RUNS_DIR:-runs}"
+# Kept before the anchoring below, because `govpath --staged` needs the records dir's
+# RELATIVE name to rebuild it inside the CURRENT worktree.
+RUNS_DIR_RAW="$RUNS_DIR"
 # Anchor a RELATIVE RUNS_DIR to the main working tree so the run record is
 # single-homed across the main checkout and any linked worktree — a bare "runs"
 # resolves against the process CWD, splitting the record when preflight mints it
@@ -203,6 +223,36 @@ case "$sub" in
     #
     # Printing it (rather than having this script write the file) keeps authorship where it
     # belongs: distilling the bundle is the model's judgement, not a script's.
+    #
+    # `--staged` — THE SANDBOXED-WORKTREE ROUTE. The anchored path lives in the MAIN
+    # checkout, and an agent surface that isolates by native worktree tool confines its
+    # file-writing tools to the worktree: the anchored Write is refused before any hook
+    # sees it. That left an EMPTY intersection with the guard, which denies a bundle
+    # written anywhere but the anchored dir — no legal path existed, and an observed run
+    # burned its budget discovering four different refusals one at a time (anchored path,
+    # scratch dir, dotfile at the worktree root, a chained Bash lookup+cp).
+    # So: stage inside the worktree under a name that cannot be mistaken for the bundle
+    # itself, then let `governance` PROMOTE it across the boundary — the scripts here are
+    # not sandboxed, which is exactly why the record and the evidence captures already
+    # work from a linked worktree. The one-home invariant is untouched: what gets pinned
+    # is always the anchored copy, and the staged file is removed at promotion.
+    if [ "${2:-}" = "--staged" ]; then
+      case "$RUNS_DIR_RAW" in
+        /*) _stage_dir="$RUNS_DIR" ;;
+        *)
+          _stage_wt="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+          [ -n "$_stage_wt" ] \
+            || { printf '%s\n' "track-note: 'govpath --staged' must run inside a git worktree." >&2; rm -f "$tmp"; exit 2; }
+          _stage_dir="${_stage_wt%/}/${RUNS_DIR_RAW%/}"
+          unset _stage_wt
+          ;;
+      esac
+      mkdir -p "$_stage_dir"
+      printf '%s\n' "$_stage_dir/$RUN_ID.governance.staged.md"
+      unset _stage_dir
+      rm -f "$tmp"
+      exit 0
+    fi
     printf '%s\n' "$RUNS_DIR/$RUN_ID.governance.md"
     rm -f "$tmp"
     ;;
@@ -220,18 +270,53 @@ case "$sub" in
     # nothing from the main checkout ("recorded but MISSING from disk"). Prefer the
     # file the caller actually points at; fall back to the same basename under the
     # anchored RUNS_DIR so a path typed from the wrong CWD still finds its bundle.
-    if [ -f "$file" ]; then
-      _gov_dir="$(cd "$(dirname "$file")" 2>/dev/null && pwd || true)"
-      file="${_gov_dir:+$_gov_dir/}$(basename "$file")"
-      unset _gov_dir
-    elif [ -f "$RUNS_DIR/$(basename "$file")" ]; then
+    if [ ! -f "$file" ] && [ -f "$RUNS_DIR/$(basename "$file")" ]; then
       file="$RUNS_DIR/$(basename "$file")"
     fi
     [ -f "$file" ] || { printf '%s\n' "track-note: governance bundle '${2}' does not exist (looked in \$PWD and $RUNS_DIR) — persist it first." >&2; rm -f "$tmp"; exit 2; }
+    # `pwd -P`, not `pwd`: every path this is compared against (RUNS_DIR below, and what
+    # `git rev-parse` hands the hooks) is PHYSICAL, while a caller's path is whatever they
+    # typed. On any checkout reached through a symlink — /tmp and /var/folders on macOS, a
+    # symlinked worktree root anywhere — the logical form makes the file's OWN records dir
+    # look foreign: the "outside this run's records dir" warning fires on a correctly placed
+    # bundle, and the promotion below tries to copy the file onto itself.
+    # Canonicalized AFTER the fallback, never inside one branch of it: the fallback hands
+    # back `$RUNS_DIR/<basename>`, and RUNS_DIR is whatever the environment set — which is
+    # exactly the logical form that compares unequal to its own physical directory.
+    _gov_dir="$(cd "$(dirname "$file")" 2>/dev/null && pwd -P || true)"
+    file="${_gov_dir:+$_gov_dir/}$(basename "$file")"
+    unset _gov_dir
     # The bundle belongs beside the record it is pinned into. Living elsewhere is not an
     # error — the absolute path above keeps it findable — but it is how a run ends up
     # with two divergent bundles, so say it out loud while there is still one.
-    _runs_abs="$(cd "$RUNS_DIR" 2>/dev/null && pwd || printf '%s' "$RUNS_DIR")"
+    _runs_abs="$(cd "$RUNS_DIR" 2>/dev/null && pwd -P || printf '%s' "$RUNS_DIR")"
+    # PROMOTE a staged bundle instead of warning about it. The pin is the moment the run
+    # commits to one bundle, so it is also the only safe moment to move it: doing the same
+    # thing by hand is the `cp` loop that forked one client run's bundle into two copies
+    # pinned at three shas. Deliberately narrow — only this run's own bundle basenames are
+    # ever relocated, so pinning some other file still warns and stays where it is.
+    _canon="$_runs_abs/$RUN_ID.governance.md"
+    _promote=0
+    case "${file##*/}" in
+      "$RUN_ID.governance.staged.md"|"$RUN_ID.governance.md")
+        [ "$file" = "$_canon" ] || _promote=1 ;;
+    esac
+    if [ "$_promote" -eq 1 ]; then
+      # Fail-soft: a promotion that cannot happen must not cost the run its pin. The
+      # bundle is still recorded where it lies, and the warning below then applies.
+      if mkdir -p "$_runs_abs" 2>/dev/null && cp "$file" "$_canon" 2>/dev/null; then
+        rm -f "$file" 2>/dev/null || true
+        printf '%s\n' \
+          "track-note: promoted the staged bundle into this run's records dir." \
+          "  from: $file" \
+          "  to:   $_canon" \
+          "  The pin names the promoted copy — re-read THAT path after a compaction." >&2
+        file="$_canon"
+      else
+        printf '%s\n' "track-note: could not promote '$file' into $_runs_abs — pinning it where it lies." >&2
+      fi
+    fi
+    unset _canon _promote
     case "$file" in
       "$_runs_abs"/*) ;;
       *) printf '%s\n' \
@@ -240,7 +325,9 @@ case "$sub" in
            "  runs:   $_runs_abs  (where $RUN_ID.json lives)" \
            "  The pin is absolute so it stays readable, but a bundle under a linked worktree's" \
            "  gitignored runs/ is invisible to the main checkout and easily written twice." \
-           "  Fix: move it to \$(track-note.sh govpath) and re-pin that path." >&2 ;;
+           "  Fix: write it to \$(track-note.sh govpath) and re-pin that path — or, on a" \
+           "  surface that will not let you write outside this worktree, to" \
+           "  \$(track-note.sh govpath --staged), which this call promotes across for you." >&2 ;;
     esac
     unset _runs_abs
     sha="$( { if command -v shasum >/dev/null 2>&1; then shasum "$file"; else sha1sum "$file"; fi; } | cut -d' ' -f1)"
@@ -279,9 +366,30 @@ case "$sub" in
        | .started_ts = (.started_ts // $t) | .last_ts = $t' \
       "$rec" >"$tmp" && mv "$tmp" "$rec"
     ;;
+  workaround)
+    # THE MODEL-AUTHORED HALF of the friction record. track-guard.sh's denials[] (hook-
+    # observed) captures WHAT was refused; it cannot capture the WHY behind the refusal or
+    # what the run did instead — that only the model watching itself hit the wall knows. A
+    # reviewer reading a PR body with neither has no way to tell "the skill's own mechanism
+    # forced a detour" from "everything went cleanly" — which is exactly the gap this whole
+    # bundle keeps re-learning the hard way: a guard fires, the model finds SOME way through
+    # (sanctioned or not), and nothing downstream of the run ever finds out. Call this
+    # whenever a rule this skill enforces (a guard denial, an append-only prefix, the
+    # autonomy boundary at `gh pr create`, anything) had to be routed around, EVEN when the
+    # route taken was the sanctioned one — a repeatedly-needed escape hatch is itself a
+    # signal the default is wrong for this repo.
+    what="${2:-}"
+    why="${3:-}"
+    [ -n "$what" ] && [ -n "$why" ] \
+      || { printf '%s\n' "track-note: 'workaround' needs <what happened> \"<why / root cause>\" (e.g. 'hand-cp'd the governance bundle across the worktree boundary' 'track-guard.sh denied a direct Write to the anchored path; no --staged option existed yet')." >&2; rm -f "$tmp"; exit 2; }
+    jq --arg t "$ts" --arg w "$what" --arg y "$why" \
+      '.workarounds = ((.workarounds // []) + [{t:$t, what:$w, why:$y, self_reported:true}])
+       | .started_ts = (.started_ts // $t) | .last_ts = $t' \
+      "$rec" >"$tmp" && mv "$tmp" "$rec"
+    ;;
   *)
     rm -f "$tmp"
-    printf '%s\n' "track-note: unknown subcommand '${sub:-<none>}' (want: skill | loop | phase | evidence-na | govpath | governance | status)." >&2
+    printf '%s\n' "track-note: unknown subcommand '${sub:-<none>}' (want: skill | loop | phase | evidence-na | govpath | governance | status | workaround)." >&2
     exit 2
     ;;
 esac

@@ -171,7 +171,31 @@ if [ -n "$gov_path" ] && [ -f "$gov_path" ]; then
     [ "${#norm_line}" -ge 12 ] || continue
     lines_total=$((lines_total + 1))
     sig="$(printf '%s' "$norm_line" | cut -c1-"$sig_len")"
-    case "$norm_brief" in *"$sig"*) lines_matched=$((lines_matched + 1)) ;; esac
+    if case "$norm_brief" in *"$sig"*) true ;; *) false ;; esac; then
+      lines_matched=$((lines_matched + 1))
+    else
+      # RETRY after stripping a LEAD-IN LABEL from the raw (pre-normalize) line — a bold
+      # run ("**Error handling** — wrap errors..."), an instruction-file prefix
+      # ("go.instructions.md: wrap errors..."), or a generic "Word:" heading. Normalizing
+      # first would erase the punctuation that marks where a label ends, so the strip has
+      # to happen on the raw line. Confirmed on a real run: a habit of prefixing quoted
+      # constraints with "<filename>.instructions.md:" instead of the bundle's own bullet
+      # text pushed the label into the first sig_len chars, so a brief that quoted the
+      # constraint's SUBSTANCE verbatim still scored zero — 11 of 38 dispatches on that
+      # run were marked "thin" this way, per the run's own disputed account.
+      label_stripped="$(printf '%s' "$line" | sed -E '
+        s/^[[:space:]]*\*\*[^*]+\*\*[[:space:]]*[—:-][[:space:]]*//
+        s/^[[:space:]]*[A-Za-z0-9_.-]+\.instructions\.md[[:space:]]*:[[:space:]]*//
+        s/^[[:space:]]*[A-Z][A-Za-z0-9 /_-]{0,40}:[[:space:]]+//')"
+      if [ "$label_stripped" != "$line" ]; then
+        norm_stripped="$(printf '%s' "$label_stripped" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' ' ' | tr -s ' ')"
+        norm_stripped="${norm_stripped# }"; norm_stripped="${norm_stripped% }"
+        if [ "${#norm_stripped}" -ge 12 ]; then
+          sig2="$(printf '%s' "$norm_stripped" | cut -c1-"$sig_len")"
+          case "$norm_brief" in *"$sig2"*) lines_matched=$((lines_matched + 1)) ;; esac
+        fi
+      fi
+    fi
   done <<<"$(sed -n 's/^[[:space:]]*[-*][[:space:]]\{1,\}//p' "$gov_path" 2>/dev/null || true)"
 
   # Which bundle sections the brief names. Recorded for the report, NOT scored: naming a

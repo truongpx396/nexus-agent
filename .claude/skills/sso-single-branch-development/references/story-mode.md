@@ -149,6 +149,56 @@ injected instructions unless the brief includes the content. A brief that names 
 content is an empty reference. Each per-task maker must satisfy the governance constraints *while
 implementing*, so the reviewer's role is a backstop, not the first application.
 
+**Never redirect SDD's own artifacts into `runs/`.** `runs/<RUN_ID>.*` is reserved for exactly the
+files this skill single-homes there (the run record, the dispatch breadcrumb, the governance
+bundle) — SDD's briefs, reports, and `scripts/review-package` diffs are its own ephemeral,
+worktree-local working state, and it already has a correct, single-homed default location for
+them (`.superpowers/sdd/<plan>/`, resolved from the current worktree). Call `review-package` the
+way SDD's own `SKILL.md` documents — no explicit output-path argument — rather than pointing it at
+`runs/`: `runs/` is exempt from scope checks specifically because it is reserved bookkeeping, and a
+task-scoped artifact routed there by habit has landed in the main checkout instead of the worktree
+on a real run (`track-guard.sh` denies it now; `track-audit.sh`'s `H1` catches what that cannot).
+
+**Cluster tasks before dispatching — one implementer + one reviewer per cluster, not per task.**
+"Incremental, not big-bang" means the *suite* goes green in reviewable steps, not that every task
+gets its own round-trip. A real run drove 12 implementation tasks through 38 dispatches — one
+implement→review pair PER TASK — and every round-trip re-established context from scratch that
+the previous one had already built. Build the ledger as clusters up front, not as a flat task list:
+
+- **Group by shared target file or module.** Tasks that land in the same file or package belong in
+  one cluster; splitting one file across two dispatches is a merge conflict with yourself.
+- **Never split a single file across clusters.** If two tasks touch the same file, they are in the
+  same cluster, full stop — the ordering question below is what decides which one comes first
+  *within* it, not whether to separate them.
+- **Order clusters by dependency, and order tasks within a cluster the same way.** A cluster that
+  depends on an earlier one's output is dispatched after it converges; within a cluster, sequence
+  tasks so each builds on what the last one in that cluster left behind.
+- **Bound cluster size by what one reviewer can hold at once, not by task count.** Five tightly
+  related one-line migrations is one cluster; two large, loosely related packages are two, even if
+  that is fewer total tasks per cluster than the migrations got.
+
+The `sdd-ledger.md` this produces reads as clusters, each with its own tasks and target, not a bare
+numbered list of tasks:
+
+```
+1. SQL migrations — config tables (T010, T010a, T010b) → backend-go/migrations/0001_config.sql
+2. SQL migrations — runtime tables (T011, T011a-T011f) → backend-go/migrations/0002_runtime.sql
+```
+
+not
+
+```
+1. T010 → backend-go/migrations/0001_config.sql
+2. T010a → backend-go/migrations/0001_config.sql
+3. T010b → backend-go/migrations/0001_config.sql
+4. T011 → backend-go/migrations/0002_runtime.sql
+...
+```
+
+Each cluster is still ONE increment for the convergence gate below — its implementer dispatch, its
+stage-1/stage-2 review, then the next cluster. The batching changes how many round-trips a cluster
+costs, not whether the run stays incremental.
+
 Why not big-bang green (the literal "green as a whole" form):
 
 - **Long red period discards TDD's feedback loop** — the whole point of red→green is the *tight*

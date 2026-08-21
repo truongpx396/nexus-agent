@@ -15,9 +15,20 @@
 # rewrite an already-made commit. Add that trailer in the worker's commit command
 # (prompt-enforced) or via a git `prepare-commit-msg` hook.
 #
-# Opt-in via env (no-op unless RUN_ID is set):
-#   RUN_ID    stable run-id for this worker
-#   RUNS_DIR  where run records live (default: runs)
+# OFF BY DEFAULT (TRACK_TRACE=1 to enable). What this records is a spawn/stop LIFECYCLE:
+# two rows per subagent carrying an opaque agent_id and, on most surfaces, nothing about
+# WHY the agent was spawned — `agent_description` is only present on SubagentStart and only
+# on surfaces that send it. track-brief.sh already records every dispatch at PreToolUse
+# WITH the outbound brief's own `description` and its governance-content counts, so on a
+# real 39-dispatch run trace[] added 78 rows of `SubagentStart general-purpose (a66acc…)`
+# that no reviewer could map back to any task. The audit reads dispatch TIMES from briefs[]
+# first and falls back here, so leaving this off costs only M1 (distinct subagent ids,
+# which briefs[] structurally cannot carry — a brief is recorded before its agent exists).
+#
+# Opt-in via env (no-op unless BOTH are set):
+#   TRACK_TRACE  set to 1 to record the lifecycle trace at all (default: off)
+#   RUN_ID       stable run-id for this worker
+#   RUNS_DIR     where run records live (default: runs)
 set -eufo pipefail
 
 # Bootstrap: load hook presets sitting beside this script, if present:
@@ -45,6 +56,10 @@ if [ -f "$__env_dir/track-env.base.sh" ]; then . "$__env_dir/track-env.base.sh";
 unset __env_dir
 
 [ -n "${RUN_ID:-}" ] || exit 0
+# Read AFTER the env gate but note the hook still consumes stdin below only when enabled;
+# exiting first is safe because a PreToolUse/Subagent hook that writes nothing and exits 0
+# is a no-op on every surface.
+[ "${TRACK_TRACE:-0}" = "1" ] || exit 0
 
 input="$(cat)"
 ev="$(jq -r '.hook_event_name // empty' <<<"$input")"

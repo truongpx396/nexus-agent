@@ -191,7 +191,11 @@ jobs:
           TOUCHES_GATES: ${{ needs.detect.outputs.touches_gates }}
           FILES_N: ${{ needs.detect.outputs.files_n }}
         run: |
-          marker='<!-- END track-report auto block -->'
+          # PREFIX, not the whole line: track-report.sh now appends a sha of the block it
+          # closes (`… auto block · sha=<40 hex> -->`), and an exact-literal match here would
+          # reject every current render as "no Auto block". The exact shape is asserted
+          # separately below, so this stays a presence test.
+          marker='<!-- END track-report auto block'
           # track-report.sh emits this EXACT opening comment — never just the END marker
           # alone. A body that closes with the real END marker but opens with a shortened
           # lookalike (missing " — machine-rendered, do not hand-edit") did not come from
@@ -243,6 +247,18 @@ jobs:
             echo "the bundle was not active, so none of the gates were enforced."
             exit 1
           fi
+          # The END marker must be one of the two shapes the script emits, and nothing else:
+          # bare (pre-attestation renders) or sha-bearing. A paraphrase gets caught here
+          # rather than silently satisfying the prefix test above.
+          if ! printf '%s\n' "$PR_BODY" \
+               | grep -qE '^<!-- END track-report auto block( · sha=[0-9a-f]{40})? -->[[:space:]]*$'; then
+            echo "::error::The Auto block's closing marker is not in either shape"
+            echo "track-report.sh emits:"
+            echo "    <!-- END track-report auto block · sha=<40 hex> -->   (current)"
+            echo "    <!-- END track-report auto block -->                  (older renders)"
+            echo "Re-run 'bash .github/hooks/track-report.sh' and paste it unmodified."
+            exit 1
+          fi
           if ! printf '%s' "$PR_BODY" | grep -qF "$begin_marker"; then
             echo "::error::The Auto block's opening comment does not match track-report.sh's"
             echo "exact output. The block closes with the real END marker but does not open"
@@ -257,6 +273,35 @@ jobs:
           fi
           echo "✓ Auto block present."
 
+          # THE EXACT CHECK, when the body carries one. track-report.sh stamps a sha of the
+          # block's content into its END marker, so "was this rendered or re-typed" stops
+          # being a question about shape. Every check above infers tampering from wording
+          # that a careful forger gets right; this one recomputes the hash.
+          #
+          # A body with no sha= is NOT failed here: it was rendered by a track-report.sh
+          # from before the attestation landed, and the shape checks above still apply to it.
+          claimed="$(printf '%s\n' "$PR_BODY" \
+            | sed -n 's/^<!-- END track-report auto block.*sha=\([0-9a-f]\{40\}\).*/\1/p' | head -1 || true)"
+          if [ -n "$claimed" ]; then
+            printf '%s\n' "$PR_BODY" > /tmp/pr-body.md
+            begin_n="$(grep -nF "$begin_marker" /tmp/pr-body.md | head -1 | cut -d: -f1 || true)"
+            end_n="$(grep -n '^<!-- END track-report auto block' /tmp/pr-body.md | head -1 | cut -d: -f1 || true)"
+            if [ -n "$begin_n" ] && [ -n "$end_n" ]; then
+              actual="$(sed -n "${begin_n},$((end_n - 1))p" /tmp/pr-body.md | sha1sum | cut -d' ' -f1)"
+              if [ "$claimed" != "$actual" ]; then
+                echo "::error::The Auto block does not match the sha its own END marker carries"
+                echo "(claims $claimed, content hashes to $actual). Everything between the"
+                echo "BEGIN/END markers is machine-rendered — it is the one part of this body a"
+                echo "reviewer is entitled to read as un-authored, and it has been edited since"
+                echo "it was rendered. Re-run:"
+                echo "    bash .github/hooks/track-report.sh > body.md"
+                echo "and paste it unmodified; put your own narrative BELOW the END marker."
+                exit 1
+              fi
+              echo "✓ Auto block matches its own sha — machine-rendered, unedited."
+            fi
+          fi
+
       - name: Discipline audit is present, self-consistent, and non-blocking
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
@@ -270,8 +315,10 @@ jobs:
           # step with a bare "exit code 1" instead of the verdict it exists to report. Hence
           # `|| true` on each: "found nothing" is data here, not an error.
           # track-report.sh emits this literal heading and the "N passed · M warning(s) ·
-          # K failure(s)" summary line from the SAME printf, atomically — one cannot exist
-          # in a genuine render without the other. So a body that mentions an audit in some
+          # K failure(s)" summary line from the same `render_discipline_audit` call, one
+          # immediately after the other — a genuine render cannot produce the heading and
+          # omit the summary, since the only way to reach the second printf is to have
+          # reached the first. So a body that mentions an audit in some
           # OTHER shape (a real run in this repo produced "#### Discipline audit: 16 passed,
           # 2 warnings, 0 failures" — a hand-paraphrased heading and summary, right down to
           # dropping the "(s)") is not a legacy pre-audit install missing the section — it
@@ -286,10 +333,12 @@ jobs:
 
           if [ -z "$summary" ]; then
             if printf '%s' "$body" | grep -qF "$real_heading"; then
-              echo "::error::The Auto block's real discipline-audit heading is present, but its"
-              echo "summary line ('N passed · M warning(s) · K failure(s)') is missing. Both"
-              echo "render from the same track-report.sh call, so this heading cannot exist"
-              echo "genuinely without it — the summary was removed after rendering."
+              echo "::error::The Auto block's real discipline-audit heading is present, but no"
+              echo "summary line in the exact shape track-report.sh renders:"
+              echo "    - **N passed · M warning(s) · K failure(s)**"
+              echo "Both come from the same render, so a genuine paste has both. Either the"
+              echo "summary was dropped, or it was re-typed into different wording — the"
+              echo "observed case was singularising it to 'M warning · K failures'."
               echo "Re-run 'bash .github/hooks/track-report.sh' and paste it unmodified."
               exit 1
             fi

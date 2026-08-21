@@ -169,7 +169,7 @@ Rough shape of a bundle at that ceiling, so the number is legible rather than ar
 | Section | Typical | Who consumes it |
 |---|---|---|
 | Constitution | 10–30 lines | every cluster |
-| Each matched `.github/instructions/*` | 20–60 lines — **≥5 substantive bullets is the floor** (`G5`) | the clusters whose files its glob covers |
+| Each matched `.github/instructions/*` | 30–100+ lines — **10–15 substantive bullets is the floor** (`G5`), more when the file has more binding constraints than that | the clusters whose files its glob covers |
 | `security-and-owasp` (trust-boundary surface) | 30–80 lines | trust-boundary clusters |
 | Design artefacts (frontend surface) | 10–40 lines | frontend clusters |
 | Feature context — the task's SpecKit slice | 30–120 lines | the clusters implementing it |
@@ -220,9 +220,35 @@ run, and both come from re-deriving the path instead of asking for it:
   gitignored copy** — invisible to the main checkout where the record lives. The audit then reports
   the bundle MISSING, and the usual repair is to keep both and `cp` between them until they diverge.
 
+### When the surface refuses the anchored write — stage it, don't improvise
+
+Some agent surfaces isolate by **native worktree tool** and confine their file-writing tools to that
+worktree. The anchored path lives in the **main** checkout, so on those surfaces the Write above is
+refused before any hook sees it — and the guard denies a bundle written anywhere *else*. Read plainly:
+the intersection is empty, there is no path you can author, and improvising is what a real run did —
+scratch dir denied, dotfile at the worktree root denied, a chained Bash lookup + `cp` denied, four
+refusals and no bundle. **Do not hand-`cp`, do not stage in the deliverable tree, do not widen scope.**
+Ask for the staged path and pin it — one extra command, and the promotion is mechanical:
+
+```bash
+bash .github/hooks/track-note.sh govpath --staged   # → <this worktree>/runs/<RUN_ID>.governance.staged.md
+```
+```bash
+# Write the distilled constraints to EXACTLY that path (Write tool, not a heredoc).
+```
+```bash
+bash .github/hooks/track-note.sh governance "<the staged path>"   # promotes, then pins the ANCHORED copy
+```
+
+`governance` copies the staged file into the anchored records dir, **deletes the staged copy**, and
+pins the anchored path — so the bundle still has exactly one home and the fork this whole section
+exists to prevent cannot happen. It prints both paths; **the anchored one is what you re-read after a
+compaction** (`cat` it through Bash if your Read tool is worktree-confined too). Only *this* run's own
+bundle basenames are ever relocated — pinning any other file still warns and leaves it where it is.
+
 `runs/` being gitignored is also what keeps the bundle out of the diff and out of the evidence
 fingerprint. (`track-note.sh governance` resolves and records an absolute path, and warns — naming
-`govpath` — when the file sits outside the run's records dir.)
+both `govpath` forms — when the file sits outside the run's records dir.)
 `track-note.sh governance` records the path **and a sha**, so a later reader can tell whether the
 bundle changed after the briefs were built; `track-reconcile.sh` reports
 `position.governance_bundle_present:false` and tells you to re-run discovery if the file has since
@@ -231,8 +257,9 @@ vanished.
 ### Bundle format
 
 Sections carry the constraints themselves, not their themes. Every matched instruction file needs at
-least **5** substantive bullets (`G5`'s floor, `TRACK_GOV_MIN_BULLETS`) — and more whenever more of
-that file binds this diff. The example below is a floor, not a size limit:
+least **10–15** substantive bullets (`G5`'s floor, `TRACK_GOV_MIN_BULLETS`) — and more whenever more
+of that file binds this diff; a file with genuinely more than 15 binding constraints should get all of
+them, not exactly the floor and stop. The example below is a floor, not a size limit:
 
 ```markdown
 # Governance bundle — run <RUN_ID>
@@ -252,6 +279,12 @@ Surface: backend-go/**, deploy/compose.yml
 - table-driven tests with subtests (t.Run) for anything with >2 input shapes
 - exported errors are sentinel vars (ErrFoo) or typed; never fmt.Errorf'd inline at the boundary
 - no panic in library code — return the error to the caller
+- goroutines launched by a request handler are bounded by the request's context; no fire-and-forget
+- struct fields ordered to avoid padding on hot-path types; run `go vet` before claiming done
+- interfaces are defined at the consumer, not the producer — no premature interface for one caller
+- mutex-guarded fields are unexported and never returned by reference
+- time.Now() calls in business logic go through an injected clock, never called directly (testability)
+- log lines carry a request/trace id; no bare fmt.Println in non-test code
 
 ## security-and-owasp.instructions.md — matched (compose touches secrets + network)
 - pinned image digests, never :latest
@@ -260,6 +293,12 @@ Surface: backend-go/**, deploy/compose.yml
 - secrets arrive via env/secret mounts, never baked into an image layer or a compose literal
 - HTTP handlers set the strict transport + content-type-options + frame-ancestors headers
 - all SQL parameterized; no string-built queries anywhere, including migrations and fixtures
+- every table with tenant-scoped data carries row-level security; no app-layer-only isolation
+- auth tokens are opaque server-side sessions or short-lived signed JWTs, never long-lived shared secrets
+- rate limiting on every unauthenticated endpoint; no open write path with no cost to the caller
+- file uploads are size-capped, content-type-validated, and never served from the upload path directly
+- dependency versions are pinned (go.sum committed); no floating major-version ranges
+- error responses to the client never include stack traces or internal path names
 
 ## Design (.stitch/designs/…, design-system/…) — ABSENT (no frontend surface)
 
@@ -458,8 +497,9 @@ neither is a lesser cousin of the other's rule:
 - [ ] Feature-context distilled to the task's own scope (user-story tag or named artifact) **before**
       reading, not transcribed from the whole `spec.md`/`plan.md`/`research.md`/`data-model.md`
 - [ ] Constraints distilled and written to the path `track-note.sh govpath` printed — never a bare
-      `runs/…` re-derived by hand — each matched file's section carrying **≥5** actionable bullets,
-      not just a heading or a theme (`G5` fails a section thinner than `TRACK_GOV_MIN_BULLETS`)
+      `runs/…` re-derived by hand — each matched file's section carrying **≥10–15** actionable
+      bullets, more where the file warrants it, not just a heading or a theme (`G5` fails a section
+      thinner than `TRACK_GOV_MIN_BULLETS`)
 - [ ] Bundle carries everything that binds this diff, up to ~500 lines — nothing binding dropped to
       stay short, and no whole file transcribed to fill it out
 - [ ] `## Cluster → binding sections` map added when the core fans out to parallel makers, and it
