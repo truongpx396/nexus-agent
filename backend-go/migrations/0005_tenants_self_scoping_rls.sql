@@ -1,0 +1,87 @@
+-- -----------------------------------------------------------------------------
+-- Fix: the `tenants` table had NO row-level security policy at all.
+--
+-- 0003_rls.sql deliberately excluded `tenants` from RLS, reasoning that it
+-- is "the root of the isolation model itself; there is no 'tenant of a
+-- tenant'". That reasoning is wrong for the columns actually on the table.
+-- `tenants` carries tenant_id as its own primary key, but ALSO carries
+-- name, region, retention_days, deployment_tier, identity_config jsonb and
+-- rbac_map jsonb -- per-tenant metadata that must NOT be visible across the
+-- tenant boundary. Verified live against Postgres as a non-superuser,
+-- NOBYPASSRLS role: a session scoped to tenant A via
+-- `SET LOCAL app.tenant_id` could `SELECT * FROM tenants` and read tenant
+-- B's row in full (name, region, deployment_tier and both jsonb blobs).
+--
+-- The excluded-tables note in 0003_rls.sql also grouped `tenants` with
+-- models / price_books / meters / fx_rates under "no tenant_id column";
+-- `tenants` does have one -- it is the primary key. On this table
+-- tenant_id is BOTH the row's own identity AND the isolation key, so the
+-- standard-policy predicate applies unchanged: a tenant may see exactly
+-- its own row and no other.
+--
+-- 0003_rls.sql is committed and immutable (migrations here are forward-only
+-- and additive; there is no rollback/down file), so this is a new, focused
+-- follow-up migration in the same style as
+-- 0004_rls_null_aware_write_check.sql.
+--
+-- The governance rules from 0003_rls.sql apply unchanged here:
+--   * FORCE ROW LEVEL SECURITY, so even the table owner (the role
+--     migrations run as, and the role the application connects as) is
+--     subject to the policy -- ENABLE alone only restricts non-owner roles.
+--   * `current_setting('app.tenant_id', true)` with missing_ok=true, never
+--     a COALESCE default: an unset context resolves to SQL NULL, and
+--     `tenant_id = NULL` is never TRUE in three-valued logic, so NULL
+--     context = DENY ALL rather than allow-all.
+--   * `USING` with no separate WITH CHECK, so the same predicate governs
+--     reads and writes: a tenant can neither read another tenant's row nor
+--     write a row under someone else's tenant_id.
+--   * Tenant scoping stays TRANSACTION-LOCAL (`SELECT set_config(
+--     'app.tenant_id', $1, true)`, i.e. SET LOCAL), so isolation survives
+--     connection pooling.
+-- -----------------------------------------------------------------------------
+
+ALTER TABLE tenants ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenants FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON tenants
+  USING (tenant_id = current_setting('app.tenant_id', true)::uuid);
+
+-- -----------------------------------------------------------------------------
+-- OPERATIONAL NOTE (disclosed, deliberate, NOT solved by this migration):
+-- tenant RESOLUTION now needs its own connection/role.
+--
+-- Any code path that must determine WHICH tenant a request belongs to
+-- BEFORE `app.tenant_id` can be set -- e.g. authentication or bootstrap
+-- looking a tenant up by an external identifier, an issuer/domain, or an
+-- API key -- will now see ZERO rows in `tenants` through the ordinary
+-- app-scoped role. That is by design and is the point of the policy: the
+-- app role can no longer enumerate the tenant table, so it can no longer
+-- read another customer's name, region, deployment tier, identity_config
+-- or rbac_map.
+--
+-- Such a lookup therefore needs its own dedicated, narrowly-scoped
+-- connection and role -- the same "migration/admin tooling" carve-out
+-- already relied on elsewhere in this migration set (see
+-- 0004_rls_null_aware_write_check.sql, where writing a NULL-tenant global
+-- row is likewise reserved to a role that bypasses RLS). That role should
+-- be:
+--   * separate from the regular application role, on its own connection
+--     (never the pooled app connection);
+--   * restricted to the single narrow lookup it exists for -- ideally
+--     SELECT on a purpose-built view exposing only the resolution key and
+--     tenant_id, never `SELECT *` on `tenants`;
+--   * never handed to request-scoped application code after the tenant
+--     context has been established.
+--
+-- Whoever builds that lookup path owns implementing it; this note exists so
+-- the requirement is discovered at design time rather than as a puzzling
+-- zero-row result in production. A symptom to recognize: a bootstrap or
+-- login query against `tenants` returning no rows where it used to return
+-- one is this policy working correctly, not a data-loss bug.
+--
+-- (The GUC-materialization caveat documented at the end of
+-- 0004_rls_null_aware_write_check.sql -- once any transaction on a physical
+-- connection has set and committed app.tenant_id, a later transaction that
+-- skips set_config sees '' rather than NULL and `''::uuid` raises "invalid
+-- input syntax for type uuid" -- now applies to `tenants` as well, since it
+-- is a policy-protected table from this migration forward.)
+-- -----------------------------------------------------------------------------
