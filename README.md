@@ -1,37 +1,11 @@
-# 🤖 Nexus Agent 🧭 — A Governed Agent Platform Designed for Enterprise Readiness and Flexible Deployment Topology
+<div align="center">
 
-### Held to enterprise standards: tenant isolation, tamper-evident audit, human approval, cost ceilings. Runs as one process today and keeps the seam that lets it split later
+# 🤖 Nexus Agent 🧭
 
-**Enterprise readiness is a design property, not a feature list.** The platform is held to the spec's constitution
-(tenant isolation, tamper-evident audit, human approval of consequential actions, cost ceilings enforced before the spend,
-telemetry that is content-free by default), and each control has a code location and, where it can, a test or lint rule that fails the build.
-[Enterprise readiness](#-enterprise-readiness) says which controls are built, partial or only a seam. It is a design target, not a
-certification.
+### A Governed Agent Platform Designed for Enterprise Readiness and Flexible Deployment Topology
 
-**Topology is a deployment decision, not an architecture.** The control plane, the data plane and the surfaces meet only at Go
-interfaces (`controlplane.Port` v1, the durable queue, the event log, the cost gate, the model provider and the audit signer), and
-an import-graph test fails the build if a package reaches across one. The [Nexus Agent Spec](https://github.com/truongpx396/nexus-agent-spec#deployment-topologies)
-defines one build that runs as multi-tenant SaaS, single-tenant, self-hosted in a customer's VPC, or a split control-plane/data-plane hybrid.
-Nexus Agent ships the smallest of those today, the spec's one-process collapse: `nexusd`, plus a separate key-custody `signerd`, over
-Postgres + PgBouncer + Redis. It keeps the seam the others need, but no split ships, and topology is not yet selected by
-configuration ([Deployment topology](#-deployment-topology)).
-
-Inside, every conversation is an **append-only, envelope-encrypted event log** with a **hash-chained, signer-attested audit
-trail**. One kernel loop serves every surface, every tool call walks a **16-step pipeline** and a **10-layer permission chain**,
-and every model call is **budget-reserved before it streams**.
-
-Nexus Agent is a Go implementation of the platform designed in [`truongpx396/nexus-agent-spec`](https://github.com/truongpx396/nexus-agent-spec).
-It builds every architectural seam and control of that design and, for now, defers deployment-topology selection, scale-out
-infrastructure and the commercial tail ([§2](#2-scope-against-the-spec)): the spec's three Go binaries run here as one process,
-behind the same seams. Around the kernel sit tools (built-ins, an MCP client, per-user OAuth connectors), skills, sub-agent
-delegation and peer teams, a declarative orchestration plane, file-first memory, a pgvector retrieval tier and a Docker or
-OpenSandbox sandbox. The model is behind one port with three adapters: a scripted `fake` (the default, so everything runs with no credentials), `anthropic`, and `litellm` for any
-OpenAI-compatible model, local Ollama included.
-
-> **Status:** a reference implementation, not a deployed service. The `--dev` path is zero-setup; outside it `nexusd`
-> fails closed on any unset security-critical setting. What stands between this and production is tracked in
-> [`docs/production-readiness-review.md`](docs/production-readiness-review.md) and [`docs/go-live.md`](docs/go-live.md).
-> What it is held to, and which parts are built, partial or only a seam: [Enterprise readiness](#-enterprise-readiness).
+**Held to enterprise standards: tenant isolation, tamper-evident audit, human approval, cost ceilings.**<br>
+Runs as one process today and keeps the seam that lets it split later
 
 [![CI](https://github.com/truongpx396/nexus-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/truongpx396/nexus-agent/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)](#-quickstart)
@@ -43,6 +17,40 @@ OpenAI-compatible model, local Ollama included.
 [![LLM](https://img.shields.io/badge/LLM-fake%20%C2%B7%20Anthropic%20%C2%B7%20LiteLLM-2ea44f)](#-configuration)
 [![Patterns](https://img.shields.io/badge/Patterns-57%20of%2067%20at%20full%20or%20simplified%20fidelity-e36209)](specs/001-agent-platform/pattern-coverage.md)
 [![Eval gate](https://img.shields.io/badge/Eval%20gate-release%20gate%20in%20CI-0969da)](#4-testing-strategy)
+
+</div>
+
+**Enterprise readiness is a design property, not a feature list.** The platform is held to the spec's constitution
+(tenant isolation, tamper-evident audit, human approval of consequential actions, cost ceilings enforced before the spend,
+telemetry that is content-free by default), and each control has a code location and, where it can, a test or lint rule that fails the build.
+[Enterprise readiness](#-enterprise-readiness) says which controls are built, partial or only a seam. It is a design target, not a
+certification.
+
+**Topology is a deployment decision, not an architecture.** The control plane, the data plane and the surfaces meet only at Go
+interfaces (`controlplane.Port` v1, the durable queue, the event log, the cost gate, the model provider and the audit signer), and
+an import-graph test fails the build if a package reaches across one. The design is one build that runs as multi-tenant SaaS,
+single-tenant, self-hosted in a customer's VPC, or a split control-plane/data-plane hybrid.
+Nexus Agent ships the smallest of those today, the design's one-process collapse: `nexusd`, plus a separate key-custody `signerd`, over
+Postgres + PgBouncer + Redis. It keeps the seam the others need, but no split ships, and topology is not yet selected by
+configuration ([Deployment topology](#-deployment-topology)).
+
+Inside, every conversation is an **append-only, envelope-encrypted event log** with a **hash-chained, signer-attested audit
+trail**. One kernel loop serves every surface, every tool call walks a **16-step pipeline** and a **10-layer permission chain**,
+and every model call is **budget-reserved before it streams**.
+
+Nexus Agent is a Go implementation of an enterprise agent platform design, recorded in [`specs/`](specs/README.md).
+It builds every architectural seam and control of that design and, for now, defers deployment-topology selection, scale-out
+infrastructure and the commercial tail ([§2](#2-scope-against-the-spec)): the design's three Go binaries run here as one process,
+behind the same seams. Around the kernel sit tools (built-ins, an MCP client, per-user OAuth connectors), skills, sub-agent
+delegation and peer teams, a declarative orchestration plane, file-first memory, a pgvector retrieval tier and a Docker or
+OpenSandbox sandbox. The model is behind one port with three adapters: a scripted `fake` (the default, so everything runs with no credentials), `anthropic`, and `litellm` for any
+OpenAI-compatible model, local Ollama included.
+
+> **Status:** a reference implementation, not a deployed service. The `--dev` path is zero-setup; outside it `nexusd`
+> fails closed on any unset security-critical setting. What stands between this and production is tracked in
+> [`docs/production-readiness-review.md`](docs/production-readiness-review.md) and [`docs/go-live.md`](docs/go-live.md).
+> What it is held to, and which parts are built, partial or only a seam: [Enterprise readiness](#-enterprise-readiness).
+
 
 * * *
 
@@ -158,7 +166,7 @@ Layout, import boundaries, schema and interfaces are in [§3](#3-target-architec
 
 ## 🚢 Deployment topology
 
-The [spec](https://github.com/truongpx396/nexus-agent-spec#deployment-topologies) defines **one build in four topologies, selected by configuration**, plus a one-process collapse of it for a single trusted tenant. Nexus Agent ships that collapse and keeps the seams the other four need. **Ships** means this repo builds and runs it; **Seam only** means the boundary exists and is enforced, but nothing here deploys it.
+The design is **one build in four topologies, selected by configuration**, plus a one-process collapse of it for a single trusted tenant. Nexus Agent ships that collapse and keeps the seams the other four need. **Ships** means this repo builds and runs it; **Seam only** means the boundary exists and is enforced, but nothing here deploys it.
 
 | Spec topology | What it is | In Nexus Agent |
 |---|---|---|
@@ -893,17 +901,17 @@ none requires migrating the event log, the audit chain, or the encryption model.
 
 ## 6. Source references
 
-Read alongside this document. These links go to `truongpx396/nexus-agent-spec@2ad2a6a`; this repo's own [`specs/`](specs/README.md) has files with the same names, reconstructed from this code rather than copied from there:
+Read alongside this document. These are the design records this repo keeps under [`specs/`](specs/README.md) and `.specify/`:
 
 | Document | Why |
 |---|---|
-| [`.specify/memory/constitution.md`](https://github.com/truongpx396/nexus-agent-spec/blob/2ad2a6a/.specify/memory/constitution.md) | The nine principles. Every design decision here maps to one; it is also the code-review checklist. |
-| [`specs/001-agent-platform/contracts/kernel-abi.md`](https://github.com/truongpx396/nexus-agent-spec/blob/2ad2a6a/specs/001-agent-platform/contracts/kernel-abi.md) | The interface seams translated in §3 — Provider, Tool, Delegation, Memory, Workspace, Surface, Skills, RunControl, Oversight, BudgetGate, Persistence, Telemetry. |
-| [`specs/001-agent-platform/contracts/tool-contract.md`](https://github.com/truongpx396/nexus-agent-spec/blob/2ad2a6a/specs/001-agent-platform/contracts/tool-contract.md) | The 16-step pipeline and the 10-layer resolution order, verbatim. |
-| [`specs/001-agent-platform/contracts/orchestration-plane.md`](https://github.com/truongpx396/nexus-agent-spec/blob/2ad2a6a/specs/001-agent-platform/contracts/orchestration-plane.md) | Plan schema, lifecycle gates, zero-token routing invariant. |
-| [`specs/001-agent-platform/data-model.md`](https://github.com/truongpx396/nexus-agent-spec/blob/2ad2a6a/specs/001-agent-platform/data-model.md) | Entity fields; Nexus Agent's schema is a subset with identical column semantics. |
-| [`specs/001-agent-platform/plan.md`](https://github.com/truongpx396/nexus-agent-spec/blob/2ad2a6a/specs/001-agent-platform/plan.md) § MVP cut line | The seams-early/infrastructure-late rule this whole plan inherits. |
-| [`specs/001-agent-platform/quickstart.md`](https://github.com/truongpx396/nexus-agent-spec/blob/2ad2a6a/specs/001-agent-platform/quickstart.md) | The nine validation scenarios; this repo's [quickstart](specs/001-agent-platform/quickstart.md) has their simplified analogues. |
+| [`.specify/memory/constitution.md`](.specify/memory/constitution.md) | The nine principles. Every design decision here maps to one; it is also the code-review checklist. |
+| [`specs/001-agent-platform/contracts/kernel-abi.md`](specs/001-agent-platform/contracts/kernel-abi.md) | The interface seams translated in §3 — Provider, Tool, Delegation, Memory, Workspace, Surface, Skills, RunControl, Oversight, BudgetGate, Persistence, Telemetry. |
+| [`specs/001-agent-platform/contracts/tool-contract.md`](specs/001-agent-platform/contracts/tool-contract.md) | The 16-step pipeline and the 10-layer resolution order. |
+| [`specs/001-agent-platform/contracts/orchestration-plane.md`](specs/001-agent-platform/contracts/orchestration-plane.md) | Plan schema, lifecycle gates, zero-token routing invariant. |
+| [`specs/001-agent-platform/data-model.md`](specs/001-agent-platform/data-model.md) | The tables as built; the migrations are the source of truth, and every table has row-level security enabled and forced. |
+| [`specs/001-agent-platform/plan.md`](specs/001-agent-platform/plan.md) | The seams-early/infrastructure-late rule this whole plan inherits. |
+| [`specs/001-agent-platform/quickstart.md`](specs/001-agent-platform/quickstart.md) | Runnable scenarios that prove each user story end to end, each saying what a test covers and what is manual-only. |
 
 This repo's own supplementary docs:
 
