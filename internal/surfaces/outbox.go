@@ -10,16 +10,53 @@ package surfaces
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 
 	"github.com/google/uuid"
 )
 
 // maxDeliveryAttempts is the fixed retry cap before a delivery is marked
-// failed_permanent — small and constant rather than configurable, matching
-// this codebase's other fixed-cap seams (e.g. internal/reliability's
-// circuit breaker at 3 identical failures).
-const maxDeliveryAttempts = 3
+// failed_permanent. Each failed attempt is retried by the periodic pass
+// (Replier.RetryDue) after a backoff the ledger sets, so the cap bounds the
+// total effort, not how soon the next try comes.
+const maxDeliveryAttempts = 5
+
+// SendError is a failed send whose Reason is safe to record on a delivery and
+// to show to the session's audience: it never carries a URL, a credential or a
+// response body. A sender returns one for any failure whose cause it can name;
+// Err is the underlying error, kept for the log and never put in a reason.
+type SendError struct {
+	Reason string
+	Err    error
+}
+
+func (e *SendError) Error() string {
+	if e.Err == nil {
+		return e.Reason
+	}
+	return e.Reason + ": " + e.Err.Error()
+}
+
+func (e *SendError) Unwrap() error { return e.Err }
+
+// failureReason turns whatever a sender returned into the classified reason a
+// delivery_failed event records. An error a sender did not classify becomes a
+// fixed phrase, so no transport can leak a request URL or a token through an
+// error string into an event the session's audience can read.
+func failureReason(err error) string {
+	if se, ok := errors.AsType[*SendError](err); ok {
+		return se.Reason
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
+		return "timeout"
+	}
+	return "send failed"
+}
 
 // Sender actually delivers one payload to one recipient over one surface —
 // implemented per transport (Phase 11's Telegram bot API client, an email
@@ -62,6 +99,22 @@ type DeliveryLedger interface {
 	// matching event: delivery_delivered when status is DeliveryDelivered,
 	// delivery_failed otherwise (reason says why).
 	Record(ctx context.Context, tenantID, sessionID, deliveryID uuid.UUID, status DeliveryStatus, reason string) error
+
+	// ClaimDue returns up to limit deliveries still pending or failed whose
+	// next attempt is due, and leases each for a minute so another replica's
+	// pass skips it. A delivery that was opened and never attempted (the
+	// process died between its event and its send) is due once that lease
+	// lapses, which is what makes delivery at-least-once.
+	ClaimDue(ctx context.Context, tenantID uuid.UUID, limit int) ([]DueDelivery, error)
+}
+
+// DueDelivery is a delivery a retry pass must attempt again.
+type DueDelivery struct {
+	ID        uuid.UUID
+	SessionID uuid.UUID
+	Seq       int64
+	SurfaceID string
+	Recipient string
 }
 
 // Outbox is the durable, at-least-once delivery ledger (task 7.14):
@@ -98,7 +151,7 @@ func (o *Outbox) Deliver(ctx context.Context, tenantID, sessionID uuid.UUID, seq
 	status := DeliveryDelivered
 	reason := ""
 	if sendErr != nil {
-		reason = sendErr.Error()
+		reason = failureReason(sendErr)
 		status = DeliveryFailed
 		if delivery.AttemptCount+1 >= maxDeliveryAttempts {
 			status = DeliveryFailedPermanent

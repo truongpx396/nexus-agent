@@ -122,6 +122,7 @@ func init() {
 		{"the run use case", "internal/runs"},
 		{"the control plane port", "internal/controlplane"},
 		{"the shared surface primitives", "internal/surfaces"},
+		{"the chat surfaces' shared dispatch", "internal/surfaces/chat"},
 		{"content access grants", "internal/contentaccess"},
 		{"reporting", "internal/reporting"},
 		{"the connectors vault", "internal/connectors"},

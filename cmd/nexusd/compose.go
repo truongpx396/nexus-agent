@@ -31,6 +31,7 @@ import (
 	runsrest "github.com/truongpx396/nexus-agent/internal/runs/rest"
 	"github.com/truongpx396/nexus-agent/internal/skills"
 	"github.com/truongpx396/nexus-agent/internal/surfaces"
+	"github.com/truongpx396/nexus-agent/internal/surfaces/chat"
 	"github.com/truongpx396/nexus-agent/internal/surfaces/mcp"
 	surfpg "github.com/truongpx396/nexus-agent/internal/surfaces/postgres"
 	restkit "github.com/truongpx396/nexus-agent/internal/surfaces/rest"
@@ -62,6 +63,7 @@ type services struct {
 	delegations *delegate.Delegations
 	teams       *teams.Service
 	outbox      *surfaces.Outbox
+	replier     *chat.Replier
 
 	// routeMetrics counts the REST API's requests per route, for /metrics. It is
 	// created with the REST API (newRESTAPI).
@@ -132,7 +134,6 @@ func buildServices(in *infra, prov provider.Provider, spanExp spanExporter) (*se
 		maxTurns:    25,
 		memory:      &memory.Store{RootDir: envOr("NEXUS_MEMORY_ROOT", ".dev/memory"), Config: cfgStore},
 		queue:       in.queue,
-		redisClient: redisClient,
 	}
 
 	// Wire must land before the first real dispatch. It reuses starter's own
@@ -178,11 +179,13 @@ func buildServices(in *infra, prov provider.Provider, spanExp spanExporter) (*se
 		ServedModel:           func(routed string) string { return provider.ServedModel(prov, routed) },
 	}
 
+	outbox := &surfaces.Outbox{Ledger: surfpg.NewLedger(st, keyStore, chain)}
 	return &services{
 		kernel: k, gate: gate, starter: starter, launcher: launcher,
 		approvals: approvals, resumer: resumer, grants: grants, ctl: ctl,
 		delegations: delegations, teams: teamsSvc,
-		outbox:   &surfaces.Outbox{Ledger: surfpg.NewLedger(st, keyStore, chain)},
+		outbox:   outbox,
+		replier:  newReplier(in, outbox),
 		cfgStore: cfgStore, skillBundles: stack.skillBundles, mcp: stack.mcp, catalogManifestDigest: catalogManifestDigest,
 	}, nil
 }

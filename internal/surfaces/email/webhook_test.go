@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/truongpx396/nexus-agent/internal/runs"
+	"github.com/truongpx396/nexus-agent/internal/surfaces/chat"
 )
 
 type fakeChannels struct {
@@ -45,26 +46,23 @@ func (f *fakeStarter) StartRun(_ context.Context, req runs.Request) (<-chan runs
 
 // fakeResumer mirrors internal/surfaces/telegram's own (its doc comment).
 type fakeResumer struct {
+	err       error // what SendMessage answers, to script a session that has ended
 	resumed   bool
 	sessionID uuid.UUID
 	input     string
 }
 
-func (f *fakeResumer) ResumeConversation(_ context.Context, _ uuid.UUID, sessionID uuid.UUID, input string) (<-chan runs.Event, error) {
+func (f *fakeResumer) SendMessage(_ context.Context, _ uuid.UUID, sessionID uuid.UUID, input string) error {
 	f.resumed = true
 	f.sessionID = sessionID
 	f.input = input
-	ch := make(chan runs.Event)
-	close(ch)
-	return ch, nil
+	return f.err
 }
 
 // fakeLocker is surfaces.Locker's own test double — Acquire's every call
 // result is queued up front (acquireResults), so a test can script
 // contention (ok=false) as easily as success; Release just records what it
-// was called with and, if set, closes done so a caller waiting on the
-// async drainAndNotify goroutine (the only place Release is ever called
-// from real production code) can synchronize on it instead of sleeping.
+// was called with and, if set, closes done once Release has run.
 type fakeLocker struct {
 	mu             sync.Mutex
 	acquireResults []bool // consumed in order, one per Acquire call; exhausted results are all treated as false
@@ -157,7 +155,7 @@ func TestHandleWebhook_NoChannelConfiguredRefusesWithoutStartingARun(t *testing.
 
 func TestHandleWebhook_RateLimitedRefusesBeforeBodyIsParsed(t *testing.T) {
 	launcher := &fakeLauncher{}
-	limiter := NewRateLimiter(1, time.Hour)
+	limiter := chat.NewLimiter(1, time.Hour)
 	tenantID := uuid.New()
 	limiter.Allow(tenantID.String())
 

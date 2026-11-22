@@ -3,6 +3,8 @@ package email
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/truongpx396/nexus-agent/internal/surfaces"
 )
 
 // TestRenderNotification_RendersEachNotificationKind mirrors
@@ -13,19 +15,19 @@ import (
 func TestRenderNotification_RendersEachNotificationKind(t *testing.T) {
 	cases := []struct {
 		name        string
-		payload     notificationPayload
+		payload     surfaces.Notification
 		wantSubject string
 		wantText    string
 	}{
 		{
 			name:        "approval",
-			payload:     notificationPayload{Kind: "approval", SessionID: "s-1", ToolID: "platform/shell@1"},
+			payload:     surfaces.Notification{Kind: "approval", SessionID: "s-1", ToolID: "platform/shell@1"},
 			wantSubject: "Approval needed",
 			wantText:    "Approval needed for session s-1 (tool: platform/shell@1) — review it in the run's own approval endpoint.",
 		},
 		{
 			name:        "content",
-			payload:     notificationPayload{Kind: "content", Text: "here is my reply"},
+			payload:     surfaces.Notification{Kind: "content", Text: "here is my reply"},
 			wantSubject: "Re: your message",
 			wantText:    "here is my reply",
 		},

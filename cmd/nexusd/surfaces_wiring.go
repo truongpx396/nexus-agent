@@ -2,17 +2,20 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/redis/go-redis/v9"
 
 	queueredis "github.com/truongpx396/nexus-agent/internal/queue/redis"
 	reportingpg "github.com/truongpx396/nexus-agent/internal/reporting/postgres"
 	"github.com/truongpx396/nexus-agent/internal/runctl"
 	"github.com/truongpx396/nexus-agent/internal/runs"
 	runspg "github.com/truongpx396/nexus-agent/internal/runs/postgres"
+	"github.com/truongpx396/nexus-agent/internal/surfaces"
+	"github.com/truongpx396/nexus-agent/internal/surfaces/chat"
 	"github.com/truongpx396/nexus-agent/internal/surfaces/email"
 	surfpg "github.com/truongpx396/nexus-agent/internal/surfaces/postgres"
 	"github.com/truongpx396/nexus-agent/internal/surfaces/telegram"
@@ -38,26 +41,26 @@ func newMux(in *infra, svc *services, restAPI http.Handler, metricsToken string)
 	sessionLock := queueredis.NewSessionLock(in.redis, 30*time.Second)
 
 	channels := surfpg.NewChannels(in.st, in.keys)
-	resume := conversationResumer{ctl: svc.ctl, redisClient: in.redis}
+	resume := conversationResumer{ctl: svc.ctl}
 	runReader := runspg.Reader{Store: in.st, KeyStore: in.keys}
 	inboundDedup := surfpg.NewDedup(in.st)
 	telegramSrv := &telegram.Server{
 		Reader: runReader, Dedup: inboundDedup, Launcher: svc.launcher, Resume: resume, Channels: channels,
-		Outbox:    svc.outbox,
-		RateLimit: telegram.NewRateLimiter(20, time.Minute),
-		Lock:      sessionLock,
+		IPLimit: webhookIPLimit(), RateLimit: chat.NewLimiter(20, time.Minute),
+		Secrets: chat.NewTTLCache[telegram.ChannelSecret](webhookSecretTTL, webhookSecretCacheSize),
+		Lock:    sessionLock,
 	}
 	zaloSrv := &zalo.Server{
 		Reader: runReader, Dedup: inboundDedup, Launcher: svc.launcher, Resume: resume, Channels: channels,
-		Outbox:    svc.outbox,
-		RateLimit: zalo.NewRateLimiter(20, time.Minute),
-		Lock:      sessionLock,
+		IPLimit: webhookIPLimit(), RateLimit: chat.NewLimiter(20, time.Minute),
+		Secrets: chat.NewTTLCache[zalo.ChannelSecret](webhookSecretTTL, webhookSecretCacheSize),
+		Lock:    sessionLock,
 	}
 	emailSrv := &email.Server{
 		Reader: runReader, Dedup: inboundDedup, Launcher: svc.launcher, Resume: resume, Channels: emailChannels{channels},
-		Outbox:    svc.outbox,
-		RateLimit: email.NewRateLimiter(20, time.Minute),
-		Lock:      sessionLock,
+		IPLimit: webhookIPLimit(), RateLimit: chat.NewLimiter(20, time.Minute),
+		Secrets: chat.NewTTLCache[email.ChannelCredential](webhookSecretTTL, webhookSecretCacheSize),
+		Lock:    sessionLock,
 	}
 
 	mux := http.NewServeMux()
@@ -80,22 +83,52 @@ func newMux(in *infra, svc *services, restAPI http.Handler, metricsToken string)
 	return mux
 }
 
+// webhookSecretTTL is how long a tenant's webhook credential is remembered, and
+// webhookSecretCacheSize bounds how many tenants are. A rotated credential is
+// honoured within that time, and a flood of requests for tenants that do not
+// exist costs one lookup each per window.
+const (
+	webhookSecretTTL       = 60 * time.Second
+	webhookSecretCacheSize = 4096
+)
+
+// webhookIPLimit is the per-client-address limit applied before a webhook looks
+// a tenant up: 300 requests a minute from one address, far above what a
+// provider sends and far below what a flood needs.
+func webhookIPLimit() *chat.Limiter { return chat.NewLimiter(300, time.Minute) }
+
 // conversationResumer is the one runs.Resumer telegram, zalo and email share
-// (cron has no human peer to resume a conversation with). Each of them needs
-// the full "every event until terminal" channel, the same
-// subscribe-before-append-and-enqueue shape kernelRunStarter.StartRun uses
-// (runner.go), because none has a broker/SSE mechanism of its own to fall
-// back on the way REST does. The surfaces start runs through
-// *kernelRunStarter directly: it already implements runs.Starter.
-type conversationResumer struct {
-	ctl         *runctl.Control
-	redisClient *redis.Client
-}
+// (cron has no human peer to resume a conversation with). It hands a message to
+// runctl.Control.Send: a conversation paused for input continues, a session
+// still working or waiting on a decision takes it as a steering message, and one
+// that has ended reports runs.ErrSessionEnded, so the surface starts a new one.
+// The surfaces start runs through the shared runs.Launcher.
+type conversationResumer struct{ ctl *runctl.Control }
 
 var _ runs.Resumer = conversationResumer{}
 
-func (r conversationResumer) ResumeConversation(ctx context.Context, tenantID, sessionID uuid.UUID, input string) (<-chan runs.Event, error) {
-	return resumeConversationEvents(ctx, r.redisClient, r.ctl, tenantID, sessionID, input)
+func (r conversationResumer) SendMessage(ctx context.Context, tenantID, sessionID uuid.UUID, input string) error {
+	err := r.ctl.Send(ctx, tenantID, sessionID, input)
+	if errors.Is(err, runctl.ErrSessionState) {
+		return fmt.Errorf("%w: %w", runs.ErrSessionEnded, err)
+	}
+	return err
+}
+
+// newReplier is what answers a chat session: the worker that drives a turn hands
+// it each event, and a periodic pass retries what an attempt left undelivered.
+func newReplier(in *infra, outbox *surfaces.Outbox) *chat.Replier {
+	channels := surfpg.NewChannels(in.st, in.keys)
+	client := &http.Client{Timeout: 10 * time.Second}
+	return &chat.Replier{
+		Reader: runspg.Reader{Store: in.st, KeyStore: in.keys},
+		Outbox: outbox,
+		Senders: map[string]surfaces.SenderFor{
+			telegram.Descriptor.SurfaceID: telegram.NewSender(channels, client),
+			zalo.Descriptor.SurfaceID:     zalo.NewSender(channels, client),
+			email.Descriptor.SurfaceID:    email.NewSender(emailChannels{channels}),
+		},
+	}
 }
 
 // adminTenantLister implements cron.TenantLister over the same

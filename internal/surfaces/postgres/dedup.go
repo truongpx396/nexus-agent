@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -30,4 +31,18 @@ func (d *Dedup) Claim(ctx context.Context, tenantID uuid.UUID, surfaceID, delive
 		return derr
 	})
 	return claimed, err
+}
+
+func (d *Dedup) Release(ctx context.Context, tenantID uuid.UUID, surfaceID, deliveryID string) error {
+	if deliveryID == "" {
+		return nil // nothing was recorded for an id-less delivery
+	}
+	return d.st.InTenantTx(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `DELETE FROM inbound_deliveries WHERE tenant_id = $1 AND surface_id = $2 AND delivery_id = $3`,
+			tenantID, surfaceID, deliveryID)
+		if err != nil {
+			return fmt.Errorf("release inbound delivery %s/%s: %w", surfaceID, deliveryID, err)
+		}
+		return nil
+	})
 }

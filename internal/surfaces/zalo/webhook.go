@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,9 +23,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
-	"github.com/truongpx396/nexus-agent/internal/eventlog"
 	"github.com/truongpx396/nexus-agent/internal/runs"
 	"github.com/truongpx396/nexus-agent/internal/surfaces"
+	"github.com/truongpx396/nexus-agent/internal/surfaces/chat"
 )
 
 // zaloNamespace is telegram.telegramNamespace's own counterpart — a fixed
@@ -61,6 +62,13 @@ type ChannelPort interface {
 	AccessToken(ctx context.Context, tenantID uuid.UUID) (token string, err error)
 }
 
+// ChannelSecret is what a tenant's app secret lookup answered: ok=false is "no
+// zalo channel is configured", which is cached like any other answer.
+type ChannelSecret struct {
+	secret string
+	ok     bool
+}
+
 // Server holds everything one Zalo webhook handler needs.
 type Server struct {
 	// Reader finds the conversation a message continues (FindByKey) and opens
@@ -71,29 +79,23 @@ type Server struct {
 	Launcher runs.Launcher
 	Channels ChannelPort
 
-	// Outbox, if set, backs durable at-least-once delivery of
-	// EventApprovalRequested — see internal/surfaces/telegram.Server's own
-	// doc comment on why a *Sender is constructed per-delivery here rather
-	// than held as one fixed field.
-	Outbox     *surfaces.Outbox
-	HTTPClient *http.Client
+	// IPLimit limits requests by client address before anything is looked up, so
+	// traffic that carries no valid credential cannot cost a database transaction.
+	IPLimit *chat.Limiter
 
-	RateLimit *RateLimiter
+	// RateLimit limits an authenticated tenant's webhook traffic.
+	RateLimit *chat.Limiter
 
-	// Resume continues an existing conversational session found awaiting
-	// the next message — see internal/surfaces/telegram.Server's own doc
-	// comment; nil (every pre-continuity caller) always takes the
-	// always-fresh-session path.
+	// Secrets caches a tenant's webhook credential for a short time, an absent
+	// channel included. Nil looks it up on every request.
+	Secrets *chat.TTLCache[ChannelSecret]
+
+	// Resume delivers a message to the conversation's open session; nil starts a
+	// new session for every message (chat.Conversation.Resume).
 	Resume runs.Resumer
 
-	// Lock, if set, serializes dispatch's own decide-then-act sequence and
-	// the turn it kicks off around sessionKey (surfaces.AcquireSessionLock),
-	// so two racing deliveries for one conversation can't each decide no
-	// session is awaiting input and both start a fresh one. Keyed on the
-	// surface's own session_key — deliberately not the session id the queue
-	// workers hold for the length of a run (see surfaces.Locker). nil (every
-	// pre-this-fix caller and test) reproduces the prior unlocked behavior
-	// exactly.
+	// Lock serialises one conversation's decide-then-act step
+	// (chat.Conversation.Lock); nil leaves it unlocked.
 	Lock surfaces.Locker
 }
 
@@ -130,13 +132,22 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	secret, ok, err := s.Channels.AppSecret(r.Context(), tenantID)
+	if s.IPLimit != nil && !s.IPLimit.Allow(chat.ClientIP(r.RemoteAddr)) {
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+		return
+	}
+
+	cs, err := s.Secrets.Get(tenantID.String(), func() (ChannelSecret, error) {
+		secret, ok, err := s.Channels.AppSecret(r.Context(), tenantID)
+		return ChannelSecret{secret, ok}, err
+	})
 	if err != nil {
 		log.Error().Err(err).Any("tenant_id", tenantID).Msg("zalo: resolve channel")
 		http.Error(w, "resolve channel: internal error", http.StatusInternalServerError)
 		return
 	}
-	if !ok {
+	secret := cs.secret
+	if !cs.ok {
 		http.Error(w, "no zalo channel configured for this tenant", http.StatusNotFound)
 		return
 	}
@@ -180,166 +191,19 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	// applies — intentional, not a gap this change introduces.
 	deliveryID := ev.Message.MsgID
 
-	if _, err := s.dispatch(r.Context(), tenantID, userID, sessionKey, deliveryID, ev.Sender.ID, ev.Message.Text); err != nil {
+	conv := chat.Conversation{
+		SurfaceID: Descriptor.SurfaceID, Reader: s.Reader, Dedup: s.Dedup, Launcher: s.Launcher, Resume: s.Resume, Lock: s.Lock,
+	}
+	err = conv.Dispatch(r.Context(), chat.Inbound{
+		TenantID: tenantID, UserID: userID, SessionKey: sessionKey, DeliveryID: deliveryID, Text: ev.Message.Text,
+	})
+	switch {
+	case errors.Is(err, chat.ErrBusy):
+		http.Error(w, "conversation busy; retry", http.StatusServiceUnavailable)
+	case err != nil:
 		log.Error().Err(err).Any("tenant_id", tenantID).Msg("zalo: dispatch")
 		http.Error(w, "dispatch: internal error", http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-}
-
-// dispatch first claims deliveryID (surfaces.ClaimDelivery) — a provider
-// redelivery of an event this surface already accepted is acknowledged
-// (uuid.Nil, nil) without ever reaching the session lookup below, closing
-// the production-readiness review's finding that "Telegram/Zalo webhooks
-// retry by design" and nothing dedupes that. A freshly-claimed delivery
-// then acquires s.Lock (if set) around the ENTIRE decide-then-act sequence
-// that follows — including the turn dispatch kicks off, which runs to
-// completion in its own goroutine well after this function returns
-// (startRun/resumeRun's own doc comments), which is why release is a
-// closure threaded through to drainAndNotify rather than a plain defer
-// here. Lock contention (ok=false) means another goroutine is ALREADY
-// driving this exact session_key's turn; this delivery is logged and
-// dropped rather than risk a second concurrent turn for it — a rare,
-// bounded, logged trade-off, not a silent one.
-//
-// Otherwise mirrors internal/surfaces/telegram's own (its doc comment) —
-// duplicated per this codebase's established cross-surface idiom.
-func (s *Server) dispatch(ctx context.Context, tenantID, userID uuid.UUID, sessionKey, deliveryID, recipientID, input string) (uuid.UUID, error) {
-	claimed, err := s.Dedup.Claim(ctx, tenantID, Descriptor.SurfaceID, deliveryID, sessionKey)
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("claim delivery: %w", err)
-	}
-	if !claimed {
-		log.Info().Any("tenant_id", tenantID).Str("delivery_id", deliveryID).Msg("zalo: duplicate delivery acknowledged without dispatching")
-		return uuid.Nil, nil
-	}
-
-	release := func() {}
-	if s.Lock != nil {
-		token, ok, lerr := surfaces.AcquireSessionLock(ctx, s.Lock, sessionKey)
-		if lerr != nil {
-			return uuid.Nil, fmt.Errorf("acquire session lock: %w", lerr)
-		}
-		if !ok {
-			log.Warn().Any("tenant_id", tenantID).Str("session_key", sessionKey).Msg("zalo: session lock contended; dropping this delivery rather than risk a concurrent turn")
-			return uuid.Nil, nil
-		}
-		release = func() {
-			if rerr := s.Lock.Release(context.Background(), sessionKey, token); rerr != nil {
-				log.Error().Err(rerr).Str("session_key", sessionKey).Msg("zalo: session lock release failed")
-			}
-		}
-	}
-
-	if s.Resume != nil {
-		sess, found, err := s.Reader.FindByKey(ctx, tenantID, sessionKey)
-		if err != nil {
-			release()
-			return uuid.Nil, fmt.Errorf("look up session for %s: %w", sessionKey, err)
-		}
-		if found && sess.Status == eventlog.SessionStatusAwaitingInput {
-			return s.resumeRun(ctx, tenantID, sess.RunID, recipientID, input, release)
-		}
-	}
-	return s.startRun(ctx, tenantID, userID, sessionKey, recipientID, input, release)
-}
-
-// startRun launches a fresh conversational run for this message through the
-// shared run-admission use case (runs.Launcher), the same sequence REST uses.
-// recipientID is the delivery target for any outbox notification this run
-// produces — carried alongside (never derived from) the session id, since the
-// two identify different things (surfaces.Outbox.Deliver's own recipient
-// parameter). sessionKey is dispatch's own deterministic per-user key:
-// the NEXT message from this Zalo user finds this session again through it while
-// it is awaiting_input (kernel.RunConfig.Conversational's pause-not-terminate
-// semantics).
-func (s *Server) startRun(ctx context.Context, tenantID, userID uuid.UUID, sessionKey, recipientID, input string, release func()) (uuid.UUID, error) {
-	launched, err := s.Launcher.Launch(ctx, runs.LaunchRequest{
-		TenantID: tenantID, UserID: userID, SurfaceID: "zalo", SessionKey: sessionKey,
-		Input: input, Autonomy: "supervised", Conversational: true,
-	})
-	if err != nil {
-		release()
-		return uuid.Nil, fmt.Errorf("start run: %w", err)
-	}
-	go s.drainAndNotify(context.WithoutCancel(ctx), tenantID, launched.SessionID, recipientID, launched.Events, release)
-	return launched.SessionID, nil
-}
-
-// resumeRun mirrors internal/surfaces/telegram's own (its doc comment).
-func (s *Server) resumeRun(ctx context.Context, tenantID, sessionID uuid.UUID, recipientID, input string, release func()) (uuid.UUID, error) {
-	runCtx := context.WithoutCancel(ctx) // a run outlives this webhook request
-	events, err := s.Resume.ResumeConversation(runCtx, tenantID, sessionID, input)
-	if err != nil {
-		release()
-		return uuid.Nil, fmt.Errorf("resume conversation: %w", err)
-	}
-	go s.drainAndNotify(runCtx, tenantID, sessionID, recipientID, events, release)
-	return sessionID, nil
-}
-
-// drainAndNotify mirrors internal/surfaces/telegram's own (its doc
-// comment) — the only consumer of a run's event channel on this surface,
-// fresh or resumed alike.
-func (s *Server) drainAndNotify(ctx context.Context, tenantID, sessionID uuid.UUID, recipientID string, events <-chan runs.Event, release func()) {
-	defer release()
-	if s.Outbox == nil {
-		for range events {
-		}
-		return
-	}
-	sender := &Sender{Channels: s.Channels, TenantID: tenantID, Client: s.HTTPClient}
-	opener := s.Reader.EventOpener(tenantID)
-	for re := range events {
-		if re.Err != nil {
-			continue
-		}
-		payload, ok := s.notificationPayload(ctx, opener, sessionID, re.Event)
-		if !ok {
-			continue
-		}
-		if err := s.Outbox.Deliver(ctx, tenantID, sessionID, re.Event.Seq, "zalo", recipientID, payload, sender); err != nil {
-			log.Error().Err(err).Any("session_id", sessionID).Msg("zalo: deliver notification")
-		}
-	}
-}
-
-// notificationPayload mirrors internal/surfaces/telegram's own (its doc
-// comment) — decrypts EventContent the same way
-// internal/runs/rest/run_events.go's toEventDTO does.
-func (s *Server) notificationPayload(ctx context.Context, opener runs.EventOpener, sessionID uuid.UUID, ev eventlog.Event) (payload []byte, ok bool) {
-	switch ev.Type { //nolint:exhaustive // only these two event types are ever worth notifying a chat user about
-	case eventlog.EventApprovalRequested:
-		toolID := ""
-		if ev.ToolID != nil {
-			toolID = *ev.ToolID
-		}
-		b, err := json.Marshal(notificationPayload{Kind: "approval", SessionID: sessionID.String(), ToolID: toolID})
-		if err != nil {
-			return nil, false
-		}
-		return b, true
-
-	case eventlog.EventContent:
-		plaintext, err := opener.Open(ctx, ev)
-		if err != nil {
-			log.Error().Err(err).Any("session_id", sessionID).Msg("zalo: decrypt content event")
-			return nil, false
-		}
-		var body struct {
-			Body string `json:"body"`
-		}
-		if err := json.Unmarshal(plaintext, &body); err != nil {
-			return nil, false
-		}
-		b, err := json.Marshal(notificationPayload{Kind: "content", Text: body.Body})
-		if err != nil {
-			return nil, false
-		}
-		return b, true
-
 	default:
-		return nil, false
+		w.WriteHeader(http.StatusOK)
 	}
 }

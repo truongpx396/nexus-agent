@@ -29,6 +29,7 @@ func view(s eventlog.Session) runs.RunView {
 	return runs.RunView{
 		RunID: s.SessionID, UserID: s.UserID, Status: s.Status, TerminalReason: s.TerminalReason,
 		CreatedAt: s.CreatedAt, AutonomyLevel: s.AutonomyLevel,
+		SurfaceID: s.SurfaceID, SessionKey: s.SessionKey,
 	}
 }
 

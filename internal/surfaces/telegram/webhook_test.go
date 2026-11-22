@@ -8,11 +8,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/truongpx396/nexus-agent/internal/runs"
+	"github.com/truongpx396/nexus-agent/internal/surfaces/chat"
 )
 
 type fakeChannels struct {
@@ -41,30 +43,27 @@ func (f *fakeStarter) StartRun(_ context.Context, req runs.Request) (<-chan runs
 	return ch, nil
 }
 
-// fakeResumer records what ResumeConversation was called with — used to
+// fakeResumer records what SendMessage was called with — used to
 // prove dispatch's own resume-vs-fresh decision, mirroring fakeStarter's
 // own shape.
 type fakeResumer struct {
+	err       error // what SendMessage answers, to script a session that has ended
 	resumed   bool
 	sessionID uuid.UUID
 	input     string
 }
 
-func (f *fakeResumer) ResumeConversation(_ context.Context, _ uuid.UUID, sessionID uuid.UUID, input string) (<-chan runs.Event, error) {
+func (f *fakeResumer) SendMessage(_ context.Context, _ uuid.UUID, sessionID uuid.UUID, input string) error {
 	f.resumed = true
 	f.sessionID = sessionID
 	f.input = input
-	ch := make(chan runs.Event)
-	close(ch)
-	return ch, nil
+	return f.err
 }
 
 // fakeLocker is surfaces.Locker's own test double — Acquire's every call
 // result is queued up front (acquireResults), so a test can script
 // contention (ok=false) as easily as success; Release just records what it
-// was called with and, if set, closes done so a caller waiting on the
-// async drainAndNotify goroutine (the only place Release is ever called
-// from real production code) can synchronize on it instead of sleeping.
+// was called with and, if set, closes done once Release has run.
 type fakeLocker struct {
 	mu             sync.Mutex
 	acquireResults []bool // consumed in order, one per Acquire call; exhausted results are all treated as false
@@ -142,8 +141,8 @@ func TestHandleWebhook_NoChannelConfiguredRefusesWithoutStartingARun(t *testing.
 }
 
 // TestHandleWebhook_RateLimitedRefusesBeforeBodyIsParsed pre-exhausts the
-// bucket directly (RateLimiter is unit-tested on its own merits in
-// ratelimit_test.go) so the ONE HTTP request this test issues is the
+// bucket directly (chat.Limiter is unit-tested on its own merits in
+// internal/surfaces) so the ONE HTTP request this test issues is the
 // rate-limited one — proving the 429 short-circuit happens before
 // startRun's DB-touching session creation is ever reached, without this
 // unit test needing a real Store (internal/store.Store.InTenantTx panics
@@ -152,7 +151,7 @@ func TestHandleWebhook_NoChannelConfiguredRefusesWithoutStartingARun(t *testing.
 // internal/surfaces/rest's own tests draw).
 func TestHandleWebhook_RateLimitedRefusesBeforeBodyIsParsed(t *testing.T) {
 	launcher := &fakeLauncher{}
-	limiter := NewRateLimiter(1, time.Hour)
+	limiter := chat.NewLimiter(1, time.Hour)
 	tenantID := uuid.New()
 	limiter.Allow(tenantID.String()) // consume the one token this bucket starts with
 
@@ -209,5 +208,57 @@ func TestHandleWebhook_AChannelLookupFailureDoesNotLeakTheCause(t *testing.T) {
 	}
 	if body := rec.Body.String(); strings.Contains(body, "10.0.0.7") || strings.Contains(body, "refused") {
 		t.Fatalf("the response body %q carries the infrastructure error, which an unauthenticated caller can read", body)
+	}
+}
+
+// countingChannels counts the lookups that reach it: each one is a tenant-scoped
+// database transaction and an unseal in production.
+type countingChannels struct {
+	fakeChannels
+	lookups atomic.Int64
+}
+
+func (c *countingChannels) WebhookSecret(ctx context.Context, id uuid.UUID) (string, bool, error) {
+	c.lookups.Add(1)
+	return c.fakeChannels.WebhookSecret(ctx, id)
+}
+
+// A flood of requests for tenants that do not exist, none carrying a valid
+// secret, must not become a flood of lookups: the per-address limit refuses the
+// excess before any tenant is read.
+func TestHandleWebhook_AFloodOfUnauthenticatedRequestsCostsABoundedNumberOfLookups(t *testing.T) {
+	ch := &countingChannels{}
+	s := &Server{Channels: ch, IPLimit: chat.NewLimiter(100, time.Hour)}
+
+	limited := 0
+	for range 1000 {
+		req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/telegram/"+uuid.NewString(), bytes.NewReader(nil))
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, req)
+		if rec.Code == http.StatusTooManyRequests {
+			limited++
+		}
+	}
+	if got := ch.lookups.Load(); got != 100 {
+		t.Fatalf("%d lookups reached the channel store for 1,000 unauthenticated requests, want 100", got)
+	}
+	if limited != 900 {
+		t.Fatalf("%d requests were refused with 429, want 900", limited)
+	}
+}
+
+// The same tenant's secret is read once per window, not once per request.
+func TestHandleWebhook_ATenantsSecretIsLookedUpOncePerWindow(t *testing.T) {
+	ch := &countingChannels{fakeChannels: fakeChannels{secret: "s", ok: true}}
+	s := &Server{Channels: ch, Secrets: chat.NewTTLCache[ChannelSecret](time.Minute, 16)}
+	tenantID := uuid.New()
+
+	for range 5 {
+		req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/telegram/"+tenantID.String(), bytes.NewReader(nil))
+		req.Header.Set("X-Telegram-Bot-Api-Secret-Token", "wrong")
+		s.Handler().ServeHTTP(httptest.NewRecorder(), req)
+	}
+	if got := ch.lookups.Load(); got != 1 {
+		t.Fatalf("%d lookups for 5 requests of one tenant, want 1", got)
 	}
 }
