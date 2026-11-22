@@ -4,21 +4,21 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/truongpx396/nexus-agent/internal/surfaces"
 )
 
-// notificationPayload mirrors internal/surfaces/telegram's own (its doc
-// comment) — the explicit, discriminated shape drainAndNotify (webhook.go)
-// builds and Send below interprets.
-type notificationPayload struct {
-	Kind      string `json:"kind"` // "approval" | "content"
-	SessionID string `json:"session_id,omitempty"`
-	ToolID    string `json:"tool_id,omitempty"`
-	Text      string `json:"text,omitempty"`
+// NewSender returns the surfaces.SenderFor of the Zalo surface.
+func NewSender(channels ChannelPort, client *http.Client) surfaces.SenderFor {
+	return func(tenantID uuid.UUID) surfaces.Sender {
+		return &Sender{Channels: channels, TenantID: tenantID, Client: client}
+	}
 }
 
 // Sender implements surfaces.Sender by POSTing to Zalo OA's send-message
@@ -35,19 +35,10 @@ type Sender struct {
 func (s *Sender) Send(ctx context.Context, surfaceID, recipient string, payload []byte) error {
 	token, err := s.Channels.AccessToken(ctx, s.TenantID)
 	if err != nil {
-		return fmt.Errorf("zalo: resolve access token: %w", err)
+		return &surfaces.SendError{Reason: "access token unavailable", Err: err}
 	}
 
-	var body notificationPayload
-	text := string(payload)
-	if err := json.Unmarshal(payload, &body); err == nil {
-		switch body.Kind {
-		case "approval":
-			text = fmt.Sprintf("Approval needed for session %s (tool: %s) — review it in the run's own approval endpoint.", body.SessionID, body.ToolID)
-		case "content":
-			text = body.Text
-		}
-	}
+	text := surfaces.Render(payload)
 
 	reqBody, err := json.Marshal(map[string]any{
 		"recipient": map[string]string{"user_id": recipient},
@@ -70,11 +61,15 @@ func (s *Sender) Send(ctx context.Context, surfaceID, recipient string, payload 
 	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("zalo: send: %w", err)
+		reason := "request failed"
+		if errors.Is(err, context.DeadlineExceeded) {
+			reason = "timeout"
+		}
+		return &surfaces.SendError{Reason: reason, Err: err}
 	}
 	defer resp.Body.Close() //nolint:errcheck // read-only response body; nothing to flush
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("zalo: send returned status %d", resp.StatusCode)
+		return &surfaces.SendError{Reason: fmt.Sprintf("status %d", resp.StatusCode)}
 	}
 	return nil
 }

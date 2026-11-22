@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"iter"
 
-	"github.com/redis/go-redis/v9"
-
 	"github.com/truongpx396/nexus-agent/internal/eventlog"
 	"github.com/truongpx396/nexus-agent/internal/memory"
 	"github.com/truongpx396/nexus-agent/internal/provider"
@@ -36,25 +34,11 @@ type kernelRunStarter struct {
 	// run's own opening event — the same split internal/runctl.Control.
 	// ResumeConversation now uses for a conversational follow-up.
 	queue queue.Port
-
-	// redisClient backs subscribeRunEvents (eventbus.go) — StartRun
-	// subscribes to the run's own bus channel BEFORE Seed/Enqueue below, so
-	// every surface that shares this starter (REST, telegram, zalo, email,
-	// cron) keeps getting RunStarter's documented contract — "a channel of
-	// every event the run produces, closed when the run ends" — even
-	// though the turn loop itself now executes on a queue worker, possibly
-	// a different process, rather than a goroutine this call started.
-	redisClient *redis.Client
 }
 
-// seedHeadroom is the room drainSeed leaves in the channel beyond the seed
-// itself, for events the forwarding goroutine relays before the caller
-// starts reading.
-const seedHeadroom = 8
-
-// drainSeed collects everything a Kernel.Seed sequence yields into a channel
-// sized to hold all of it, and reports whether the sequence ended in an error
-// (that error is the last event in the channel).
+// drainSeed collects everything a Kernel.Seed sequence yields into a closed
+// channel sized to hold all of it, and reports whether the sequence ended in an
+// error (that error is the last event in the channel).
 //
 // Seed runs inline, before StartRun has returned the channel to anyone, so
 // nothing is receiving yet. Seed yields one EventToolLoaded per resident
@@ -71,10 +55,11 @@ func drainSeed(seq iter.Seq2[eventlog.Event, error]) (ch chan runs.Event, failed
 			break
 		}
 	}
-	ch = make(chan runs.Event, len(seeded)+seedHeadroom)
+	ch = make(chan runs.Event, len(seeded))
 	for _, re := range seeded {
 		ch <- re
 	}
+	close(ch)
 	return ch, failed
 }
 
@@ -136,47 +121,25 @@ func (a *kernelRunStarter) StartRun(ctx context.Context, req runs.Request) (<-ch
 		Conversational: req.Conversational,
 	}
 
-	// Subscribed BEFORE Seed/Enqueue below — Redis Pub/Sub has no history,
-	// so a message the eventual worker publishes between "this call
-	// enqueues the job" and "somebody subscribes" would otherwise be missed
-	// forever (subscribeRunEvents' own doc comment, eventbus.go). cancelBus
-	// MUST run on every early-return path below (Seed/Enqueue failing
-	// means nothing was ever appended/enqueued for it to observe) or its
-	// goroutine blocks forever on a message that will now never arrive.
-	busCh, cancelBus := subscribeRunEvents(ctx, a.redisClient, req.SessionID)
-
 	// Seed runs on THIS goroutine, inline with the HTTP request that asked
 	// for it — unlike the old full a.kernel.Run(...), it's only a handful
 	// of durable writes, not the turn loop itself, so there is no "a run
 	// outlives the HTTP request" concern to defer it into a goroutine for.
 	ch, seedFailed := drainSeed(a.kernel.Seed(ctx, st, cfg))
 	if seedFailed {
-		cancelBus()
-		close(ch)
 		return ch, nil
 	}
 
 	if _, err := a.queue.Enqueue(ctx, queue.Job{
 		TenantID: req.TenantID, SessionID: req.SessionID, SessionKey: req.SessionID.String(), Kind: queue.KindStart,
 	}); err != nil {
-		cancelBus()
-		close(ch)
 		return nil, fmt.Errorf("enqueue start job for session %s: %w", req.SessionID, err)
 	}
 
-	// A run outlives the HTTP request that started it — the client already
-	// has its 202 and may not even open the SSE stream. Whichever worker
-	// (in whichever process) leases the job just enqueued drives the real
-	// turn loop and publishes its events onto busCh; this goroutine's only
-	// job is forwarding them until the run's actual terminal event arrives.
-	go func() {
-		defer close(ch)
-		for re := range busCh {
-			ch <- re
-			if re.Err != nil || re.Event.Type == eventlog.EventTerminal {
-				return
-			}
-		}
-	}()
+	// A run outlives the HTTP request that started it: the client already has
+	// its 202 and may not even open the SSE stream. Whichever worker (in
+	// whichever process) leases the job just enqueued drives the real turn loop
+	// and publishes its events itself (queueRunner.Run), so the caller is given
+	// the seed events only.
 	return ch, nil
 }

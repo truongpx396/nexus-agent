@@ -25,14 +25,11 @@ import (
 // resolved by probe or human): a webhook redelivery is an at-least-once
 // INBOUND signal a provider controls, not an outbound side effect whose
 // own outcome can be ambiguous, so a plain insert-once row is the honest
-// mechanism here, not a shortcut. The one accepted trade-off, matching
-// this codebase's other "cheap first line of defense" seams: if a claimed
-// delivery's own dispatch fails before completing (a crash between the
-// claim and the run actually starting), a provider retry of that SAME
-// delivery id is now permanently deduped even though it was never really
-// processed. Recovery is the human sending the message again (a new
-// delivery id), which the surface's own conversational continuity picks up
-// from the session, not a second automatic delivery of the original input.
+// mechanism here, not a shortcut. A dispatch that fails with the process
+// still up releases its claim (Dedup.Release), so the provider's retry is
+// processed; the one gap left is a crash between the claim and the run
+// starting, where that retry is deduped although the message never arrived,
+// and the person has to send it again.
 func claimInboundDelivery(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, surfaceID, deliveryID, sessionKey string) (claimed bool, err error) {
 	if deliveryID == "" {
 		// Some providers' inbound payloads carry no stable id at all

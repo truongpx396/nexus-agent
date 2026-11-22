@@ -14,6 +14,7 @@ package runs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -77,15 +78,28 @@ type Event struct {
 // Starter begins a run. cmd/nexusd's kernelRunStarter is the only
 // implementation: the one place a kernel.RunState/RunConfig is built.
 type Starter interface {
-	// StartRun begins a run in the background (a real implementation returns
-	// once the run is accepted, not once it completes) and returns a channel
-	// of every event the run produces, in order, closed when the run ends.
+	// StartRun accepts a run and returns once it is queued, not once it
+	// completes. The channel holds only the events its own synchronous opening
+	// step appended (Kernel.Seed: the tool and memory pins and the user
+	// message), in order, and is closed after them. Everything later is written
+	// by whichever worker drives the run, which publishes each event itself, so
+	// a caller that relays this channel never sees an event twice.
 	StartRun(ctx context.Context, req Request) (<-chan Event, error)
 }
 
-// Resumer continues an existing conversational session with its next message.
+// ErrSessionEnded is what a Resumer reports for a session that no longer takes
+// messages (it finished, or was ended), so the caller starts a new one.
+var ErrSessionEnded = errors.New("session has ended")
+
+// Resumer delivers a person's next message to a session that already exists.
 // The session is rehydrated from its durable log, so the caller supplies only
 // identifiers and the new input.
 type Resumer interface {
-	ResumeConversation(ctx context.Context, tenantID, sessionID uuid.UUID, input string) (<-chan Event, error)
+	// SendMessage continues a conversation paused awaiting input with the
+	// message, and appends it to a session that is still working or waiting on
+	// a decision, where the next turn reads it. A message is never dropped:
+	// a session that has ended refuses it (runctl.ErrSessionState), and the
+	// caller starts a new session instead. Replies are not returned here; the
+	// worker that drives the turn publishes them.
+	SendMessage(ctx context.Context, tenantID, sessionID uuid.UUID, input string) error
 }

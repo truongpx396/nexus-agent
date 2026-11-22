@@ -23,6 +23,7 @@ import (
 	"github.com/truongpx396/nexus-agent/internal/runctl"
 	runctlpg "github.com/truongpx396/nexus-agent/internal/runctl/postgres"
 	runsrest "github.com/truongpx396/nexus-agent/internal/runs/rest"
+	"github.com/truongpx396/nexus-agent/internal/surfaces/chat"
 	"github.com/truongpx396/nexus-agent/internal/surfaces/cron"
 	cronpg "github.com/truongpx396/nexus-agent/internal/surfaces/cron/postgres"
 	"github.com/truongpx396/nexus-agent/internal/teams"
@@ -50,6 +51,11 @@ const (
 	// keeps failing from being re-enqueued on every pass.
 	orphanSweepEvery     = 5 * time.Minute
 	orphanReenqueueEvery = 15 * time.Minute
+
+	// deliveryRetryEvery is how often the chat-reply retry pass runs. A reply that
+	// failed is due again after a backoff the ledger sets (a minute at the soonest),
+	// so this only bounds how late after that it goes out.
+	deliveryRetryEvery = 20 * time.Second
 
 	// queueWorkerCount is how many workers this process runs to drain the job
 	// queue; each takes one job at a time, so it is also this process's ceiling
@@ -130,7 +136,8 @@ func startBackground(ctx context.Context, in *infra, svc *services, runsAPI *run
 		startTeamBackstopLoop(ctx, in.directory(), in.admin, svc.teams),
 		startIdleConversationSweepLoop(ctx, in.directory(), in.admin, svc.ctl),
 		startSessionStateSweepLoop(ctx, svc.gate),
-		startQueueWorkers(ctx, in.redis, in.admin, in.queue, runsAPI, svc.ctl, svc.resumer, svc.gate),
+		startQueueWorkers(ctx, in.redis, in.admin, in.queue, runsAPI, svc.ctl, svc.resumer, svc.replier, svc.gate),
+		startDeliveryRetryLoop(ctx, in.directory(), svc.replier),
 		startEventBus(ctx, in.redis, runsAPI),
 		startScheduler(ctx, in, svc),
 	)
@@ -159,6 +166,17 @@ func startScheduler(ctx context.Context, in *infra, svc *services) (stop func())
 		cancel()
 		<-done
 	}
+}
+
+// startDeliveryRetryLoop sends again every chat reply an earlier attempt left
+// undelivered: one that failed, and one whose first attempt never happened
+// because the process died between the event and the send. Each tenant's
+// ledger leases what it takes, so replicas running this at once do not both
+// send the same reply.
+func startDeliveryRetryLoop(ctx context.Context, dir tenancy.Directory, replier *chat.Replier) (stop func()) {
+	return startPeriodic(ctx, deliveryRetryEvery, func(ctx context.Context) {
+		tenancy.ForEach(ctx, dir, "delivery retry", replier.RetryDue)
+	})
 }
 
 // startAnchorLoop runs the scheduled verifier task 5.3 asks for: every
@@ -234,9 +252,9 @@ func startSessionStateSweepLoop(ctx context.Context, gate *cost.Gate) (stop func
 // "running" in the first place, so a session only ever reaches "running"
 // once it durably has at least its seed/message event — recovering an
 // orphaned FRESH run is already exactly what this sweep covers.
-func startQueueWorkers(ctx context.Context, redisClient *redis.Client, adminPool *pgxpool.Pool, port queue.Port, runsAPI *runsrest.Handler, ctl *runctl.Control, approvals approvalResumer, gate *cost.Gate) (stop func()) {
+func startQueueWorkers(ctx context.Context, redisClient *redis.Client, adminPool *pgxpool.Pool, port queue.Port, runsAPI *runsrest.Handler, ctl *runctl.Control, approvals approvalResumer, replier *chat.Replier, gate *cost.Gate) (stop func()) {
 	lock := queueredis.NewSessionLock(redisClient, sessionLockTTL)
-	runner := &queueRunner{ctl: ctl, approvals: approvals, runsAPI: runsAPI, gate: gate}
+	runner := &queueRunner{ctl: ctl, approvals: approvals, runsAPI: runsAPI, replier: replier, gate: gate}
 
 	// Two contexts, because stopping and cancelling are different things. leaseCtx
 	// ends when the process is told to stop: workers stop leasing and the recovery
@@ -337,6 +355,12 @@ type queueRunner struct {
 	// terminal-span emission fire exactly once either way.
 	runsAPI *runsrest.Handler
 
+	// replier answers a chat session (telegram, zalo, email) with what its turn
+	// produced, from here, the process that drove the turn, so a reply does not
+	// depend on the process that took the webhook still being alive. Nil
+	// delivers nothing.
+	replier *chat.Replier
+
 	// gate is the cost gate whose per-session spend this runner drops when a job
 	// ends. Nil leaves it to the idle sweep.
 	gate *cost.Gate
@@ -361,6 +385,9 @@ func (r *queueRunner) Run(ctx context.Context, job queue.Job) error {
 		}
 		if r.runsAPI != nil {
 			r.runsAPI.PublishEvent(job.TenantID, job.SessionID, ev, err)
+		}
+		if r.replier != nil && err == nil {
+			r.replier.OnEvent(ctx, job.TenantID, job.SessionID, ev)
 		}
 		if err != nil {
 			return err

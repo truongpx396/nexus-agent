@@ -58,10 +58,6 @@ func TestDrainSeed_HoldsMoreEventsThanTheOldFixedBuffer(t *testing.T) {
 	if got := len(ch); got != n {
 		t.Fatalf("buffered %d events, want %d", got, n)
 	}
-	if free := cap(ch) - len(ch); free < seedHeadroom {
-		t.Fatalf("headroom after the seed = %d, want at least %d", free, seedHeadroom)
-	}
-	close(ch)
 	want := int64(1)
 	for re := range ch {
 		if re.Err != nil || re.Event.Seq != want {
@@ -80,7 +76,6 @@ func TestDrainSeed_StopsAtTheFirstError(t *testing.T) {
 	if got := len(ch); got != 4 {
 		t.Fatalf("buffered %d events, want the 3 seeded plus the error", got)
 	}
-	close(ch)
 	var last runs.Event
 	for re := range ch {
 		last = re

@@ -18,4 +18,9 @@ type InboundDedup interface {
 	// deliveryID is a provider that sends none: the adapter treats it as
 	// always new rather than collapsing every message into one.
 	Claim(ctx context.Context, tenantID uuid.UUID, surfaceID, deliveryID, sessionKey string) (claimed bool, err error)
+
+	// Release forgets a claim, for a delivery whose dispatch failed: the
+	// provider will send it again, and that retry must be dispatched rather than
+	// acknowledged as a duplicate of a message that never reached a session.
+	Release(ctx context.Context, tenantID uuid.UUID, surfaceID, deliveryID string) error
 }
