@@ -11,6 +11,8 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -49,6 +51,14 @@ func GenerateKEK() (KEK, error) {
 }
 
 func (k KEK) Bytes() []byte { return k.key }
+
+// ID names the KEK without revealing it: the first 8 bytes of its SHA-256, in hex.
+// A wrapped DEK records the id of the KEK that wrapped it, so after a rotation each
+// is unwrapped with the key that wrapped it.
+func (k KEK) ID() string {
+	sum := sha256.Sum256(k.key)
+	return hex.EncodeToString(sum[:8])
+}
 
 // DEK is a per-tenant data-encryption key. KeyID is the value stored in
 // Event.key_id; destroying the row that holds this key's wrapped form is
@@ -145,6 +155,27 @@ func Seal(dek DEK, plaintext []byte, tenantID, sessionID string) ([]byte, error)
 func Open(dek DEK, sealed []byte, tenantID, sessionID string) ([]byte, error) {
 	aad := []byte(tenantID + "|" + sessionID)
 	return openWithKey(dek.Key, sealed, aad)
+}
+
+// ErrDigestMismatch is returned by OpenEvent when an event's payload opens but is
+// not the payload its recorded digest names.
+var ErrDigestMismatch = errors.New("payload does not match its recorded digest")
+
+// OpenEvent opens an event payload and checks the plaintext against the event's
+// payload_digest. The AAD binds a ciphertext to its tenant and session, not to its
+// event, so anyone who can write the events table could swap two events' ciphertexts
+// within a session and both would still decrypt; the digest, which the audit receipt
+// also holds, is what notices. A digest the caller has none of (an event with an empty
+// one, as in a test fixture) is not checked: there is nothing to compare with.
+func OpenEvent(dek DEK, sealed, wantDigest []byte, tenantID, sessionID string) ([]byte, error) {
+	plaintext, err := Open(dek, sealed, tenantID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if len(wantDigest) > 0 && subtle.ConstantTimeCompare(Digest(plaintext), wantDigest) != 1 {
+		return nil, ErrDigestMismatch
+	}
+	return plaintext, nil
 }
 
 // Digest returns a digest over PLAINTEXT — independent of any key, so it

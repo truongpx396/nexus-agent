@@ -8,9 +8,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
+	"github.com/truongpx396/nexus-agent/internal/egress"
 	"github.com/truongpx396/nexus-agent/internal/tools"
 )
 
@@ -37,21 +37,7 @@ type WebFetch struct {
 	AllowedHosts []string
 }
 
-func hostAllowed(patterns []string, host string) bool {
-	for _, p := range patterns {
-		switch {
-		case p == "*":
-			return true
-		case p == host:
-			return true
-		case strings.HasPrefix(p, "*."):
-			if suffix := strings.TrimPrefix(p, "*"); strings.HasSuffix(host, suffix) {
-				return true
-			}
-		}
-	}
-	return false
-}
+func hostAllowed(patterns []string, host string) bool { return egress.HostAllowed(patterns, host) }
 
 var webFetchRef = tools.ToolRef{Namespace: "platform", Name: "web_fetch", Version: "v1"}
 

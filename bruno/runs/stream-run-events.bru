@@ -20,7 +20,7 @@ assert {
 docs {
   The run's event log as Server-Sent Events: the history is replayed first, then live events and `delta` previews follow until the `terminal` event, when the server closes the stream.
 
-  A frame looks like `event: content` / `data: {"event_id", "seq", "type", "actor", "body", ...}`. `body` is the decrypted payload, shown only to the run's own user; `thought` events never carry one.
+  A frame looks like `id: 3` / `event: content` / `data: {"event_id", "seq", "type", "actor", "body", ...}`. `body` is the decrypted payload, shown only to the run's own user; `thought` events never carry one. To resume a dropped stream send the last `id` you saw as the `Last-Event-ID` header: only later events are replayed. An idle stream writes a `: keepalive` comment every 20 seconds, and an `error` frame carries a fixed message, not the cause.
 
   A conversational run (`chatRunId`) does not emit `terminal` while it waits for your next message, so its stream stays open: close the request when you have seen enough.
 }

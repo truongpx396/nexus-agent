@@ -63,6 +63,10 @@ type services struct {
 	teams       *teams.Service
 	outbox      *surfaces.Outbox
 
+	// routeMetrics counts the REST API's requests per route, for /metrics. It is
+	// created with the REST API (newRESTAPI).
+	routeMetrics *restkit.RouteMetrics
+
 	cfgStore              *configpg.Store
 	skillBundles          []skills.SkillBundle
 	mcp                   *mcp.Port
@@ -203,7 +207,10 @@ func newRESTAPI(in *infra, svc *services, spanExp spanExporter) (*runsrest.Handl
 	runsAPI.Exporter = spanExp
 	svc.kernel.OnChunk = publishDeltas(runsAPI)
 
-	return runsAPI, restkit.NewServer(in.verifier, restModules(runsAPI, svc, in.queue)...).Handler()
+	srv := restkit.NewServer(in.verifier, restModules(runsAPI, svc, in.queue)...)
+	svc.routeMetrics = restkit.NewRouteMetrics()
+	srv.Metrics = svc.routeMetrics
+	return runsAPI, srv.Handler()
 }
 
 // restModules is every feature's REST module, in the order they mount. A route is

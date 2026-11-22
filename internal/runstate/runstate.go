@@ -67,7 +67,7 @@ func Decryptor[T Unit](st Store[T], tenantID, sessionID uuid.UUID) kernel.Decryp
 			}
 			cache[e.KeyID] = dek
 		}
-		return crypto.Open(dek, e.Payload, tenantID.String(), sessionID.String())
+		return crypto.OpenEvent(dek, e.Payload, e.PayloadDigest, tenantID.String(), sessionID.String())
 	}
 }
 

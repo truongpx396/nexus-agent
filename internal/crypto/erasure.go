@@ -8,6 +8,15 @@ import (
 	"github.com/truongpx396/nexus-agent/internal/eventlog"
 )
 
+// ErrKeyNotFound is returned when no data key of the given id is visible: it does
+// not exist, or it belongs to another tenant (row-level security cannot tell the two
+// apart, and neither should the caller).
+var ErrKeyNotFound = errors.New("encryption key not found")
+
+// ErrKEKUnavailable is returned when a data key was wrapped under a key-encryption
+// key that is not loaded: the KEK it names has been retired and not listed.
+var ErrKEKUnavailable = errors.New("the key-encryption key that wrapped this data key is not loaded")
+
 // ErrKeyShredded is returned when the requested key has been crypto-shredded
 // (Phase 5): the row still exists so the audit chain and any digest
 // referencing it remain intact, but the key material is gone and can never

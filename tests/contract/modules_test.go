@@ -120,15 +120,15 @@ var allowedFeatureImports = map[string][]string{
 	"internal/surfaces/cli":       {"internal/surfaces/capability", "internal/version"},
 	"internal/surfaces/cron":      {"internal/harness", "internal/provider", "internal/runs", "internal/surfaces/capability"},
 	"internal/surfaces/email":     {"internal/eventlog", "internal/runs", "internal/surfaces", "internal/surfaces/capability"},
-	"internal/surfaces/mcp":       {"internal/provider", "internal/surfaces/capability", "internal/tools"},
-	"internal/surfaces/rest":      {"internal/surfaces/capability"}, // the kit: no feature, so no endpoint
+	"internal/surfaces/mcp":       {"internal/egress", "internal/provider", "internal/surfaces/capability", "internal/tools"}, // egress: the one outbound policy (SSRF guard, allowlist), shared with web_fetch
+	"internal/surfaces/rest":      {"internal/surfaces/capability"},                                                           // the kit: no feature, so no endpoint
 	"internal/surfaces/telegram":  {"internal/eventlog", "internal/runs", "internal/surfaces", "internal/surfaces/capability"},
 	"internal/surfaces/web":       {"internal/surfaces/capability"},
 	"internal/surfaces/zalo":      {"internal/eventlog", "internal/runs", "internal/surfaces", "internal/surfaces/capability"},
 	"internal/teams/tool":         {"internal/teams", "internal/tools"},
 	"internal/teams":              {"internal/cost", "internal/crypto", "internal/eventlog", "internal/memory", "internal/provider", "internal/runstate", "kernel"},
 	"internal/tools":              {"internal/hooks", "internal/permissions"},
-	"internal/tools/builtin":      {"internal/skills", "internal/tools"},
+	"internal/tools/builtin":      {"internal/egress", "internal/skills", "internal/tools"},
 	"kernel":                      {"internal/cost", "internal/eventlog", "internal/obs", "internal/promptctx", "internal/provider", "internal/reliability"},
 }
 

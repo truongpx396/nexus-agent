@@ -121,7 +121,7 @@ func (s *GrantStore) History(ctx context.Context, tenantID, sessionID uuid.UUID)
 			}
 			dekCache[e.KeyID] = dek
 		}
-		plaintext, err := crypto.Open(dek, e.Payload, tenantID.String(), sessionID.String())
+		plaintext, err := crypto.OpenEvent(dek, e.Payload, e.PayloadDigest, tenantID.String(), sessionID.String())
 		if err != nil {
 			return nil, fmt.Errorf("obs: decrypt event %s: %w", e.EventID, err)
 		}

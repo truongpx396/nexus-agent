@@ -70,7 +70,9 @@ func newMux(in *infra, svc *services, restAPI http.Handler, metricsToken string)
 	// /metrics lists every tenant's id, spend and tool names, and each render runs
 	// several queries per tenant, so it needs the metrics token (a static bearer
 	// token, not a tenant's) and is served from a short cache.
-	mux.Handle("GET /metrics", requireBearer(metricsToken, newMetricsHandler(tenantDirectory().ListTenantIDs, reportingpg.New(in.st), in.queue)))
+	metrics := newMetricsHandler(tenantDirectory().ListTenantIDs, reportingpg.New(in.st), in.queue)
+	metrics.routes = svc.routeMetrics
+	mux.Handle("GET /metrics", requireBearer(metricsToken, metrics))
 	mux.Handle("/v1/webhooks/telegram/", telegramSrv.Handler())
 	mux.Handle("/v1/webhooks/zalo/", zaloSrv.Handler())
 	mux.Handle("/v1/webhooks/email/", emailSrv.Handler())

@@ -100,3 +100,106 @@ func TestServer_ATrailingSlashIs404NotARedirect(t *testing.T) {
 		t.Fatalf("GET /ping/ = %d (Location %q), want 404", rec.Code, rec.Header().Get("Location"))
 	}
 }
+
+// panicModule has a route that panics and one that answers, so a test can show the
+// server surviving the first.
+type panicModule struct{}
+
+func (panicModule) Routes(r restkit.Router) {
+	r.GET("/boom", func(*gin.Context) { panic("handler bug with a secret inside") })
+	r.GET("/ok", func(c *gin.Context) { c.String(http.StatusOK, "fine") })
+}
+
+func TestServer_APanickingHandlerAnswers500AndTheServerKeepsServing(t *testing.T) {
+	h := restkit.NewServer(resttest.Verifier{TenantID: uuid.New(), UserID: uuid.New()}, panicModule{}).Handler()
+
+	rec := resttest.Do(t, h, http.MethodGet, "/boom", "")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("a panicking handler answered %d, want 500", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "secret") {
+		t.Fatalf("the 500 carried the panic value: %q", rec.Body.String())
+	}
+	if rec = resttest.Do(t, h, http.MethodGet, "/ok", ""); rec.Code != http.StatusOK {
+		t.Fatalf("the server did not keep serving after a panic: %d", rec.Code)
+	}
+}
+
+func TestServer_EveryResponseCarriesARequestID(t *testing.T) {
+	h := restkit.NewServer(resttest.Verifier{TenantID: uuid.New(), UserID: uuid.New()}, panicModule{}).Handler()
+
+	generated := resttest.Do(t, h, http.MethodGet, "/ok", "").Header().Get("X-Request-Id")
+	if _, err := uuid.Parse(generated); err != nil {
+		t.Fatalf("no request id was generated: %q", generated)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/ok", nil)
+	req.Header.Set("Authorization", "Bearer "+resttest.Token)
+	req.Header.Set("X-Request-Id", "trace-abc.123_def")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if got := rec.Header().Get("X-Request-Id"); got != "trace-abc.123_def" {
+		t.Fatalf("a well-formed X-Request-Id was replaced: %q", got)
+	}
+
+	// An id with a line break or other junk could forge a log line; it is replaced.
+	req = httptest.NewRequest(http.MethodGet, "/ok", nil)
+	req.Header.Set("Authorization", "Bearer "+resttest.Token)
+	req.Header.Set("X-Request-Id", "bad id\nlevel=error msg=forged")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if got := rec.Header().Get("X-Request-Id"); strings.ContainsAny(got, " \n") || got == "" {
+		t.Fatalf("a malformed X-Request-Id was echoed: %q", got)
+	}
+}
+
+// RFC 7235: the authentication scheme is case-insensitive.
+func TestServer_TheBearerSchemeIsCaseInsensitive(t *testing.T) {
+	h := restkit.NewServer(resttest.Verifier{TenantID: uuid.New(), UserID: uuid.New()}, panicModule{}).Handler()
+	for _, scheme := range []string{"Bearer", "bearer", "BEARER"} {
+		req := httptest.NewRequest(http.MethodGet, "/ok", nil)
+		req.Header.Set("Authorization", scheme+" "+resttest.Token)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("scheme %q = %d, want 200", scheme, rec.Code)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/ok", nil)
+	req.Header.Set("Authorization", "Basic "+resttest.Token)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("scheme Basic = %d, want 401", rec.Code)
+	}
+}
+
+// Each request is counted and timed under its route template, so /metrics can say
+// which route a 5xx came from without carrying an identifier in a label.
+func TestServer_RequestsAreCountedPerRouteTemplateAndStatus(t *testing.T) {
+	srv := restkit.NewServer(resttest.Verifier{TenantID: uuid.New(), UserID: uuid.New()}, panicModule{}, pingModule{})
+	srv.Metrics = restkit.NewRouteMetrics()
+	h := srv.Handler()
+	for range 3 {
+		resttest.Do(t, h, http.MethodGet, "/ok", "")
+	}
+	resttest.Do(t, h, http.MethodGet, "/boom", "")
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/nowhere/12345", nil))
+
+	var out strings.Builder
+	srv.Metrics.WritePrometheus(&out)
+	for _, want := range []string{
+		`nexus_http_requests_total{method="GET",route="/ok",status="200"} 3`,
+		`nexus_http_requests_total{method="GET",route="/boom",status="500"} 1`,
+		`nexus_http_requests_total{method="GET",route="unmatched",status="404"} 1`,
+		`nexus_http_request_duration_seconds_count{method="GET",route="/ok",status="200"} 3`,
+		`le="+Inf"} 3`,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("metrics lack %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "12345") {
+		t.Error("a path parameter leaked into a metric label")
+	}
+}

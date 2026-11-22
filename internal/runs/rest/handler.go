@@ -17,6 +17,7 @@ package rest
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -58,6 +59,17 @@ type Handler struct {
 	// is Phase 11's.
 	Outbox       *surfaces.Outbox
 	OutboxSender surfaces.Sender
+
+	// ShuttingDown, if set, is closed when the server starts to shut down. An open
+	// event stream ends when it is, so a deploy is not held for the whole drain
+	// period by a client that would otherwise listen for ever. Nil never ends a
+	// stream that way.
+	ShuttingDown <-chan struct{}
+
+	// KeepAlive is how often an idle event stream writes a comment frame, which keeps
+	// a proxy's idle timeout (typically 60 s) from cutting it, and checks the store
+	// for an event the live feed dropped. Zero means 20 seconds.
+	KeepAlive time.Duration
 
 	// MCP, if set, resolves one tenant's admitted MCP tool set at
 	// session-creation time (README task 11.1) — nil leaves it unmounted,

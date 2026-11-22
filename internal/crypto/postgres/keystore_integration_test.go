@@ -225,3 +225,71 @@ func TestKeyStore_UnwrapAfterShredFails(t *testing.T) {
 		t.Fatalf("err = %v, want crypto.ErrKeyShredded", err)
 	}
 }
+
+// A new data key records which KEK wrapped it, and after a rotation each key is
+// unwrapped with the KEK its row names; a row from before ids were recorded is tried
+// against each loaded KEK.
+func TestKeyStore_RecordsTheKEKAndUnwrapsAcrossARotation(t *testing.T) {
+	pool := setupKeystoreEnv(t)
+	ctx := context.Background()
+	s := store.New(pool)
+	tenantID := uuid.New()
+	if err := s.InTenantTx(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO tenants (tenant_id, name) VALUES ($1, 'rotate')`, tenantID)
+		return err
+	}); err != nil {
+		t.Fatalf("insert tenant: %v", err)
+	}
+
+	oldKEK, _ := crypto.GenerateKEK()
+	newKEK, _ := crypto.GenerateKEK()
+	var oldDEK, legacyDEK crypto.DEK
+	if err := s.InTenantTx(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		if oldDEK, err = NewKeyStore(oldKEK).NewDEK(ctx, tx, tenantID); err != nil {
+			return err
+		}
+		if legacyDEK, err = NewKeyStore(oldKEK).NewDEK(ctx, tx, tenantID); err != nil {
+			return err
+		}
+		// Make the second one look like a row written before ids were recorded.
+		_, err = tx.Exec(ctx, `UPDATE encryption_keys SET kek_id = NULL WHERE key_id = $1`, legacyDEK.KeyID)
+		return err
+	}); err != nil {
+		t.Fatalf("mint keys under the old KEK: %v", err)
+	}
+
+	rotated := NewKeyStore(newKEK).WithRetired(oldKEK)
+	var newDEK crypto.DEK
+	if err := s.InTenantTx(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		if newDEK, err = rotated.NewDEK(ctx, tx, tenantID); err != nil {
+			return err
+		}
+		var recorded string
+		if err := tx.QueryRow(ctx, `SELECT kek_id FROM encryption_keys WHERE key_id = $1`, newDEK.KeyID).Scan(&recorded); err != nil {
+			return err
+		}
+		if recorded != newKEK.ID() {
+			t.Errorf("recorded kek_id = %q, want the current KEK's %q", recorded, newKEK.ID())
+		}
+		for _, want := range []crypto.DEK{oldDEK, legacyDEK, newDEK} {
+			got, err := rotated.Unwrap(ctx, tx, want.KeyID)
+			if err != nil || string(got.Key) != string(want.Key) {
+				t.Errorf("Unwrap of %s after the rotation = %v, want its key", want.KeyID, err)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("after the rotation: %v", err)
+	}
+
+	// Without the retired KEK the old keys are unavailable, by name, not "not found".
+	err := s.InTenantTx(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, uerr := NewKeyStore(newKEK).Unwrap(ctx, tx, oldDEK.KeyID)
+		return uerr
+	})
+	if !errors.Is(err, crypto.ErrKEKUnavailable) {
+		t.Fatalf("Unwrap without the retired KEK = %v, want ErrKEKUnavailable", err)
+	}
+}

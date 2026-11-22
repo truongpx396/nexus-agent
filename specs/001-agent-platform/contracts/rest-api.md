@@ -89,6 +89,8 @@ Headers: `content-type: text/event-stream`, `cache-control: no-cache`, `connecti
   "created_at": "RFC3339Nano", "body": { /* decrypted payload; omitted for `thought` */ } }
 ```
 
+**Reconnecting and liveness**: each durable frame carries `id: <seq>`, and `Last-Event-ID` replays only later events. An idle stream writes `: keepalive` every 20 s, re-reads the store when the live feed skips a seq or goes quiet (so a dropped terminal event cannot leave it open), and ends when the server shuts down. An `error` frame is `{"error": "stream error"}`: the cause is logged and never sent.
+
 **Ordering guarantees**: the handler **subscribes before replaying history**, then replays everything stored, then relays live events,
 discarding any live event with `seq <= lastReplayedSeq` (seq is strictly sequential per session, so "already replayed" is exactly that
 comparison — no gap or duplicate is possible). The stream **closes after the `terminal` event**. A *conversational* session emits

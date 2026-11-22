@@ -99,7 +99,7 @@ func refFor(server string, tool mcp.Tool) tools.ToolRef {
 }
 
 func resolver(d *fakeDirectory, tokens mcp.TokenSource) *mcp.Resolver {
-	return &mcp.Resolver{Servers: d, Tokens: tokens, AllowedHosts: []string{"*"}}
+	return &mcp.Resolver{Servers: d, Tokens: tokens, AllowedHosts: []string{"*"}, AllowPrivateNetworks: true}
 }
 
 func TestResolve_RefsThatAreNotAnAdmittedServersToolDoNotResolve(t *testing.T) {

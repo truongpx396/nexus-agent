@@ -48,7 +48,7 @@ func (p *Port) entries(ctx context.Context, tenantID, userID uuid.UUID) ([]provi
 			// Phase 11 demo language expects of a refused MCP tool.
 			continue
 		}
-		client := &Client{BaseURL: server.BaseURL, BearerToken: bearer, HTTPClient: p.Resolver.Client}
+		client := p.Resolver.clientFor(server, bearer)
 		list, err := p.Resolver.listTools(ctx, server, client)
 		if err != nil {
 			continue

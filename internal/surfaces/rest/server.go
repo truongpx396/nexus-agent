@@ -124,6 +124,10 @@ type Server struct {
 	// client-supplied header.
 	Verifier PrincipalVerifier
 
+	// Metrics, if set, receives a count and a latency for every request, by
+	// method, route template and status. Nil records nothing.
+	Metrics *RouteMetrics
+
 	modules []Module
 }
 
@@ -166,6 +170,9 @@ func (s *Server) engine() *gin.Engine {
 	// structured log.
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
+	// Outermost first: a panic is caught with the request id already set, and the
+	// access log sees the status recovery wrote.
+	engine.Use(accessLog(s.Metrics), requestID(), recovery())
 	// Answer what net/http's mux answered: 405 with an Allow header for a known
 	// path on the wrong method, and 404, never a redirect, for a path that
 	// differs only by a trailing slash (a redirect would re-send a request body

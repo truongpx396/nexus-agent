@@ -52,7 +52,9 @@ func openInfra(ctx context.Context, cfg serverConfig) (_ *infra, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("load KEK: %w", err)
 	}
-	in.keys = cryptopg.NewKeyStore(kek)
+	if in.keys, err = newKeyStore(kek); err != nil {
+		return nil, err
+	}
 
 	verifyingKey, err := loadVerifyingKey(cfg)
 	if err != nil {
