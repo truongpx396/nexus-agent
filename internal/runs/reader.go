@@ -24,6 +24,11 @@ type RunView struct {
 	TerminalReason *string
 	CreatedAt      time.Time
 	AutonomyLevel  string
+	// SurfaceID and SessionKey say which surface started the run and under
+	// what conversation key, which a chat surface's reply path needs to find
+	// the recipient again from the session alone.
+	SurfaceID  string
+	SessionKey string
 }
 
 // Reader is the read side of runs: what a surface needs to show a run back to

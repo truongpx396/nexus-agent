@@ -79,8 +79,12 @@ func updateDeliveryOutcome(ctx context.Context, tx pgx.Tx, deliveryID uuid.UUID,
 	if status == surfaces.DeliveryDelivered {
 		deliveredAtClause = ", delivered_at = now()"
 	}
+	// A failed attempt is retried after 30 s doubled per attempt already made
+	// (30 s, 1 min, 2 min, 4 min), so a provider outage is not hammered. The
+	// right-hand side reads attempt_count as it was before this update.
 	_, err := tx.Exec(ctx,
-		`UPDATE deliveries SET status = $2, attempt_count = attempt_count + 1`+deliveredAtClause+`
+		`UPDATE deliveries SET status = $2, attempt_count = attempt_count + 1,
+		        next_attempt_at = now() + interval '30 seconds' * power(2::float8, attempt_count::float8)`+deliveredAtClause+`
 		 WHERE delivery_id = $1 AND status IN ('pending', 'failed')`,
 		deliveryID, status,
 	)
@@ -117,4 +121,33 @@ func scanDeliveryInto(d *deliveryRow, r rowScanner) error {
 // rowScanner is the subset of pgx.Row/pgx.Rows the scan helpers need.
 type rowScanner interface {
 	Scan(dest ...any) error
+}
+
+// claimDueDeliveries leases up to limit pending or failed deliveries whose
+// next attempt is due: it moves their next attempt a minute out in the same
+// statement that selects them, with SKIP LOCKED, so two replicas running the
+// pass at once take different rows and a delivery is not attempted by both.
+func claimDueDeliveries(ctx context.Context, tx pgx.Tx, limit int) ([]surfaces.DueDelivery, error) {
+	rows, err := tx.Query(ctx, `
+		UPDATE deliveries SET next_attempt_at = now() + interval '1 minute'
+		WHERE delivery_id IN (
+			SELECT delivery_id FROM deliveries
+			WHERE status IN ('pending', 'failed') AND next_attempt_at <= now()
+			ORDER BY next_attempt_at
+			LIMIT $1
+			FOR UPDATE SKIP LOCKED)
+		RETURNING delivery_id, session_id, seq, surface_id, recipient`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("claim due deliveries: %w", err)
+	}
+	defer rows.Close()
+	var due []surfaces.DueDelivery
+	for rows.Next() {
+		var d surfaces.DueDelivery
+		if err := rows.Scan(&d.ID, &d.SessionID, &d.Seq, &d.SurfaceID, &d.Recipient); err != nil {
+			return nil, fmt.Errorf("scan due delivery: %w", err)
+		}
+		due = append(due, d)
+	}
+	return due, rows.Err()
 }

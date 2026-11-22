@@ -5,13 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
 
-	"github.com/truongpx396/nexus-agent/internal/eventlog"
-	"github.com/truongpx396/nexus-agent/internal/runctl"
-	"github.com/truongpx396/nexus-agent/internal/runs"
 	runsrest "github.com/truongpx396/nexus-agent/internal/runs/rest"
 )
 
@@ -76,95 +72,4 @@ func startEventBus(ctx context.Context, redisClient *redis.Client, runsAPI *runs
 		}
 	}()
 	return func() { _ = sub.Close() }
-}
-
-// subscribeRunEvents opens a per-session Redis Pub/Sub subscription and
-// forwards every event published on it into the returned channel, closing
-// the channel the moment a terminal event or an error arrives.
-//
-// internal/surfaces/rest's own SSE path doesn't need this — it already has
-// startEventBus's single per-process PSUBSCRIBE feeding its broker
-// directly, with Postgres history replay as a backstop for anything
-// published before a client subscribed. telegram/zalo/email have no
-// broker or replay of their own (surfaces_wiring.go's own doc comment:
-// RunStarter/Resumer's contract has always been "the returned channel
-// carries every event of the run, closed when it ends") — this is their
-// one-subscription-per-run equivalent, so that contract still holds now
-// that the run itself executes on a queue worker, possibly in a different
-// process, rather than a local goroutine.
-//
-// Receive is called once, synchronously, before this returns: Redis
-// Pub/Sub has no history, so a message published between "the caller
-// enqueues/appends the job whose events we're about to listen for" and
-// "the SUBSCRIBE actually reaches Redis" would otherwise be missed
-// forever — callers MUST establish this subscription before triggering
-// that job, the same "subscribe before replay" ordering
-// internal/surfaces/rest's own handleEvents already uses.
-//
-// The returned cancel func MUST be called if a caller ends up never
-// draining the channel to its natural end (a terminal event or an error) —
-// e.g. because the job this was subscribed in anticipation of never
-// actually got enqueued/appended. Without it, this goroutine blocks
-// forever on a message that will now never arrive, leaking both the
-// goroutine and its Redis Pub/Sub connection. The success path (draining
-// to a terminal event or error) already triggers this internally and
-// calling it again is a harmless no-op.
-func subscribeRunEvents(ctx context.Context, redisClient *redis.Client, sessionID uuid.UUID) (events <-chan runs.Event, cancel func()) {
-	sub := redisClient.Subscribe(ctx, runsrest.EventsChannel(sessionID))
-	if _, err := sub.Receive(ctx); err != nil {
-		log.Error().Err(err).Any("session_id", sessionID).Msg("nexusd: subscribe to run events")
-	}
-	out := make(chan runs.Event, 16)
-	go func() {
-		defer close(out)
-		defer func() { _ = sub.Close() }()
-		for msg := range sub.Channel() {
-			var wire runsrest.EventBusMessage
-			if err := json.Unmarshal([]byte(msg.Payload), &wire); err != nil {
-				log.Error().Err(err).Any("session_id", sessionID).Msg("nexusd: run events: unmarshal")
-				continue
-			}
-			var evErr error
-			if wire.Err != "" {
-				evErr = errors.New(wire.Err)
-			}
-			if wire.Event == nil {
-				continue
-			}
-			out <- runs.Event{Event: *wire.Event, Err: evErr}
-			if evErr != nil || wire.Event.Type == eventlog.EventTerminal {
-				return
-			}
-		}
-	}()
-	return out, func() { _ = sub.Close() }
-}
-
-// resumeConversationEvents is telegram/zalo/email's shared
-// ResumeConversation implementation — every one of them, unlike REST's own
-// nexusdRunCtlPort.ResumeConversation, needs the full "every event until
-// terminal" channel their own RunEvent-draining reply logic
-// (webhook.go's own drainAndNotify) has always relied on. Subscribing
-// before calling ctl.ResumeConversation (which durably appends the
-// message and enqueues the continuation, internal/runctl.Control.
-// ResumeConversation's own doc comment) is what keeps this race-free.
-func resumeConversationEvents(ctx context.Context, redisClient *redis.Client, ctl *runctl.Control, tenantID, sessionID uuid.UUID, input string) (<-chan runs.Event, error) {
-	busCh, cancelBus := subscribeRunEvents(ctx, redisClient, sessionID)
-	ev, err := ctl.ResumeConversation(ctx, tenantID, sessionID, input)
-	if err != nil {
-		cancelBus() // nothing was ever appended/enqueued for this subscription to observe — don't leak it
-		return nil, err
-	}
-	out := make(chan runs.Event, 8)
-	go func() {
-		defer close(out)
-		out <- runs.Event{Event: ev}
-		for re := range busCh {
-			out <- re
-			if re.Err != nil || re.Event.Type == eventlog.EventTerminal {
-				return
-			}
-		}
-	}()
-	return out, nil
 }
