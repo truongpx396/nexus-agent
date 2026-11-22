@@ -155,14 +155,14 @@ func (r *Resumer) loadRunState(ctx context.Context, tenantID, sessionID uuid.UUI
 			return e.Payload, nil // stored plaintext — see crypto.ErasureKeyID's own doc comment
 		}
 		if dek, ok := dekCache[e.KeyID]; ok {
-			return crypto.Open(dek, e.Payload, tenantID.String(), sessionID.String())
+			return crypto.OpenEvent(dek, e.Payload, e.PayloadDigest, tenantID.String(), sessionID.String())
 		}
 		dek, err := r.Keys.Unwrap(ctx, tenantID, e.KeyID)
 		if err != nil {
 			return nil, err
 		}
 		dekCache[e.KeyID] = dek
-		return crypto.Open(dek, e.Payload, tenantID.String(), sessionID.String())
+		return crypto.OpenEvent(dek, e.Payload, e.PayloadDigest, tenantID.String(), sessionID.String())
 	}
 
 	transcript, toolUseIDs, err := kernel.Rehydrate(ctx, history, decrypt)

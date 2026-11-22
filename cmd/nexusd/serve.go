@@ -58,10 +58,14 @@ func serve(ctx context.Context) error {
 		return err
 	}
 	runsAPI, restAPI := newRESTAPI(in, svc, spanExp)
+	// Closed when the server starts to shut down, so the open event streams end and
+	// the drain is not held for its whole grace period.
+	streamsDone := make(chan struct{})
+	runsAPI.ShuttingDown = streamsDone
 
 	stopBackground := startBackground(ctx, in, svc, runsAPI)
 	defer stopBackground()
 
 	fmt.Printf("listening on %s (provider=%s)\n", cfg.HTTPAddr, envOr("NEXUS_PROVIDER", "fake"))
-	return runHTTPServer(ctx, cfg.HTTPAddr, newMux(in, svc, restAPI, cfg.MetricsToken))
+	return runHTTPServer(ctx, cfg.HTTPAddr, newMux(in, svc, restAPI, cfg.MetricsToken), func() { close(streamsDone) })
 }

@@ -49,8 +49,10 @@ func (s *Server) authenticate() gin.HandlerFunc {
 			Error(c, "server misconfigured: no principal verifier wired", http.StatusInternalServerError)
 			return
 		}
-		token, ok := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
-		if !ok || token == "" {
+		// RFC 7235: the authentication scheme is case-insensitive.
+		scheme, token, ok := strings.Cut(c.GetHeader("Authorization"), " ")
+		token = strings.TrimSpace(token)
+		if !ok || !strings.EqualFold(scheme, "Bearer") || token == "" {
 			Error(c, "missing or invalid Authorization header (want: Bearer <token>)", http.StatusUnauthorized)
 			return
 		}

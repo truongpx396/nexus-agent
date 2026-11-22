@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/truongpx396/nexus-agent/internal/egress"
 	"github.com/truongpx396/nexus-agent/internal/tools"
 )
 
@@ -40,7 +43,13 @@ type cachedListing struct {
 type Resolver struct {
 	Servers ServerDirectory
 	Tokens  TokenSource
-	Client  *http.Client
+	// Client, if set, carries every request, and the egress policy is then its own.
+	// Nil builds the egress-safe client (httpClient).
+	Client *http.Client
+
+	// AllowPrivateNetworks lets the default client connect to private addresses. It
+	// exists for tests, which serve from the loopback interface.
+	AllowPrivateNetworks bool
 
 	// AllowedHosts is the SAME egress allowlist README task 5.13 already
 	// established for internal/tools/builtin.WebFetch, extended per task
@@ -57,28 +66,52 @@ type Resolver struct {
 	// promptly. Zero uses a 60-second default.
 	CacheTTL time.Duration
 
-	mu    sync.Mutex
-	cache map[uuid.UUID]cachedListing
+	mu      sync.Mutex
+	cache   map[uuid.UUID]cachedListing
+	clients map[string]*Client
+
+	egressOnce sync.Once
+	egress     *http.Client
 }
 
-// hostAllowed is internal/tools/builtin's own function of the same name,
-// duplicated per this codebase's established cross-package idiom (outbox.go's
-// own doc comment) rather than imported — this package has no other reason
-// to depend on internal/tools/builtin.
-func hostAllowed(patterns []string, host string) bool {
-	for _, p := range patterns {
-		switch {
-		case p == "*":
-			return true
-		case p == host:
-			return true
-		case strings.HasPrefix(p, "*."):
-			if suffix := strings.TrimPrefix(p, "*"); strings.HasSuffix(host, suffix) {
-				return true
-			}
-		}
+// httpClient is the client every request to a remote server goes through: the one
+// the caller configured, or by default the egress-safe client web_fetch uses. That
+// client refuses a connection to a private or link-local address after the name is
+// resolved (so an allow-listed name that points at cloud metadata is refused) and
+// holds every redirect to the allowlist.
+func (r *Resolver) httpClient() *http.Client {
+	if r.Client != nil {
+		return r.Client
 	}
-	return false
+	r.egressOnce.Do(func() {
+		r.egress = egress.NewClient(r.AllowedHosts, r.AllowPrivateNetworks, 15*time.Second)
+	})
+	return r.egress
+}
+
+// maxClients bounds how many sessions the resolver keeps.
+const maxClients = 256
+
+// clientFor returns the client for one server under one credential, creating it on
+// first use. A Client holds the session the server assigned, so reusing it is what
+// makes the handshake happen once per server and credential and not before every
+// listing and call. The credential is part of the key: an OAuth token that was
+// refreshed is a different session, and one user's session is never another's.
+func (r *Resolver) clientFor(server Server, bearer string) *Client {
+	sum := sha256.Sum256([]byte(bearer))
+	key := server.ServerID.String() + "|" + server.BaseURL + "|" + hex.EncodeToString(sum[:8])
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if c, ok := r.clients[key]; ok {
+		return c
+	}
+	if r.clients == nil || len(r.clients) >= maxClients {
+		r.clients = map[string]*Client{}
+	}
+	c := &Client{BaseURL: server.BaseURL, BearerToken: bearer, HTTPClient: r.httpClient()}
+	r.clients[key] = c
+	return c
 }
 
 func (r *Resolver) cacheTTL() time.Duration {
@@ -103,13 +136,10 @@ func (r *Resolver) listTools(ctx context.Context, server Server, client *Client)
 	if err != nil {
 		return nil, fmt.Errorf("%s has an invalid base_url: %w", server.Name, err)
 	}
-	if !hostAllowed(r.AllowedHosts, u.Hostname()) {
+	if !egress.HostAllowed(r.AllowedHosts, u.Hostname()) {
 		return nil, fmt.Errorf("egress_denied: %s's base_url host %q is not on the allowlist", server.Name, u.Hostname())
 	}
 
-	if err := client.Initialize(ctx); err != nil {
-		return nil, fmt.Errorf("initialize %s: %w", server.Name, err)
-	}
 	list, err := client.ListTools(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list tools for %s: %w", server.Name, err)
@@ -176,7 +206,7 @@ func (r *Resolver) Resolve(ctx context.Context, tenantID, sessionID uuid.UUID, r
 		return nil, false, err
 	}
 
-	client := &Client{BaseURL: server.BaseURL, BearerToken: bearer, HTTPClient: r.Client}
+	client := r.clientFor(server, bearer)
 	list, err := r.listTools(ctx, server, client)
 	if err != nil {
 		return nil, false, err

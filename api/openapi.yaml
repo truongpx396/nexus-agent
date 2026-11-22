@@ -114,11 +114,19 @@ paths:
 
 
         Each frame is `event: <name>` / `data: <json>`. The name of a durable
-        event is its `type` and its data is a `RunEvent`; a `delta` frame is a
-        best-effort `RunDelta` preview that is never replayed; an `error` frame
-        is `{"error": "<message>"}` and ends the stream. `body` is the decrypted
-        payload and is shown only to the run's own user; a `thought` event never
-        carries one.
+        event is its `type` and its data is a `RunEvent`, and the frame also
+        carries `id: <seq>`; a `delta` frame is a best-effort `RunDelta` preview
+        that is never replayed and has no id; an `error` frame is
+        `{"error": "stream error"}` (a fixed message: the cause is logged, not
+        sent) and ends the stream. `body` is the decrypted payload and is shown
+        only to the run's own user; a `thought` event never carries one.
+
+
+        A client that reconnects sends the id of the last frame it saw as
+        `Last-Event-ID` and is replayed only the events after it. While the
+        stream is idle the server writes a `: keepalive` comment every 20 seconds
+        so a proxy's idle timeout does not cut it, and the stream ends when the
+        server shuts down: reconnect with `Last-Event-ID`.
 
 
         A conversational run does not emit `terminal` while it waits for the

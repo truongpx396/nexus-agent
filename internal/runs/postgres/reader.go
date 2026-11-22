@@ -92,6 +92,17 @@ func (r Reader) Events(ctx context.Context, tenantID, runID uuid.UUID) ([]eventl
 	return events, err
 }
 
+// EventsAfter returns runID's events with seq greater than afterSeq, still sealed.
+func (r Reader) EventsAfter(ctx context.Context, tenantID, runID uuid.UUID, afterSeq int64) ([]eventlog.Event, error) {
+	var events []eventlog.Event
+	err := r.Store.InTenantTx(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var lerr error
+		events, lerr = store.ListEventsAfter(ctx, tx, runID, afterSeq)
+		return lerr
+	})
+	return events, err
+}
+
 func (r Reader) EventOpener(tenantID uuid.UUID) runs.EventOpener {
 	return &opener{r: r, tenantID: tenantID, deks: map[string]crypto.DEK{}}
 }
@@ -118,7 +129,7 @@ func (o *opener) Open(ctx context.Context, e eventlog.Event) ([]byte, error) {
 		}
 		o.deks[e.KeyID] = dek
 	}
-	plaintext, err := crypto.Open(dek, e.Payload, o.tenantID.String(), e.SessionID.String())
+	plaintext, err := crypto.OpenEvent(dek, e.Payload, e.PayloadDigest, o.tenantID.String(), e.SessionID.String())
 	if err != nil {
 		return nil, fmt.Errorf("decrypt event %s: %w", e.EventID, err)
 	}

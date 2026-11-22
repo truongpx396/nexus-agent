@@ -159,11 +159,18 @@ func ListSessionsForUser(ctx context.Context, tx pgx.Tx, userID uuid.UUID, limit
 // history Hygiene and promptctx.Build work from. RLS-scoped like every read
 // in this package.
 func ListEvents(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID) ([]eventlog.Event, error) {
+	return ListEventsAfter(ctx, tx, sessionID, 0)
+}
+
+// ListEventsAfter returns the events of sessionID with seq greater than afterSeq,
+// in seq order. A stream that reconnects, or that noticed a gap, asks for what it
+// is missing and not for the whole history again.
+func ListEventsAfter(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID, afterSeq int64) ([]eventlog.Event, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT event_id, session_id, tenant_id, seq, schema_version, type,
 		       payload, payload_digest, key_id, actor, tool_id, pair_ref,
 		       model_id, trace_id, span_id, created_at
-		FROM events WHERE session_id = $1 ORDER BY seq ASC`, sessionID,
+		FROM events WHERE session_id = $1 AND seq > $2 ORDER BY seq ASC`, sessionID, afterSeq,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list events for session %s: %w", sessionID, err)

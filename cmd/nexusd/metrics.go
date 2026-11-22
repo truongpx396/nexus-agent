@@ -17,6 +17,7 @@ import (
 	"github.com/truongpx396/nexus-agent/internal/cost"
 	"github.com/truongpx396/nexus-agent/internal/queue"
 	"github.com/truongpx396/nexus-agent/internal/reporting"
+	restkit "github.com/truongpx396/nexus-agent/internal/surfaces/rest"
 )
 
 // metricsStaleClaimAfter mirrors runDashboard's own default — how old an
@@ -163,8 +164,14 @@ type metricsHandler struct {
 	tenants tenantLister
 	reports reporting.Reports
 	depth   queue.Stater
-	ttl     time.Duration    // 0 means metricsCacheTTL
-	now     func() time.Time // nil means time.Now; a test seam
+
+	// routes holds the per-route request counters and latency histogram. They are
+	// memory, so they are written fresh on every scrape and not cached with the
+	// rest. Nil omits them.
+	routes *restkit.RouteMetrics
+
+	ttl time.Duration    // 0 means metricsCacheTTL
+	now func() time.Time // nil means time.Now; a test seam
 
 	mu   sync.Mutex
 	at   time.Time
@@ -192,6 +199,7 @@ func (m *metricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("content-type", "text/plain; version=0.0.4")
 	_, _ = w.Write(body) // best-effort write to a scrape response
+	m.routes.WritePrometheus(w)
 }
 
 // render returns the cached body while it is younger than the TTL, and renders a

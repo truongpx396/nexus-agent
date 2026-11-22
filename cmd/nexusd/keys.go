@@ -4,11 +4,13 @@ import (
 	"crypto/ed25519"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/truongpx396/nexus-agent/internal/authn"
 	"github.com/truongpx396/nexus-agent/internal/crypto"
+	cryptopg "github.com/truongpx396/nexus-agent/internal/crypto/postgres"
 )
 
 // defaultKEKPath is a local, gitignored dev key (see .gitignore's
@@ -97,4 +99,30 @@ func loadPublicKey(path string) (ed25519.PublicKey, error) {
 	}
 	defer f.Close() //nolint:errcheck // read-only handle; nothing to flush
 	return authn.LoadPublicKey(f)
+}
+
+// newKeyStore builds the data-key store over the current KEK and loads the retired
+// ones named by NEXUS_KEK_RETIRED_PATHS, a comma-separated list of KEK files. After a
+// KEK rotation the old key is listed here, so data keys wrapped under it still unwrap
+// while new ones are wrapped under the current key. An unreadable file is an error:
+// starting without a KEK a stored key needs would fail later, at the first read of
+// that tenant's data.
+func newKeyStore(current crypto.KEK) (*cryptopg.KeyStore, error) {
+	ks := cryptopg.NewKeyStore(current)
+	for path := range strings.SplitSeq(envOr("NEXUS_KEK_RETIRED_PATHS", ""), ",") {
+		if path = strings.TrimSpace(path); path == "" {
+			continue
+		}
+		f, err := os.Open(path) //nolint:gosec // an operator-controlled config value, like NEXUS_KEK_PATH
+		if err != nil {
+			return nil, fmt.Errorf("open retired KEK file %s: %w", path, err)
+		}
+		old, err := crypto.LoadKEK(f)
+		_ = f.Close()
+		if err != nil {
+			return nil, fmt.Errorf("retired KEK %s: %w", path, err)
+		}
+		ks.WithRetired(old)
+	}
+	return ks, nil
 }

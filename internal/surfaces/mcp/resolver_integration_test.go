@@ -152,7 +152,7 @@ func TestResolver_UnadmittedServerRefusesResolution(t *testing.T) {
 	insertTenant(t, s, tenantID)
 	// No mcp_servers row at all — the tenant never admitted anything.
 
-	r := &mcp.Resolver{Servers: mcppg.New(s, nil), AllowedHosts: []string{"*"}}
+	r := &mcp.Resolver{Servers: mcppg.New(s, nil), AllowedHosts: []string{"*"}, AllowPrivateNetworks: true}
 	ref := tools.ToolRef{Namespace: "mcp/nonexistent-server", Name: "some_tool", Version: "v12345678"}
 	tool, ok, err := r.Resolve(context.Background(), tenantID, uuid.New(), ref)
 	if err != nil {
@@ -182,7 +182,7 @@ func TestResolver_HappyPath_ResolvesAndCallsThroughAdapter(t *testing.T) {
 
 	insertAdmittedServer(t, s, tenantID, "github", srv.URL)
 
-	r := &mcp.Resolver{Servers: mcppg.New(s, nil), AllowedHosts: []string{"*"}}
+	r := &mcp.Resolver{Servers: mcppg.New(s, nil), AllowedHosts: []string{"*"}, AllowPrivateNetworks: true}
 	ref := tools.ToolRef{Namespace: "mcp/github", Name: "create_issue", Version: "v" + remoteTool.SchemaDigest()}
 	tool, ok, err := r.Resolve(context.Background(), tenantID, uuid.New(), ref)
 	if err != nil {
@@ -224,7 +224,7 @@ func TestResolver_SchemaDriftRefusesTheStaleRef(t *testing.T) {
 	defer srv.Close()
 	insertAdmittedServer(t, s, tenantID, "github", srv.URL)
 
-	r := &mcp.Resolver{Servers: mcppg.New(s, nil), AllowedHosts: []string{"*"}}
+	r := &mcp.Resolver{Servers: mcppg.New(s, nil), AllowedHosts: []string{"*"}, AllowPrivateNetworks: true}
 	// A ref pinned to a digest that no longer matches the server's CURRENT
 	// schema (README task 11.1's #15 "digest re-verification at use") — the
 	// server and tool NAME both still exist, but this specific qualified
@@ -275,7 +275,7 @@ func TestResolver_BearerStaticAuthIsInjected(t *testing.T) {
 		t.Fatalf("insert bearer_static server: %v", err)
 	}
 
-	r := &mcp.Resolver{Servers: mcppg.New(s, keys), AllowedHosts: []string{"*"}}
+	r := &mcp.Resolver{Servers: mcppg.New(s, keys), AllowedHosts: []string{"*"}, AllowPrivateNetworks: true}
 	ref := tools.ToolRef{Namespace: "mcp/github", Name: "whoami", Version: "v" + remoteTool.SchemaDigest()}
 	tool, ok, err := r.Resolve(context.Background(), tenantID, uuid.New(), ref)
 	if err != nil {

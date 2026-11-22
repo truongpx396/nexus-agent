@@ -19,21 +19,27 @@ import (
 // README task 13.2 (F2), a real *http.Server with timeouts driven to a graceful
 // Shutdown by ctx (runServe's signal.NotifyContext), not a bare ListenAndServe
 // that never returns.
-func runHTTPServer(ctx context.Context, addr string, handler http.Handler) error {
+func runHTTPServer(ctx context.Context, addr string, handler http.Handler, onShutdown ...func()) error {
 	httpSrv := &http.Server{
 		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		// WriteTimeout is deliberately 0 (unbounded): it bounds the ENTIRE
-		// response write, including GET /v1/runs/{id}/events' long-lived
-		// SSE stream — any nonzero value here would sever a legitimate,
-		// still-active stream, not just a slow one. ReadHeaderTimeout/
-		// ReadTimeout still bound slowloris on the request side, and
-		// IdleTimeout still bounds a connection sitting idle between
-		// requests.
-		WriteTimeout: 0,
+		// WriteTimeout bounds the whole response write, so a client that reads
+		// slowly cannot hold a response open for ever. GET /v1/runs/{id}/events is
+		// a stream that is meant to outlive it, and clears its own deadline
+		// (runs/rest.StreamRunEvents); ReadHeaderTimeout/ReadTimeout bound
+		// slowloris on the request side, and IdleTimeout a connection sitting idle
+		// between requests.
+		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
+	}
+	// http.Server.Shutdown waits for every open request, and does not cancel their
+	// contexts, so a response that has no end of its own (an event stream) would hold
+	// the deploy for the whole grace period. These tell such a handler the server is
+	// stopping.
+	for _, f := range onShutdown {
+		httpSrv.RegisterOnShutdown(f)
 	}
 	// ListenAndServe returns the instant Shutdown is called, not when the drain
 	// finishes, so this must wait for the goroutine below or the process exits
