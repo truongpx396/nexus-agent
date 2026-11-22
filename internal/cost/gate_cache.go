@@ -1,6 +1,10 @@
 package cost
 
-import "time"
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
 
 // now is the Gate's clock.
 func (g *Gate) now() time.Time {
@@ -30,4 +34,18 @@ func (g *Gate) SweepIdle(before time.Time) int {
 		}
 	}
 	return evicted
+}
+
+// ForgetSession drops the in-memory ceiling state of one session, so the next
+// reservation on this process sums the session's spend from the ledger again.
+//
+// That state is only valid while this process is the one driving the session. Any
+// worker in any process can lease the session's next job, so a total kept past
+// the end of a job is missing what the other workers spent in between, and the
+// session could pass its ceiling by that much. The worker calls this when a job
+// ends; summing once per job is one indexed query.
+func (g *Gate) ForgetSession(sessionID uuid.UUID) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.sessionState, sessionID)
 }

@@ -15,6 +15,7 @@ import (
 // these into a real, sealed, appended EventToolResult.
 type SyntheticResult struct {
 	PairRef uuid.UUID // the tool_use's EventID
+	Seq     int64     // the tool_use's seq, which is the order the calls were requested in
 	ToolID  *string
 	Reason  string
 }
@@ -72,15 +73,16 @@ func Hygiene(history []eventlog.Event) (kept []eventlog.Event, synthesize []Synt
 		}
 		synthesize = append(synthesize, SyntheticResult{
 			PairRef: id,
+			Seq:     tu.Seq,
 			ToolID:  tu.ToolID,
 			Reason:  "interrupted_before_execution",
 		})
 	}
-	// Map iteration order is randomized; sort so a given history always
-	// produces the same synthesize order (map iteration is not a source of
-	// non-determinism this package wants to leak to its callers or tests).
+	// Map iteration order is randomized; sort so a given history always produces
+	// the same synthesize order. By the calls' seq, the order the model asked for
+	// them in, and not by id, which is random.
 	slices.SortFunc(synthesize, func(a, b SyntheticResult) int {
-		return cmp.Compare(a.PairRef.String(), b.PairRef.String())
+		return cmp.Compare(a.Seq, b.Seq)
 	})
 
 	return kept, synthesize

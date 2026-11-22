@@ -29,14 +29,31 @@ import (
 // history first — so even a full Redis flush recovers to the TRUE spend,
 // not to zero.
 
-func epochKey(budgetID uuid.UUID) string { return "nexus:cost:budget:" + budgetID.String() + ":epoch" }
-
-func spendKey(budgetID uuid.UUID, epoch int64) string {
-	return fmt.Sprintf("nexus:cost:budget:%s:spend:%d", budgetID, epoch)
+// Both keys carry the budget id in a hash tag, {id}, so Redis Cluster maps them
+// to one slot: a script that names two keys fails with CROSSSLOT on a cluster
+// otherwise. A deployment that moves from keys without the tag starts counting
+// on the new ones: the first reservation finds no epoch, the gate arms it from
+// Postgres's reconciled spend, and replicas of the old version, until they are
+// replaced, keep counting on the old keys, so a ceiling is enforced on two
+// counters for the length of one rolling deploy.
+func epochKey(budgetID uuid.UUID) string {
+	return "nexus:cost:budget:{" + budgetID.String() + "}:epoch"
 }
 
+func spendKey(budgetID uuid.UUID, epoch int64) string {
+	return fmt.Sprintf("nexus:cost:budget:{%s}:spend:%d", budgetID, epoch)
+}
+
+// keyTTL is how long a budget's two keys live without being touched. Every
+// script refreshes both, so a live budget never expires, and a budget idle for
+// this long loses both together: its epoch is then missing, the gate fails closed
+// and re-arms it from Postgres, which is the same path a flushed Redis takes. The
+// spend key of an epoch that was replaced is never touched again and so expires,
+// where before it stayed forever.
+const keyTTL = 30 * 24 * time.Hour
+
 // luaReserve: KEYS[1]=epoch key, KEYS[2]=spend key. ARGV[1]=expected
-// epoch, ARGV[2]=amount to reserve, ARGV[3]=ceiling. Returns {code, total}
+// epoch, ARGV[2]=amount to reserve, ARGV[3]=ceiling, ARGV[4]=key TTL in ms. Returns {code, total}
 // where total is the resulting spend counter (or the epoch on a mismatch,
 // or 0 when unavailable) — atomic: the ceiling compare-and-rollback can
 // never race against a concurrent Reserve the way separate GET+INCR+GET
@@ -50,6 +67,8 @@ if epoch ~= ARGV[1] then
   return {-2, tonumber(epoch)}
 end
 local newTotal = tonumber(redis.call('INCRBY', KEYS[2], ARGV[2]))
+redis.call('PEXPIRE', KEYS[1], ARGV[4])
+redis.call('PEXPIRE', KEYS[2], ARGV[4])
 if newTotal > tonumber(ARGV[3]) then
   redis.call('DECRBY', KEYS[2], ARGV[2])
   return {0, newTotal - tonumber(ARGV[2])}
@@ -59,7 +78,8 @@ return {1, newTotal}
 
 // luaRelease: KEYS[1]=epoch key, KEYS[2]=spend key. ARGV[1]=expected
 // epoch, ARGV[2]=delta to release (DECRBY; a negative delta increments,
-// covering the "actual cost exceeded the reservation" case). A stale
+// covering the "actual cost exceeded the reservation" case), ARGV[3]=key TTL
+// in ms. A stale
 // epoch is a documented no-op (redis.go's package doc comment) — nothing
 // this phase ever advances a live budget's epoch, so it is never actually
 // exercised outside a test that deliberately re-arms one.
@@ -69,12 +89,14 @@ if not epoch or epoch ~= ARGV[1] then
   return 0
 end
 redis.call('DECRBY', KEYS[2], ARGV[2])
+redis.call('PEXPIRE', KEYS[1], ARGV[3])
+redis.call('PEXPIRE', KEYS[2], ARGV[3])
 return 1
 `
 
 // luaArm: KEYS[1]=epoch key, KEYS[2]=spend key. ARGV[1]=epoch to
 // establish, ARGV[2]=baseline spend (Postgres's own reconciled total —
-// cost.Gate's Arm, never zero-on-faith). A no-op if the epoch key already
+// cost.Gate's Arm, never zero-on-faith), ARGV[3]=key TTL in ms. A no-op if the epoch key already
 // exists: arming must never clobber a counter another still-live process
 // is actively reserving against.
 const luaArm = `
@@ -82,10 +104,19 @@ local existing = redis.call('GET', KEYS[1])
 if existing then
   return 0
 end
-redis.call('SET', KEYS[1], ARGV[1])
-redis.call('SET', KEYS[2], ARGV[2])
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[3])
+redis.call('SET', KEYS[2], ARGV[2], 'PX', ARGV[3])
 return 1
 `
+
+// The scripts are loaded once and run by their SHA (EVALSHA, falling back to
+// EVAL when the server has not seen them), so a reservation sends 40 bytes of
+// script identity and not the whole source.
+var (
+	reserveScript = goredis.NewScript(luaReserve)
+	releaseScript = goredis.NewScript(luaRelease)
+	armScript     = goredis.NewScript(luaArm)
+)
 
 // Counters implements cost.Counters over a real *redis.Client. The Lua
 // atomicity is only proven against the real thing, so costtest.RunCounters
@@ -107,7 +138,7 @@ func New(client *goredis.Client, timeout time.Duration) *Counters {
 func (s *Counters) Reserve(ctx context.Context, budgetID uuid.UUID, epoch, amount, ceiling int64) (cost.ReserveOutcome, int64, error) {
 	cctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	res, err := s.client.Eval(cctx, luaReserve, []string{epochKey(budgetID), spendKey(budgetID, epoch)}, epoch, amount, ceiling).Result()
+	res, err := reserveScript.Run(cctx, s.client, []string{epochKey(budgetID), spendKey(budgetID, epoch)}, epoch, amount, ceiling, keyTTL.Milliseconds()).Result()
 	if err != nil {
 		// A Redis error (timeout, connection refused, ...) is exactly as
 		// fail-closed as a missing epoch key: the gate cannot prove
@@ -137,7 +168,7 @@ func (s *Counters) Reserve(ctx context.Context, budgetID uuid.UUID, epoch, amoun
 func (s *Counters) Release(ctx context.Context, budgetID uuid.UUID, epoch, delta int64) error {
 	cctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	if err := s.client.Eval(cctx, luaRelease, []string{epochKey(budgetID), spendKey(budgetID, epoch)}, epoch, delta).Err(); err != nil {
+	if err := releaseScript.Run(cctx, s.client, []string{epochKey(budgetID), spendKey(budgetID, epoch)}, epoch, delta, keyTTL.Milliseconds()).Err(); err != nil {
 		return fmt.Errorf("redis release: %w", err)
 	}
 	return nil
@@ -146,7 +177,7 @@ func (s *Counters) Release(ctx context.Context, budgetID uuid.UUID, epoch, delta
 func (s *Counters) Arm(ctx context.Context, budgetID uuid.UUID, epoch, baseline int64) error {
 	cctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	if err := s.client.Eval(cctx, luaArm, []string{epochKey(budgetID), spendKey(budgetID, epoch)}, epoch, baseline).Err(); err != nil {
+	if err := armScript.Run(cctx, s.client, []string{epochKey(budgetID), spendKey(budgetID, epoch)}, epoch, baseline, keyTTL.Milliseconds()).Err(); err != nil {
 		return fmt.Errorf("redis arm: %w", err)
 	}
 	return nil

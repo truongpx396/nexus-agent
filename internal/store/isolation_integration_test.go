@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -292,4 +293,34 @@ func TestIsolation_SessionLevelScopeLeaksAcrossTenants(t *testing.T) {
 		)
 	}
 	t.Logf("confirmed: an unscoped transaction inherited tenant A's session-level scope and read %d row(s) it should never have been able to see — this is exactly what InTenantTx's local=true prevents", count)
+}
+
+// A status write under the wrong tenant's scope matches no row, and used to
+// succeed silently: the caller believed the session had moved.
+func TestUpdateSessionStatus_AWriteThatMatchesNoRowIsAnError(t *testing.T) {
+	pool, cleanup := setupIsolationEnv(t, 5)
+	defer cleanup()
+	ctx := context.Background()
+	s := New(pool)
+	owner, other, session := uuid.New(), uuid.New(), uuid.New()
+	for _, id := range []uuid.UUID{owner, other} {
+		if err := insertTenant(ctx, s, id, "t-"+id.String()); err != nil {
+			t.Fatalf("insert tenant: %v", err)
+		}
+	}
+	if err := insertSession(ctx, s, owner, session); err != nil {
+		t.Fatalf("insert session: %v", err)
+	}
+
+	err := s.InTenantTx(ctx, other, func(ctx context.Context, tx pgx.Tx) error {
+		return UpdateSessionStatus(ctx, tx, session, "completed", nil)
+	})
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("a status write under another tenant's scope returned %v, want ErrSessionNotFound", err)
+	}
+	if err := s.InTenantTx(ctx, owner, func(ctx context.Context, tx pgx.Tx) error {
+		return UpdateSessionStatus(ctx, tx, session, "completed", nil)
+	}); err != nil {
+		t.Fatalf("the owner's own status write failed: %v", err)
+	}
 }

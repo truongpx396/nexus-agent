@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/truongpx396/nexus-agent/internal/eventlog"
 )
@@ -24,7 +26,8 @@ func Append(ctx context.Context, tx pgx.Tx, e eventlog.Event) (eventlog.Event, e
 	if !e.Type.Known() {
 		return eventlog.Event{}, fmt.Errorf("append event: %w", eventlog.UnknownTypeError{Type: e.Type})
 	}
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, e.SessionID.String()); err != nil {
+	k1, k2 := advisoryKey(e.SessionID)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1::int4, $2::int4)`, k1, k2); err != nil {
 		return eventlog.Event{}, fmt.Errorf("acquire session append lock: %w", err)
 	}
 
@@ -45,4 +48,12 @@ func Append(ctx context.Context, tx pgx.Tx, e eventlog.Event) (eventlog.Event, e
 		return eventlog.Event{}, fmt.Errorf("append event: %w", err)
 	}
 	return e, nil
+}
+
+// advisoryKey is the pair of 32-bit keys the session's append lock is taken on:
+// two disjoint words of its random id, so 64 bits of it. The lock space is shared
+// by every tenant, and a 32-bit hash of the id would make two unrelated sessions
+// collide, and so wait for each other's transactions, about once in 65,000 pairs.
+func advisoryKey(id uuid.UUID) (int32, int32) {
+	return int32(binary.BigEndian.Uint32(id[0:4])), int32(binary.BigEndian.Uint32(id[8:12])) //nolint:gosec // reinterpreting the bits as the signed key Postgres takes is the point
 }

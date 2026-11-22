@@ -84,3 +84,23 @@ func TestDrainWorkers_CancelsWhenTheGraceRunsOutAndThenWaitsForTheWorkersToUnwin
 		t.Fatal("drainWorkers returned before the cancelled worker had unwound")
 	}
 }
+
+func TestMaxConcurrentRuns_DefaultsToTheWorkerCountAndNeverExceedsIt(t *testing.T) {
+	cases := []struct {
+		set     string
+		workers int
+		want    int
+	}{
+		{"", 4, 4},   // unset: no throttle
+		{"2", 4, 2},  // lowered
+		{"9", 4, 4},  // above the worker count means nothing: a worker runs one job at a time
+		{"0", 4, 4},  // out of range
+		{"-1", 4, 4}, // out of range
+	}
+	for _, tc := range cases {
+		t.Setenv("NEXUS_QUEUE_MAX_CONCURRENT_RUNS", tc.set)
+		if got := maxConcurrentRuns(tc.workers); got != tc.want {
+			t.Errorf("NEXUS_QUEUE_MAX_CONCURRENT_RUNS=%q with %d workers = %d, want %d", tc.set, tc.workers, got, tc.want)
+		}
+	}
+}

@@ -366,6 +366,11 @@ func (k *Kernel) Resume(ctx context.Context, st *RunState, cfg RunConfig, res Pe
 			return
 		}
 
+		// The rest of the turn's calls were never run: run them before the model
+		// sees anything (runRemainingCalls).
+		if !k.runRemainingCalls(ctx, st, cfg, res.ToolUseEventID, yield) {
+			return
+		}
 		k.runTurns(ctx, st, cfg, yield)
 	}
 }
@@ -416,6 +421,9 @@ func (k *Kernel) ResumeDelegation(ctx context.Context, st *RunState, cfg RunConf
 			return
 		}
 
+		if !k.runRemainingCalls(ctx, st, cfg, res.ToolUseEventID, yield) {
+			return
+		}
 		k.runTurns(ctx, st, cfg, yield)
 	}
 }

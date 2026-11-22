@@ -13,7 +13,6 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/truongpx396/nexus-agent/internal/audit"
-	auditpg "github.com/truongpx396/nexus-agent/internal/audit/postgres"
 	"github.com/truongpx396/nexus-agent/internal/crypto"
 	cryptopg "github.com/truongpx396/nexus-agent/internal/crypto/postgres"
 	retrievalpg "github.com/truongpx396/nexus-agent/internal/retrieval/postgres"
@@ -52,7 +51,10 @@ func runErase(ctx context.Context, args []string) error {
 	_ = cryptopg.NewKeyStore(kek) // erasure only shreds/reads encryption_keys rows directly; KeyStore isn't needed for that path itself
 
 	signer := audit.NewSignerClient(envOr("NEXUS_SIGNERD_SOCKET", defaultSignerdSocket))
-	chain := auditpg.NewChain(signer)
+	chain, err := newAuditChain(signer)
+	if err != nil {
+		return err
+	}
 	eraser := cryptopg.Eraser{Chain: chain, Artifacts: toolspg.DerivedArtifacts{}}
 
 	if *tenantName != "" {

@@ -104,6 +104,16 @@ type LeaseExtender interface {
 	Extend(ctx context.Context, jobID uuid.UUID) error
 }
 
+// Releaser is an optional part of a Port. Release hands a leased job back to be
+// leased again at retryAt without counting the lease as an attempt, for a job that
+// was never run: the session's lock was held by another worker, or the worker was
+// stopping. Fail counts every lease as an attempt, so using it for these would walk
+// a healthy job toward its attempt limit and lengthen its backoff. A Port that does
+// not implement it gets Fail.
+type Releaser interface {
+	Release(ctx context.Context, jobID uuid.UUID, retryAt time.Time) error
+}
+
 // Port is the queue's own abstract interface (mirrors internal/cost.
 // BudgetGate / kernel.ToolExecutor's own decoupling idiom): RedisStreams
 // (redis_streams.go) is Nexus Agent's own adapter — NATS JetStream remains

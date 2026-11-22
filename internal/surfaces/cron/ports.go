@@ -2,12 +2,18 @@ package cron
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/truongpx396/nexus-agent/internal/runs"
 )
+
+// ErrNotDue is what Fire answers for a schedule that is no longer due: another
+// replica fired it between this one's Due and its Fire, or it was disabled. The
+// scheduler treats it as "someone else took this tick", not as a failure.
+var ErrNotDue = errors.New("cron: schedule is not due")
 
 // Schedule is one cron_schedules row the scheduler acts on.
 type Schedule struct {
@@ -51,7 +57,9 @@ type ScheduleStore interface {
 	Disable(ctx context.Context, tenantID, scheduleID uuid.UUID) error
 
 	// Fire creates the session f describes, mints its key, and advances the
-	// schedule, as ONE atomic step: a schedule that advanced always has its
+	// schedule, as ONE atomic step that begins by checking the schedule is still
+	// due and advancing it (a compare-and-set), so of N replicas that read it due
+	// at once exactly one fires it and the rest get ErrNotDue: a schedule that advanced always has its
 	// session, and a session never exists for a tick that did not advance. That
 	// is the exactly-once tick, and it is why this is a single method rather
 	// than a create-session call followed by an update. It returns the seal

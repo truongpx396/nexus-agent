@@ -4,6 +4,7 @@ package redis
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -405,5 +406,96 @@ func TestRedisStreams_ExtendOfAJobThatIsNotLeasedIsAnError(t *testing.T) {
 	q, _ := newTestQueue(t)
 	if err := q.Extend(context.Background(), uuid.New()); err == nil {
 		t.Fatal("Extend of a job nobody holds succeeded")
+	}
+}
+
+// A job handed back without being run (another worker held its session) is not an
+// attempt: lease it, release it, lease it again, and it has been attempted once.
+func TestRedisStreams_ReleaseDoesNotCountAsAnAttempt(t *testing.T) {
+	q, client := newTestQueue(t)
+	ctx := context.Background()
+	if _, err := q.Enqueue(ctx, newTestJob()); err != nil {
+		t.Fatal(err)
+	}
+
+	first, ok := leaseWithin(t, q, "w1", 3*time.Second)
+	if !ok || first.Attempts != 1 {
+		t.Fatalf("first lease = %+v, %v, want attempt 1", first, ok)
+	}
+	for range 3 {
+		if err := q.Release(ctx, first.JobID, time.Now()); err != nil {
+			t.Fatalf("Release: %v", err)
+		}
+		again, ok := leaseWithin(t, q, "w1", 3*time.Second)
+		if !ok || again.JobID != first.JobID || again.Attempts != 1 {
+			t.Fatalf("lease after a release = %+v, %v, want the same job at attempt 1", again, ok)
+		}
+	}
+	if n := streamLen(t, client, streamKey); n != 1 {
+		t.Fatalf("the stream holds %d entries after the releases, want exactly the one job", n)
+	}
+
+	// A failure, by contrast, is an attempt.
+	if err := q.Fail(ctx, first.JobID, "boom", false, time.Now()); err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+	failed, ok := leaseWithin(t, q, "w1", 3*time.Second)
+	if !ok || failed.Attempts != 2 {
+		t.Fatalf("lease after a failure = %+v, %v, want attempt 2", failed, ok)
+	}
+}
+
+// A job leaves the delay set and arrives on the stream in one step, and when
+// several workers race to promote it exactly one wins: it is never lost, and never
+// on the stream twice.
+func TestRedisStreams_PromotingADelayedJobIsAtomicAndHappensOnce(t *testing.T) {
+	q, client := newTestQueue(t)
+	ctx := context.Background()
+	job := newTestJob()
+	job.AvailableAt = time.Now().Add(150 * time.Millisecond)
+	if _, err := q.Enqueue(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			if err := q.promoteDelayed(ctx); err != nil {
+				t.Errorf("promoteDelayed: %v", err)
+			}
+		})
+	}
+	wg.Wait()
+
+	if n := streamLen(t, client, streamKey); n != 1 {
+		t.Fatalf("the stream holds %d entries after 8 concurrent promotions, want exactly 1", n)
+	}
+	if n, _ := client.ZCard(ctx, delayedKey).Result(); n != 0 {
+		t.Fatalf("%d members are still in the delay set after promotion", n)
+	}
+}
+
+// Dead-lettering retires the entry and files it on the dead-letter stream in one
+// step: afterwards the job is on exactly one of them, with nothing left pending.
+func TestRedisStreams_AFailureLeavesTheJobInExactlyOnePlace(t *testing.T) {
+	q, client := newTestQueue(t)
+	ctx := context.Background()
+	if _, err := q.Enqueue(ctx, newTestJob()); err != nil {
+		t.Fatal(err)
+	}
+	job, ok := leaseWithin(t, q, "w1", 3*time.Second)
+	if !ok {
+		t.Fatal("nothing to lease")
+	}
+
+	if err := q.Fail(ctx, job.JobID, "gave up", true, time.Time{}); err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+	if live, dead, pend := streamLen(t, client, streamKey), streamLen(t, client, deadKey), pendingCount(t, client); live != 0 || dead != 1 || pend != 0 {
+		t.Fatalf("after a permanent failure: stream %d, dead %d, pending %d; want 0, 1, 0", live, dead, pend)
+	}
+	if n, _ := client.Exists(ctx, entryKeyPrefix+job.JobID.String()).Result(); n != 0 {
+		t.Fatal("the claim record survived the failure")
 	}
 }
