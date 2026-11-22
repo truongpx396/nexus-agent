@@ -455,7 +455,10 @@ func TestRun_ACancelledRunWritesNoTerminalEvent(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(100*time.Millisecond, cancel)
 	cfg := kernel.RunConfig{System: "test", ModelID: "fake", MaxTurns: 5, Input: "go", AutonomyLevel: "supervised"}
-	for range r.k.Run(ctx, r.st, cfg) {
+	for _, err := range r.k.Run(ctx, r.st, cfg) {
+		if err != nil {
+			t.Logf("the stopped run ended with: %v", err)
+		}
 	}
 
 	if n := len(ofType(r.log.Events(r.sessionID), eventlog.EventTerminal)); n != 0 {
