@@ -231,40 +231,6 @@ func (r *Streams) claim(ctx context.Context, owner string, msg goredis.XMessage)
 	return job, nil
 }
 
-// promoteDelayed moves every delay-buffer member whose retry-at has
-// elapsed back onto the live stream. ZRem's return value is what keeps two
-// workers racing this in the same tick from double-promoting: both may see
-// the same due member from ZRANGE BYSCORE's read below, but Redis
-// serializes the ZRem calls that follow, so only the one that actually
-// removes it (result 1, not 0) is allowed to XAdd it back — the other sees
-// 0 and skips, no Lua script needed for that ordering to be race-free.
-func (r *Streams) promoteDelayed(ctx context.Context) error {
-	dueBy := strconv.FormatInt(time.Now().UnixMilli(), 10)
-	// ZRANGE ... BYSCORE (Redis 6.2+, the deployment and tests run redis:7)
-	// replaces the deprecated ZRANGEBYSCORE; same range, same LIMIT 0 N.
-	due, err := r.client.ZRangeArgs(ctx, goredis.ZRangeArgs{Key: delayedKey, Start: "-inf", Stop: dueBy, ByScore: true, Count: promoteBatch}).Result()
-	if err != nil {
-		return fmt.Errorf("list due delayed jobs: %w", err)
-	}
-	for _, raw := range due {
-		removed, err := r.client.ZRem(ctx, delayedKey, raw).Result()
-		if err != nil {
-			return fmt.Errorf("promote delayed job: zrem: %w", err)
-		}
-		if removed == 0 {
-			continue // another worker's concurrent Lease call already promoted this one
-		}
-		var job queue.Job
-		if err := json.Unmarshal([]byte(raw), &job); err != nil {
-			continue // a malformed delay-buffer entry can never be promoted again — drop it rather than block every future Lease on it
-		}
-		if _, err := r.client.XAdd(ctx, &goredis.XAddArgs{Stream: streamKey, Values: jobFields(job)}).Result(); err != nil {
-			return fmt.Errorf("promote delayed job %s: xadd: %w", job.JobID, err)
-		}
-	}
-	return nil
-}
-
 func (r *Streams) pushDelayed(ctx context.Context, job queue.Job, at time.Time) error {
 	raw, err := json.Marshal(job) //nolint:gosec // SessionKey is the per-session serial-lock routing key, not a secret
 	if err != nil {
@@ -359,44 +325,4 @@ func (r *Streams) discardUnparseable(ctx context.Context, msg goredis.XMessage, 
 	pipe.XDel(ctx, streamKey, msg.ID)
 	_, err := pipe.Exec(ctx)
 	return err
-}
-
-// Fail retires the job's original entry either way (acked and deleted, so
-// it is never left in the PEL to be reclaimed AGAIN by XAutoClaim — retry
-// scheduling from here on is this method's job, not idle-timeout's) and
-// then, depending on
-// permanent/retryAt: dead-letters it (nexus:queue:dead, a plain
-// inspectable stream — the operator-facing view queue_jobs.status='failed'
-// rows used to give for free), re-adds it immediately (retryAt already
-// elapsed), or parks it in the delay buffer for promoteDelayed to pick up
-// later.
-func (r *Streams) Fail(ctx context.Context, jobID uuid.UUID, reason string, permanent bool, retryAt time.Time) error {
-	entryID, job, err := r.claimedEntry(ctx, jobID)
-	if err != nil {
-		return fmt.Errorf("queue: fail job %s: %w", jobID, err)
-	}
-
-	if err := r.retire(ctx, jobID, entryID); err != nil {
-		return fmt.Errorf("queue: fail job %s: retire original entry: %w", jobID, err)
-	}
-
-	if permanent {
-		dead := jobFields(job)
-		dead["last_error"] = reason
-		if err := r.client.XAdd(ctx, &goredis.XAddArgs{Stream: deadKey, MaxLen: r.deadMaxLen, Values: dead}).Err(); err != nil {
-			return fmt.Errorf("queue: fail job %s: dead-letter: %w", jobID, err)
-		}
-		return nil
-	}
-
-	if !retryAt.After(time.Now()) {
-		if _, err := r.client.XAdd(ctx, &goredis.XAddArgs{Stream: streamKey, Values: jobFields(job)}).Result(); err != nil {
-			return fmt.Errorf("queue: fail job %s: requeue: %w", jobID, err)
-		}
-		return nil
-	}
-	if err := r.pushDelayed(ctx, job, retryAt); err != nil {
-		return fmt.Errorf("queue: fail job %s: %w", jobID, err)
-	}
-	return nil
 }

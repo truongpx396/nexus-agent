@@ -162,14 +162,9 @@ func (l *Log) AppendBatch(ctx context.Context, events []eventlog.Event) ([]event
 			if e.TenantID != events[0].TenantID {
 				return fmt.Errorf("append batch: events span tenants %s and %s", events[0].TenantID, e.TenantID)
 			}
-			appended, aerr := store.Append(ctx, tx, e)
+			appended, aerr := l.appendIn(ctx, tx, e)
 			if aerr != nil {
 				return aerr
-			}
-			if l.hooks.Chain != nil {
-				if _, cerr := l.hooks.Chain.Append(ctx, tx, appended.TenantID, appended.SessionID, appended.Seq, appended.EventID, string(appended.Type), appended.PayloadDigest); cerr != nil {
-					return cerr
-				}
 			}
 			out = append(out, appended)
 		}

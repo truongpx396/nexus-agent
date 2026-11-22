@@ -6,6 +6,7 @@ package cron
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -131,6 +132,10 @@ func (s *Scheduler) fire(ctx context.Context, tenantID uuid.UUID, d Schedule) {
 		ModelID: route.ModelID, RouteReason: route.Reason, Autonomy: autonomy,
 		RanAt: now, NextRunAt: sched.Next(now),
 	})
+	if errors.Is(err, ErrNotDue) {
+		log.Debug().Any("schedule_id", d.ID).Msg("cron: another replica fired this schedule")
+		return
+	}
 	if err != nil {
 		log.Error().Err(err).Any("schedule_id", d.ID).Msg("cron: create session for due schedule")
 		return

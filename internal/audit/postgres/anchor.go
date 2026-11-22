@@ -24,7 +24,16 @@ import (
 // Returns created=false with a zero audit.Anchor if there is nothing new to
 // anchor (no receipts written since the last anchor) — this is the normal,
 // frequent case for a ticker firing on an idle tenant, not an error.
+//
+// Anchoring is serialised per tenant by a transaction-scoped advisory lock taken
+// first: every replica runs the pass, and two that read the same last anchor would
+// each insert one from the same from_receipt_seq, forking the anchor chain so that
+// the verifier reports a break nobody caused. The second waits for the first, then
+// reads the anchor the first wrote.
 func (c *Chain) Anchor(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (a audit.Anchor, created bool, err error) {
+	if _, lerr := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "audit_anchor:"+tenantID.String()); lerr != nil {
+		return audit.Anchor{}, false, fmt.Errorf("audit: lock anchoring for tenant %s: %w", tenantID, lerr)
+	}
 	var fromSeq int64
 	var prevHash []byte
 	row := tx.QueryRow(ctx, `SELECT to_receipt_seq, hash FROM audit_anchors WHERE tenant_id = $1 ORDER BY to_receipt_seq DESC LIMIT 1`, tenantID)

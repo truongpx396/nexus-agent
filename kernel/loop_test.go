@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -439,5 +440,28 @@ func TestRun_ATerminalEventAndItsStatusAreOneWrite(t *testing.T) {
 	}
 	if st, ok := log.Status(r.sessionID); ok && st.Value == eventlog.SessionStatusCompleted {
 		t.Fatalf("status = %q though the terminal write failed", st.Value)
+	}
+}
+
+// A run that is being stopped (shutdown past its grace period, a lost session
+// lock) is not failing. Recording a terminal error would end a run that only
+// needs a worker; nothing written leaves it for crash recovery to resume.
+func TestRun_ACancelledRunWritesNoTerminalEvent(t *testing.T) {
+	stalls := fake.Script{Chunks: []fake.ChunkSpec{
+		{Kind: "content", Text: "par"}, {Kind: "content", Text: "tial"}, {Kind: "done", Done: "stop"},
+	}, StallAfter: 1}
+	r := newRig(toolFunc(func(kernel.ToolUseRequest) kernel.ToolResult { return kernel.ToolResult{} }), stalls)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	cfg := kernel.RunConfig{System: "test", ModelID: "fake", MaxTurns: 5, Input: "go", AutonomyLevel: "supervised"}
+	for range r.k.Run(ctx, r.st, cfg) {
+	}
+
+	if n := len(ofType(r.log.Events(r.sessionID), eventlog.EventTerminal)); n != 0 {
+		t.Fatalf("a stopped run recorded %d terminal events; it should be left running for recovery", n)
+	}
+	if st, ok := r.log.Status(r.sessionID); ok && st.Value != eventlog.SessionStatusRunning {
+		t.Fatalf("status = %q after the run was stopped, want it left running", st.Value)
 	}
 }

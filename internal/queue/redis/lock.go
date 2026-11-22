@@ -69,8 +69,16 @@ end
 return 0
 `
 
+// The scripts run by their SHA (EVALSHA, falling back to EVAL), so a renewal that
+// happens every few seconds for every running session sends the script's identity
+// and not its source.
+var (
+	deleteScript = goredis.NewScript(luaCompareAndDelete)
+	extendScript = goredis.NewScript(luaCompareAndExtend)
+)
+
 func (l *SessionLock) Release(ctx context.Context, sessionKey, token string) error {
-	if err := l.client.Eval(ctx, luaCompareAndDelete, []string{lockKey(sessionKey)}, token).Err(); err != nil {
+	if err := deleteScript.Run(ctx, l.client, []string{lockKey(sessionKey)}, token).Err(); err != nil {
 		return fmt.Errorf("queue: release session lock %s: %w", sessionKey, err)
 	}
 	return nil
@@ -89,7 +97,7 @@ return 0
 `
 
 func (l *SessionLock) Renew(ctx context.Context, sessionKey, token string) (bool, error) {
-	res, err := l.client.Eval(ctx, luaCompareAndExtend, []string{lockKey(sessionKey)}, token, l.ttl.Milliseconds()).Result()
+	res, err := extendScript.Run(ctx, l.client, []string{lockKey(sessionKey)}, token, l.ttl.Milliseconds()).Result()
 	if err != nil {
 		return false, fmt.Errorf("queue: renew session lock %s: %w", sessionKey, err)
 	}

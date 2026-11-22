@@ -10,7 +10,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/truongpx396/nexus-agent/internal/audit"
-	auditpg "github.com/truongpx396/nexus-agent/internal/audit/postgres"
 	"github.com/truongpx396/nexus-agent/internal/store"
 	"github.com/truongpx396/nexus-agent/migrations"
 )
@@ -58,7 +57,10 @@ func runVerifyChain(ctx context.Context, args []string) error {
 	st := store.New(pool)
 
 	signer := audit.NewSignerClient(envOr("NEXUS_SIGNERD_SOCKET", defaultSignerdSocket))
-	chain := auditpg.NewChain(signer)
+	chain, err := newAuditChain(signer)
+	if err != nil {
+		return err
+	}
 
 	tenantIDs, err := tenantDirectory().ListTenantIDs(ctx)
 	if err != nil {

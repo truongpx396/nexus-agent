@@ -11,6 +11,7 @@ package postgres
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 
@@ -24,6 +25,12 @@ import (
 // call in the process — it holds no per-call state itself.
 type Chain struct {
 	Signer audit.Signer
+
+	// Retired are the public keys of signer keys that were rotated out, by key id.
+	// Verification trusts them as well as the signer's current key, so a rotation
+	// does not report every older receipt as unverifiable. Nil means only the
+	// current key is trusted.
+	Retired map[string]ed25519.PublicKey
 }
 
 func NewChain(signer audit.Signer) *Chain {

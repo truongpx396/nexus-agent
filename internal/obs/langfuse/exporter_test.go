@@ -385,3 +385,18 @@ func TestLangfuseExporter_ShutdownFlushesPending(t *testing.T) {
 		t.Errorf("got %d events after Shutdown, want 1 (Shutdown should flush synchronously)", got)
 	}
 }
+
+// While Langfuse is unreachable the buffer must not grow without bound; events
+// past it are counted, and the count is reported and reset by the next flush.
+func TestEnqueue_PastTheBoundDropsAndCounts(t *testing.T) {
+	e := &LangfuseExporter{}
+	for i := range maxPending + 25 {
+		e.enqueue(langfuseEvent{ID: string(rune('a' + i%26))})
+	}
+	if got := len(e.pending); got != maxPending {
+		t.Fatalf("pending holds %d events, want the bound %d", got, maxPending)
+	}
+	if got := e.dropped.Load(); got != 25 {
+		t.Fatalf("dropped = %d, want 25", got)
+	}
+}

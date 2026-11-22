@@ -71,9 +71,26 @@ func adminDSN() string {
 	return envOr("NEXUS_ADMIN_DATABASE_URL", envOr("NEXUS_MIGRATE_DATABASE_URL", defaultMigrateDSN))
 }
 
-// tenantDirectory is the platform operator's view of the tenants: it lists them
-// (tenancy.Directory) and says which one owns a session (tenancy.SessionLocator).
+// tenantDirectory is the directory for a one-shot command, which opens an
+// administrative pool for the call and closes it. The server uses infra.directory,
+// which shares the pool it opened at startup.
 func tenantDirectory() tenancypg.Directory { return tenancypg.Directory{DSN: adminDSN()} }
+
+// singleton wraps one of the loops' passes so that, of the replicas running it,
+// only the one holding the pass's advisory lock does the work this tick. The
+// rest skip it.
+func singleton(pool *pgxpool.Pool, name string, pass func(context.Context)) func(context.Context) {
+	return func(ctx context.Context) {
+		ran, err := tenancypg.Exclusive(ctx, pool, name, pass)
+		if err != nil {
+			log.Error().Err(err).Str("pass", name).Msg("nexusd: background pass")
+			return
+		}
+		if !ran {
+			log.Debug().Str("pass", name).Msg("nexusd: another replica is running this pass")
+		}
+	}
+}
 
 // startPeriodic runs fn every interval until the returned stop is called. It is
 // the one ticker loop the platform's scheduled passes share; what a pass does,
@@ -109,11 +126,11 @@ func startPeriodic(ctx context.Context, interval time.Duration, fn func(context.
 func startBackground(ctx context.Context, in *infra, svc *services, runsAPI *runsrest.Handler) (stop func()) {
 	var stops []func()
 	stops = append(stops,
-		startAnchorLoop(ctx, tenantDirectory(), auditpg.Scoped{St: in.st, Chain: in.chain}),
-		startTeamBackstopLoop(ctx, tenantDirectory(), svc.teams),
-		startIdleConversationSweepLoop(ctx, tenantDirectory(), svc.ctl),
+		startAnchorLoop(ctx, in.directory(), in.admin, auditpg.Scoped{St: in.st, Chain: in.chain, Marks: auditpg.NewWatermarks()}),
+		startTeamBackstopLoop(ctx, in.directory(), in.admin, svc.teams),
+		startIdleConversationSweepLoop(ctx, in.directory(), in.admin, svc.ctl),
 		startSessionStateSweepLoop(ctx, svc.gate),
-		startQueueWorkers(ctx, in.redis, in.queue, runsAPI, svc.ctl, svc.resumer),
+		startQueueWorkers(ctx, in.redis, in.admin, in.queue, runsAPI, svc.ctl, svc.resumer, svc.gate),
 		startEventBus(ctx, in.redis, runsAPI),
 		startScheduler(ctx, in, svc),
 	)
@@ -129,7 +146,7 @@ func startBackground(ctx context.Context, in *infra, svc *services, runsAPI *run
 // it, so a pass that is mid-run finishes unwinding before the pool it uses closes.
 func startScheduler(ctx context.Context, in *infra, svc *services) (stop func()) {
 	scheduler := &cron.Scheduler{
-		Schedules: cronpg.New(in.st, in.keys), Starter: svc.starter, Tenants: adminTenantLister{},
+		Schedules: cronpg.New(in.st, in.keys), Starter: svc.starter, Tenants: adminTenantLister{dir: in.directory()},
 		CatalogManifestDigest: svc.catalogManifestDigest,
 	}
 	ctx, cancel := context.WithCancel(ctx)
@@ -149,34 +166,34 @@ func startScheduler(ctx context.Context, in *infra, svc *services) (stop func())
 // chain. A break or a gap is logged, not fatal — an alert a real deployment
 // would ship to its paging system, not a reason to crash the process that is
 // the source of truth for the very thing it is checking.
-func startAnchorLoop(ctx context.Context, dir tenancy.Directory, audit auditpg.Scoped) (stop func()) {
-	return startPeriodic(ctx, anchorInterval, func(ctx context.Context) {
+func startAnchorLoop(ctx context.Context, dir tenancy.Directory, pool *pgxpool.Pool, audit auditpg.Scoped) (stop func()) {
+	return startPeriodic(ctx, anchorInterval, singleton(pool, "audit anchor/verify", func(ctx context.Context) {
 		tenancy.ForEach(ctx, dir, "audit anchor/verify", audit.AnchorAndVerify)
-	})
+	}))
 }
 
 // startTeamBackstopLoop runs README task 9.9's own wall-clock trigger: every
 // teamBackstopSweepInterval, sweep every tenant for an 'active' team older than
 // teamBackstopWindow and end it as 'aborted'.
-func startTeamBackstopLoop(ctx context.Context, dir tenancy.Directory, teamsSvc *teams.Service) (stop func()) {
-	return startPeriodic(ctx, teamBackstopSweepInterval, func(ctx context.Context) {
+func startTeamBackstopLoop(ctx context.Context, dir tenancy.Directory, pool *pgxpool.Pool, teamsSvc *teams.Service) (stop func()) {
+	return startPeriodic(ctx, teamBackstopSweepInterval, singleton(pool, "team backstop", func(ctx context.Context) {
 		tenancy.ForEach(ctx, dir, "team backstop", func(ctx context.Context, tenantID uuid.UUID) error {
 			return teamsSvc.SweepBackstop(ctx, tenantID, teamBackstopWindow)
 		})
-	})
+	}))
 }
 
 // startIdleConversationSweepLoop runs the idle-conversation backstop: every
 // idleConversationSweepInterval, sweep every tenant for a conversational session
 // sitting in awaiting_input past idleConversationWindow and end it
 // (runctl.Control.SweepIdle).
-func startIdleConversationSweepLoop(ctx context.Context, dir tenancy.Directory, ctl *runctl.Control) (stop func()) {
-	return startPeriodic(ctx, idleConversationSweepInterval, func(ctx context.Context) {
+func startIdleConversationSweepLoop(ctx context.Context, dir tenancy.Directory, pool *pgxpool.Pool, ctl *runctl.Control) (stop func()) {
+	return startPeriodic(ctx, idleConversationSweepInterval, singleton(pool, "idle conversation sweep", func(ctx context.Context) {
 		olderThan := time.Now().Add(-idleConversationWindow)
 		tenancy.ForEach(ctx, dir, "idle conversation sweep", func(ctx context.Context, tenantID uuid.UUID) error {
 			return ctl.SweepIdle(ctx, tenantID, olderThan)
 		})
-	})
+	}))
 }
 
 // startSessionStateSweepLoop evicts the cost gate's per-session state that has
@@ -217,15 +234,9 @@ func startSessionStateSweepLoop(ctx context.Context, gate *cost.Gate) (stop func
 // "running" in the first place, so a session only ever reaches "running"
 // once it durably has at least its seed/message event — recovering an
 // orphaned FRESH run is already exactly what this sweep covers.
-func startQueueWorkers(ctx context.Context, redisClient *redis.Client, port queue.Port, runsAPI *runsrest.Handler, ctl *runctl.Control, approvals approvalResumer) (stop func()) {
-	adminPool, err := pgxpool.New(ctx, adminDSN())
-	if err != nil {
-		log.Error().Err(err).Msg("nexusd: queue: connect as admin failed; the worker pool is NOT running (fresh runs will be seeded but never actually driven, and crash recovery does not happen)")
-		return func() {}
-	}
-
+func startQueueWorkers(ctx context.Context, redisClient *redis.Client, adminPool *pgxpool.Pool, port queue.Port, runsAPI *runsrest.Handler, ctl *runctl.Control, approvals approvalResumer, gate *cost.Gate) (stop func()) {
 	lock := queueredis.NewSessionLock(redisClient, sessionLockTTL)
-	runner := &queueRunner{ctl: ctl, approvals: approvals, runsAPI: runsAPI}
+	runner := &queueRunner{ctl: ctl, approvals: approvals, runsAPI: runsAPI, gate: gate}
 
 	// Two contexts, because stopping and cancelling are different things. leaseCtx
 	// ends when the process is told to stop: workers stop leasing and the recovery
@@ -243,10 +254,15 @@ func startQueueWorkers(ctx context.Context, redisClient *redis.Client, port queu
 	// session's failures were split across them and never tripped any.
 	breakers := reliability.NewBreakerRegistry(3)
 
+	// One admission controller for every worker, so the process's concurrency limit
+	// is a limit on the process and not on each worker.
+	workerCount := queueWorkers()
+	admission := queue.NewAdmissionController(maxConcurrentRuns(workerCount))
+
 	var workers sync.WaitGroup
-	for i := range queueWorkers() {
+	for i := range workerCount {
 		w := queue.NewWorker(queue.WorkerConfig{
-			Port: port, Lock: lock, Runner: runner, Breakers: breakers, RenewEvery: sessionLockTTL / 3, JobContext: jobCtx,
+			Port: port, Lock: lock, Runner: runner, Breakers: breakers, Admission: admission, RenewEvery: sessionLockTTL / 3, JobContext: jobCtx,
 			Owner: fmt.Sprintf("nexusd-worker-%d-%d", os.Getpid(), i),
 		})
 		workers.Go(func() { w.Run(workerCtx) })
@@ -258,7 +274,6 @@ func startQueueWorkers(ctx context.Context, redisClient *redis.Client, port queu
 		// through closes; past it the runs are cancelled.
 		drainWorkers(&workers, shutdownGrace(), cancelJobs)
 		cancelJobs() // release jobCtx's resources; every job has returned by now
-		adminPool.Close()
 	}
 }
 
@@ -321,9 +336,19 @@ type queueRunner struct {
 	// process's worker actually drove it, and approval-outbox delivery/
 	// terminal-span emission fire exactly once either way.
 	runsAPI *runsrest.Handler
+
+	// gate is the cost gate whose per-session spend this runner drops when a job
+	// ends. Nil leaves it to the idle sweep.
+	gate *cost.Gate
 }
 
 func (r *queueRunner) Run(ctx context.Context, job queue.Job) error {
+	if r.gate != nil {
+		// The gate's per-session spend is valid only while this process drives the
+		// session. Another worker may lease its next job, so forget it here and let
+		// the next reservation, wherever it runs, sum the ledger again.
+		defer r.gate.ForgetSession(job.SessionID)
+	}
 	for ev, err := range jobEvents(ctx, r.ctl, r.approvals, job) {
 		if staleJob(err) {
 			// The session no longer needs a worker (it finished, or it is waiting on a

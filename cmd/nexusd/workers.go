@@ -25,6 +25,21 @@ func queueWorkers() int {
 	return n
 }
 
+// maxConcurrentRuns is how many runs this process drives at once, enforced by one
+// admission controller its workers share. It defaults to the worker count, which is
+// already each worker's own limit of one job at a time, so by default it limits
+// nothing; NEXUS_QUEUE_MAX_CONCURRENT_RUNS lowers it below that to throttle a
+// process (a smaller provider quota, a small host) without removing workers.
+// Each worker used to build its own controller, so none ever limited anything.
+func maxConcurrentRuns(workers int) int {
+	n := envIntOr("NEXUS_QUEUE_MAX_CONCURRENT_RUNS", workers)
+	if n < 1 || n > workers {
+		log.Warn().Int("requested", n).Int("using", workers).Msg("nexusd: NEXUS_QUEUE_MAX_CONCURRENT_RUNS must be between 1 and the worker count; using the worker count")
+		return workers
+	}
+	return n
+}
+
 // defaultShutdownGrace is how long a stopping process lets the runs already under
 // way finish before it cancels them. It is set against the orchestrator's own
 // termination grace period, which has to cover the HTTP drain (30s, runHTTPServer)

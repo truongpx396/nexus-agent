@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -678,3 +679,78 @@ func TestWorker_APanicIsAPermanentFailureWhatEverItCarries(t *testing.T) {
 		}
 	}
 }
+
+// A job that keeps failing with a different message each time never trips the
+// breaker, which counts identical failures; without a limit it retries forever.
+func TestWorker_AJobIsDeadLetteredAfterMaxAttemptsWhateverTheFailure(t *testing.T) {
+	port := newFakePort()
+	job, _ := port.Enqueue(context.Background(), Job{TenantID: uuid.New(), SessionID: uuid.New(), SessionKey: "s1", Kind: KindResume})
+	n := 0
+	w := NewWorker(WorkerConfig{
+		Port: port, Lock: newTestLock(t), MaxAttempts: 3,
+		Runner:  funcRunner(func(context.Context, Job) error { n++; return fmt.Errorf("a new failure every time: %d", n) }),
+		Owner:   "w1",
+		Backoff: reliability.BackoffConfig{Base: time.Millisecond, Max: time.Millisecond},
+	})
+	for range 3 {
+		w.pollOnce(context.Background())
+		time.Sleep(5 * time.Millisecond) // let the backoff elapse so the next poll leases it again
+	}
+
+	if got := port.status(job.JobID); got != StatusFailed {
+		t.Fatalf("after 3 attempts with MaxAttempts 3 the job is %q, want it dead-lettered", got)
+	}
+	port.mu.Lock()
+	defer port.mu.Unlock()
+	if !strings.HasPrefix(port.jobs[job.JobID].LastError, "max_attempts_exceeded") {
+		t.Fatalf("last error = %q, want the attempt limit named", port.jobs[job.JobID].LastError)
+	}
+}
+
+// releasingPort is a fakePort that can also release a job without counting it.
+type releasingPort struct {
+	*fakePort
+	released int
+}
+
+func (p *releasingPort) Release(_ context.Context, jobID uuid.UUID, retryAt time.Time) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	j := p.jobs[jobID]
+	j.Attempts-- // the lease counted one; a release takes it back
+	j.Status = StatusPending
+	j.AvailableAt = retryAt
+	p.released++
+	return nil
+}
+
+// Waiting behind another worker for a session's lock is not a failure: the job
+// goes back without using up an attempt, or it would run out of them waiting.
+func TestWorker_AJobBlockedBehindASessionLockIsReleasedNotFailed(t *testing.T) {
+	port := &releasingPort{fakePort: newFakePort()}
+	job, _ := port.Enqueue(context.Background(), Job{TenantID: uuid.New(), SessionID: uuid.New(), SessionKey: "s1", Kind: KindResume})
+	w := NewWorker(WorkerConfig{
+		Port: port, Lock: heldLock{}, MaxAttempts: 2, Owner: "w1",
+		Runner: funcRunner(func(context.Context, Job) error { t.Error("the job ran without its session lock"); return nil }),
+	})
+	for range 5 {
+		w.pollOnce(context.Background())
+		port.mu.Lock()
+		port.jobs[job.JobID].AvailableAt = time.Now() // do not wait out the retry delay
+		port.mu.Unlock()
+	}
+
+	port.mu.Lock()
+	defer port.mu.Unlock()
+	if port.released != 5 || port.jobs[job.JobID].Attempts != 0 || port.jobs[job.JobID].Status != StatusPending {
+		t.Fatalf("released %d times, attempts = %d, status = %q: want 5 releases, no attempts used and the job still pending",
+			port.released, port.jobs[job.JobID].Attempts, port.jobs[job.JobID].Status)
+	}
+}
+
+// heldLock is a Locker whose lock another worker always holds.
+type heldLock struct{}
+
+func (heldLock) Acquire(context.Context, string) (string, bool, error) { return "", false, nil }
+func (heldLock) Release(context.Context, string, string) error         { return nil }
+func (heldLock) Renew(context.Context, string, string) (bool, error)   { return false, nil }
