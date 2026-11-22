@@ -7,7 +7,9 @@ import "github.com/truongpx396/nexus-agent/internal/provider"
 // A suspended run's rehydrated transcript already holds an answer for the call
 // it suspended on: the placeholder the suspension appended. Resuming replaces
 // that block in place, so the prompt carries exactly one tool_result per
-// tool_use. If there is none to replace, a new tool message is appended.
+// tool_use. If there is none to replace, the answer joins the tool message that
+// ends the transcript, where a turn's other answers are, or starts one: two tool
+// messages in a row are not a valid prompt.
 func (st *RunState) settleToolResult(toolUseID, text string, isError bool) {
 	for i := range st.Transcript {
 		m := &st.Transcript[i]
@@ -20,6 +22,10 @@ func (st *RunState) settleToolResult(toolUseID, text string, isError bool) {
 				return
 			}
 		}
+	}
+	if n := len(st.Transcript); n > 0 && st.Transcript[n-1].Role == "tool" {
+		st.Transcript[n-1].Blocks = append(st.Transcript[n-1].Blocks, provider.ContentBlock{Kind: provider.BlockToolResult, ToolUseID: toolUseID, Text: text, IsError: isError})
+		return
 	}
 	st.Transcript = append(st.Transcript, provider.ToolResultMessage(toolUseID, text, isError))
 }

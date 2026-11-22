@@ -14,7 +14,6 @@ import (
 
 	"github.com/truongpx396/nexus-agent/evals"
 	"github.com/truongpx396/nexus-agent/internal/audit"
-	auditpg "github.com/truongpx396/nexus-agent/internal/audit/postgres"
 	"github.com/truongpx396/nexus-agent/internal/cost"
 	costpg "github.com/truongpx396/nexus-agent/internal/cost/postgres"
 	"github.com/truongpx396/nexus-agent/internal/crypto"
@@ -55,7 +54,10 @@ func runGoLive(ctx context.Context, args []string) error {
 
 	// Item 1: attributable audit log.
 	signer := audit.NewSignerClient(envOr("NEXUS_SIGNERD_SOCKET", defaultSignerdSocket))
-	chain := auditpg.NewChain(signer)
+	chain, err := newAuditChain(signer)
+	if err != nil {
+		return err
+	}
 	tenantIDs, err := tenantDirectory().ListTenantIDs(ctx)
 	if err != nil {
 		return fmt.Errorf("list tenants: %w", err)

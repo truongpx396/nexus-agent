@@ -59,12 +59,29 @@ func (s *Schedules) Disable(ctx context.Context, tenantID, scheduleID uuid.UUID)
 	})
 }
 
-// Fire mints the session's key, creates the session and advances the schedule
-// in one transaction, so the tick is exactly-once: if any step fails nothing
-// is kept, and the schedule is still due on the next poll.
+// Fire advances the schedule, mints the session's key and creates the session in
+// one transaction, so the tick is exactly-once: if any step fails nothing is
+// kept, and the schedule is still due on the next poll.
+//
+// The advance comes first and is a compare-and-set on "still due". Replicas that
+// read the same row due at once all reach this statement, the first takes the row
+// lock and moves next_run_at, and each of the others, once it gets the lock,
+// re-evaluates the condition against the moved row, updates nothing and gets
+// cron.ErrNotDue before it has created a session.
 func (s *Schedules) Fire(ctx context.Context, f cron.Firing) (runs.SealFunc, error) {
 	var dek crypto.DEK
 	err := s.st.InTenantTx(ctx, f.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
+			`UPDATE cron_schedules SET last_run_at = $1, next_run_at = $2
+			 WHERE schedule_id = $3 AND enabled AND (next_run_at IS NULL OR next_run_at <= now())`,
+			f.RanAt, f.NextRunAt, f.Schedule.ID,
+		)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return cron.ErrNotDue
+		}
 		var derr error
 		dek, derr = s.keys.NewDEK(ctx, tx, f.TenantID)
 		if derr != nil {
@@ -85,11 +102,7 @@ func (s *Schedules) Fire(ctx context.Context, f cron.Firing) (runs.SealFunc, err
 		}); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx,
-			`UPDATE cron_schedules SET last_run_at = $1, next_run_at = $2 WHERE schedule_id = $3`,
-			f.RanAt, f.NextRunAt, f.Schedule.ID,
-		)
-		return err
+		return nil
 	})
 	if err != nil {
 		return nil, err

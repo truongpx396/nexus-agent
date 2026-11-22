@@ -268,6 +268,13 @@ func (k *Kernel) suspendForUserInput(ctx context.Context, st *RunState, yield fu
 // reason (README task 2.9's "never fails over on context overflow" is a
 // property of Wrap, not of this switch).
 func (k *Kernel) terminateFromStreamError(ctx context.Context, st *RunState, yield func(eventlog.Event, error) bool, err error) {
+	if ctx.Err() != nil {
+		// The run is being stopped (shutdown past its grace period, a lost session
+		// lock), not failing. Recording a terminal error would end a run that only
+		// needs a worker; writing nothing leaves it running, so crash recovery
+		// resumes it from its log.
+		return
+	}
 	switch provider.ClassifyTrigger(err) {
 	case provider.TriggerContextOverflow:
 		k.terminate(ctx, st, yield, TerminalContextOverflow(err.Error()))

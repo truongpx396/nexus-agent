@@ -20,6 +20,7 @@ import (
 	surfpg "github.com/truongpx396/nexus-agent/internal/surfaces/postgres"
 	"github.com/truongpx396/nexus-agent/internal/surfaces/telegram"
 	"github.com/truongpx396/nexus-agent/internal/surfaces/zalo"
+	tenancypg "github.com/truongpx396/nexus-agent/internal/tenancy/postgres"
 )
 
 // newMux is the process's outer mux: the unauthenticated probes, the three chat
@@ -73,7 +74,7 @@ func newMux(in *infra, svc *services, restAPI http.Handler, metricsToken string)
 	// /metrics lists every tenant's id, spend and tool names, and each render runs
 	// several queries per tenant, so it needs the metrics token (a static bearer
 	// token, not a tenant's) and is served from a short cache.
-	mux.Handle("GET /metrics", requireBearer(metricsToken, newMetricsHandler(tenantDirectory().ListTenantIDs, reportingpg.New(in.st), in.queue)))
+	mux.Handle("GET /metrics", requireBearer(metricsToken, newMetricsHandler(in.directory().ListTenantIDs, reportingpg.New(in.st), in.queue)))
 	mux.Handle("/v1/webhooks/telegram/", telegramSrv.Handler())
 	mux.Handle("/v1/webhooks/zalo/", zaloSrv.Handler())
 	mux.Handle("/v1/webhooks/email/", emailSrv.Handler())
@@ -133,10 +134,10 @@ func newReplier(in *infra, outbox *surfaces.Outbox) *chat.Replier {
 // separate admin-role connection tenantDirectory already dials — nexus_app
 // (the runtime pool) is NOSUPERUSER NOBYPASSRLS and cannot make a
 // cross-tenant query at all (migrations/0000_app_role.sql).
-type adminTenantLister struct{}
+type adminTenantLister struct{ dir tenancypg.Directory }
 
-func (adminTenantLister) ListTenantIDs(ctx context.Context) ([]uuid.UUID, error) {
-	return tenantDirectory().ListTenantIDs(ctx)
+func (l adminTenantLister) ListTenantIDs(ctx context.Context) ([]uuid.UUID, error) {
+	return l.dir.ListTenantIDs(ctx)
 }
 
 // emailChannels satisfies email.ChannelPort over the shared channel directory.

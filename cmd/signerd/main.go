@@ -137,6 +137,7 @@ func main() {
 
 	fmt.Printf("listening on %s\n", socketPath)
 	var handlers sync.WaitGroup
+	var backoff time.Duration
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -144,9 +145,15 @@ func main() {
 				handlers.Wait() // a signature already being written is finished, not cut off
 				return          // orderly shutdown
 			}
-			log.Error().Err(err).Msg("signerd: accept")
+			// A failing Accept (out of file descriptors, say) fails again at once:
+			// without a pause this loop spins and fills the log. Back off as net/http
+			// does, 5 ms doubling to 1 s, and start over after a success.
+			backoff = nextAcceptBackoff(backoff)
+			log.Error().Err(err).Dur("retry_in", backoff).Msg("signerd: accept")
+			time.Sleep(backoff)
 			continue
 		}
+		backoff = 0
 		handlers.Go(func() { handleConn(conn, key) })
 	}
 }
@@ -199,4 +206,12 @@ func writeResponse(conn net.Conn, resp audit.Response) {
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 	os.Exit(1)
+}
+
+// nextAcceptBackoff is the pause after a failed Accept: 5 ms, then doubling, to 1 s.
+func nextAcceptBackoff(prev time.Duration) time.Duration {
+	if prev == 0 {
+		return 5 * time.Millisecond
+	}
+	return min(prev*2, time.Second)
 }

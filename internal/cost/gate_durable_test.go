@@ -163,3 +163,28 @@ func TestReserve_AFailedRefreshKeepsTheLastGoodPriceBookAndBudget(t *testing.T) 
 		t.Fatal("a gate with nothing cached reserved while the ledger was down")
 	}
 }
+
+// Turns of one session can run on different processes. A total one process kept
+// from its own turn is missing what the others spent after it, so a job's end
+// must drop it: the next reservation on any process counts the ledger again.
+func TestForgetSession_ACeilingHoldsWhenTurnsAreSpreadAcrossProcesses(t *testing.T) {
+	r := newRig(t)
+	r.ledger.SeedBudget(r.tenant, cost.BudgetScopeSession, &r.session, r.usd(40_000))
+	c := &clock{now: time.Now()}
+	a, b := r.gateAt(c), r.gateAt(c)
+
+	// Turn 1 on A, turn 2 on B, each forgetting its state when its job ends.
+	if _, err := r.spend(a); err != nil {
+		t.Fatalf("turn 1: %v", err)
+	}
+	a.ForgetSession(r.session)
+	if _, err := r.spend(b); err != nil {
+		t.Fatalf("turn 2: %v", err)
+	}
+	b.ForgetSession(r.session)
+
+	// Turn 3 back on A: 36,000 is spent of 40,000, so 18,000 more must be refused.
+	if _, err := r.spend(a); err == nil {
+		t.Fatal("turn 3 was allowed: A counted only its own spend and passed the ceiling")
+	}
+}

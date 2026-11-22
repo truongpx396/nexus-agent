@@ -17,13 +17,19 @@ import (
 	"github.com/truongpx396/nexus-agent/internal/obs/profiling"
 	queueredis "github.com/truongpx396/nexus-agent/internal/queue/redis"
 	"github.com/truongpx396/nexus-agent/internal/store"
+	tenancypg "github.com/truongpx396/nexus-agent/internal/tenancy/postgres"
 	"github.com/truongpx396/nexus-agent/internal/version"
 )
 
 // infra is what serve opens before it builds any feature: the connections and
 // key material every feature shares.
 type infra struct {
-	pool     *pgxpool.Pool
+	pool *pgxpool.Pool
+	// admin is the one pool that connects directly to Postgres as the
+	// administrative role. The cross-tenant work uses it (listing tenants, the
+	// orphan sweep, the pass locks), so it is opened once here and shared, not
+	// once per tick.
+	admin    *pgxpool.Pool
 	st       *store.Store
 	redis    *redis.Client
 	keys     *cryptopg.KeyStore
@@ -48,6 +54,19 @@ func openInfra(ctx context.Context, cfg serverConfig) (_ *infra, err error) {
 		}
 	}()
 
+	// The queue workers and every cross-tenant pass depend on this pool, and a
+	// process without it serves requests that nothing ever drives. Fail now, where
+	// the operator is looking, rather than log and run on.
+	in.admin, err = pgxpool.New(ctx, adminDSN())
+	if err != nil {
+		return nil, fmt.Errorf("configure admin database pool: %w", err)
+	}
+	pingCtx, cancelPing := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelPing()
+	if err := in.admin.Ping(pingCtx); err != nil {
+		return nil, fmt.Errorf("connect to the database as the administrative role (NEXUS_ADMIN_DATABASE_URL): %w", err)
+	}
+
 	kek, err := loadOrGenerateKEK(cfg.KEKPath, devMode)
 	if err != nil {
 		return nil, fmt.Errorf("load KEK: %w", err)
@@ -65,7 +84,9 @@ func openInfra(ctx context.Context, cfg serverConfig) (_ *infra, err error) {
 	// internal/audit/signerkey (the package that CAN read it) is imported only by
 	// cmd/signerd, enforced by tests/contract/boundaries_test.go.
 	in.signer = audit.NewSignerClient(cfg.SignerdSocket)
-	in.chain = auditpg.NewChain(in.signer)
+	if in.chain, err = newAuditChain(in.signer); err != nil {
+		return nil, err
+	}
 
 	in.redis, err = newRedisClientFrom(cfg.RedisURL, cfg.RedisAddr)
 	if err != nil {
@@ -109,7 +130,17 @@ func (in *infra) close() {
 			log.Error().Err(err).Msg("nexusd: close redis client")
 		}
 	}
+	if in.admin != nil {
+		in.admin.Close()
+	}
 	in.pool.Close()
+}
+
+// directory is the platform operator's view of the tenants, over the shared
+// administrative pool: it lists them (tenancy.Directory) and says which one owns
+// a session (tenancy.SessionLocator).
+func (in *infra) directory() tenancypg.Directory {
+	return tenancypg.Directory{DSN: adminDSN(), Pool: in.admin}
 }
 
 // appPoolMaxConns/appPoolMinConns are README task 13.14's explicit sizing

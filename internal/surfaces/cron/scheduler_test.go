@@ -3,6 +3,8 @@ package cron_test
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -195,4 +197,80 @@ func TestRunOnce_WithNoTenantListNothingIsFired(t *testing.T) {
 	if len(f.fired) != 0 {
 		t.Errorf("fired %+v though the tenant list failed", f.fired)
 	}
+}
+
+// casSchedules is one store shared by several schedulers, with Fire's
+// compare-and-set: a schedule fires only while it is still due.
+type casSchedules struct {
+	mu    sync.Mutex
+	due   map[uuid.UUID]bool
+	fired int
+}
+
+func (c *casSchedules) Due(_ context.Context, _ uuid.UUID) ([]cron.Schedule, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []cron.Schedule
+	for id, d := range c.due {
+		if d {
+			out = append(out, cron.Schedule{ID: id, UserID: uuid.New(), CronExpr: "* * * * *", Input: "x"})
+		}
+	}
+	return out, nil
+}
+
+func (c *casSchedules) Disable(context.Context, uuid.UUID, uuid.UUID) error { return nil }
+
+func (c *casSchedules) Fire(_ context.Context, f cron.Firing) (runs.SealFunc, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.due[f.Schedule.ID] {
+		return nil, cron.ErrNotDue
+	}
+	c.due[f.Schedule.ID] = false
+	c.fired++
+	return func(p []byte) ([]byte, []byte, string, error) { return p, p, "k", nil }, nil
+}
+
+// Every replica runs the scheduler. Each reads the same schedule due, and only
+// the one that wins the advance may start a run.
+func TestRunOnce_ManyReplicasFireADueScheduleExactlyOnce(t *testing.T) {
+	tenant := uuid.New()
+	id := uuid.New()
+	store := &casSchedules{due: map[uuid.UUID]bool{id: true}}
+	starters := make([]*recordingStarter, 8)
+	var wg sync.WaitGroup
+	// The barrier makes every replica read the schedule due before any fires it.
+	gate := &barrierSchedules{casSchedules: store, readers: len(starters), release: make(chan struct{})}
+	for i := range starters {
+		starters[i] = &recordingStarter{}
+		sched := &cron.Scheduler{Schedules: gate, Starter: starters[i], Tenants: fakeTenants{ids: []uuid.UUID{tenant}}, Now: func() time.Time { return now }}
+		wg.Go(func() { sched.RunOnce(context.Background()) })
+	}
+	wg.Wait()
+
+	started := 0
+	for _, st := range starters {
+		started += len(st.reqs)
+	}
+	if store.fired != 1 || started != 1 {
+		t.Fatalf("fired %d times and started %d runs across 8 replicas, want exactly 1 of each", store.fired, started)
+	}
+}
+
+// barrierSchedules holds every replica's Due answer until all have read it.
+type barrierSchedules struct {
+	*casSchedules
+	readers int
+	seen    atomic.Int32
+	release chan struct{}
+}
+
+func (b *barrierSchedules) Due(ctx context.Context, tenant uuid.UUID) ([]cron.Schedule, error) {
+	due, err := b.casSchedules.Due(ctx, tenant)
+	if int(b.seen.Add(1)) == b.readers {
+		close(b.release)
+	}
+	<-b.release
+	return due, err
 }

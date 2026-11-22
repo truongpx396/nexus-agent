@@ -61,6 +61,12 @@ type WorkerConfig struct {
 	Owner     string        // this worker's identity, recorded as lease_owner and used to derive the lock token's namespace
 	LeaseFor  time.Duration // how long a lease is held before it's considered abandoned
 	PollEvery time.Duration // how often to poll when nothing is leasable
+	// MaxAttempts is how many times a job is run before it is dead-lettered whatever
+	// the failure. A job that keeps failing with a different message each time never
+	// trips the breaker, which counts identical failures, so without a limit it
+	// would retry forever. The default is 10.
+	MaxAttempts int
+
 	// RenewEvery is how often a running job renews its session lock. It must be
 	// well under the lock's TTL (cmd/nexusd configures 30s); the default is 10s.
 	RenewEvery time.Duration
@@ -72,6 +78,9 @@ func (c WorkerConfig) withDefaults() WorkerConfig {
 	}
 	if c.Breakers == nil {
 		c.Breakers = reliability.NewBreakerRegistry(3)
+	}
+	if c.MaxAttempts <= 0 {
+		c.MaxAttempts = 10
 	}
 	if c.LeaseFor <= 0 {
 		c.LeaseFor = 2 * time.Minute
@@ -138,7 +147,7 @@ func (w *Worker) pollOnce(leaseCtx context.Context) {
 		// requeue far enough out that a human has a real chance to
 		// intervene (internal/runctl.ResolveClaim, a cancel, ...) before it
 		// comes back around.
-		w.failJob(ctx, job, "circuit_breaker_open: refusing to retry until an operator intervenes", false, time.Now().Add(5*time.Minute))
+		w.requeue(ctx, job, "circuit_breaker_open: this session's breaker is open; retrying in 5 minutes", time.Now().Add(5*time.Minute))
 		return
 	}
 
@@ -147,7 +156,7 @@ func (w *Worker) pollOnce(leaseCtx context.Context) {
 		// ctx was canceled while waiting for a slot — put the job straight
 		// back rather than leaving it leased-but-abandoned until the lease
 		// itself expires.
-		w.failJob(ctx, job, "admission: "+err.Error(), false, time.Now())
+		w.requeue(ctx, job, "admission: "+err.Error(), time.Now())
 		return
 	}
 	defer release()
@@ -162,7 +171,7 @@ func (w *Worker) pollOnce(leaseCtx context.Context) {
 		// Another worker already holds this session's serial slot — put the
 		// job back for a quick retry rather than blocking this worker on it
 		// (task 6.2: cross-session concurrent, per-session serial).
-		w.failJob(ctx, job, "session_lock_held: another worker is already processing this session", false, time.Now().Add(200*time.Millisecond))
+		w.requeue(ctx, job, "session_lock_held: another worker is already processing this session", time.Now().Add(200*time.Millisecond))
 		return
 	}
 	defer func() {
@@ -193,12 +202,34 @@ func (w *Worker) pollOnce(leaseCtx context.Context) {
 
 	class := reliability.Classify(runErr)
 	tripped := breaker.RecordFailure(runErr.Error())
-	permanent := class == reliability.FailurePermanent || tripped
+	exhausted := job.Attempts >= w.cfg.MaxAttempts
+	permanent := class == reliability.FailurePermanent || tripped || exhausted
+	reason := runErr.Error()
+	if exhausted {
+		reason = fmt.Sprintf("max_attempts_exceeded: gave up after %d attempts: %s", job.Attempts, reason)
+	}
 	delay := w.cfg.Backoff.Delay(job.Attempts, w.rng)
 	log.Warn().Err(runErr).Any("job_id", job.JobID).Str("session_key", job.SessionKey).
 		Any("class", class).Bool("breaker_tripped", tripped).Any("backoff_reason", delay.Reason).
 		Msg("queue: job failed")
-	w.failJob(ctx, job, runErr.Error(), permanent, time.Now().Add(delay.Duration))
+	w.failJob(ctx, job, reason, permanent, time.Now().Add(delay.Duration))
+}
+
+// requeue puts a job that was leased but never run back for another try at retryAt.
+// It does not count as an attempt when the queue can say so (Releaser), because
+// nothing was attempted: a job whose session another worker holds would otherwise
+// use up its attempts waiting its turn.
+func (w *Worker) requeue(ctx context.Context, job Job, reason string, retryAt time.Time) {
+	r, ok := w.cfg.Port.(Releaser)
+	if !ok {
+		w.failJob(ctx, job, reason, false, retryAt)
+		return
+	}
+	settle, cancel := settleContext(ctx)
+	defer cancel()
+	if err := r.Release(settle, job.JobID, retryAt); err != nil {
+		log.Error().Err(err).Any("job_id", job.JobID).Str("reason", reason).Msg("queue: release failed")
+	}
 }
 
 func (w *Worker) failJob(ctx context.Context, job Job, reason string, permanent bool, retryAt time.Time) {

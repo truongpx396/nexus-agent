@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -16,6 +17,11 @@ import (
 
 	"github.com/truongpx396/nexus-agent/internal/hooks"
 )
+
+// maxResponseBytes bounds a hook's answer: a decision, a reason and an updated
+// input are small, and an endpoint that streams without end must not make the
+// process allocate until it is killed.
+const maxResponseBytes = 1 << 20
 
 // Handler POSTs the same hooks.Request shape CommandHandler sends over
 // stdin, and expects the same hooks.Response shape back as the body.
@@ -74,7 +80,7 @@ func (h Handler) Run(ctx context.Context, cfg hooks.Config, hctx hooks.Context) 
 	}
 
 	var out hooks.Response
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&out); err != nil {
 		return hooks.Outcome{}, fmt.Errorf("http hook %q: parse response: %w", cfg.Name, err)
 	}
 	return hooks.Outcome{Decision: hooks.Decision(out.Decision), Reason: out.Reason, UpdatedInput: out.UpdatedInput}, nil

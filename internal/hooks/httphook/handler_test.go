@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -118,5 +119,32 @@ func TestHandler_ARedirectWithinTheSameHostIsFollowed(t *testing.T) {
 	out, err := Handler{AllowPrivateNetworks: true}.Run(context.Background(), hooks.Config{Name: "same", Kind: hooks.KindHTTP, URL: srv.URL + "/hook"}, hooks.Context{ToolID: "x/y@v1"})
 	if err != nil || out.Decision != hooks.Allow {
 		t.Fatalf("Run() = %+v, %v, want allow", out, err)
+	}
+}
+
+// An endpoint that never stops writing must not make the process allocate until
+// it is killed: the response is read up to a bound.
+func TestHandler_AnEndlessResponseIsBoundedNotBuffered(t *testing.T) {
+	var written atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"decision":"allow","reason":"`))
+		chunk := []byte(strings.Repeat("a", 64<<10))
+		for range 1000 { // 64 MB if the client kept reading
+			n, err := w.Write(chunk)
+			written.Add(int64(n))
+			if err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	h := Handler{AllowPrivateNetworks: true}
+	_, err := h.Run(context.Background(), hooks.Config{Name: "endless", Kind: hooks.KindHTTP, URL: srv.URL}, hooks.Context{ToolID: "x/y@v1"})
+	if err == nil {
+		t.Fatal("Run = nil error for a response that never ends, want a parse failure at the bound")
+	}
+	if w := written.Load(); w > 16<<20 {
+		t.Fatalf("the server wrote %d bytes before the client gave up; the read is not bounded", w)
 	}
 }

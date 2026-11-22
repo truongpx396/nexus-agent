@@ -4,7 +4,9 @@ package cron_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -265,11 +267,58 @@ func TestSchedules_FireIsAtomic(t *testing.T) {
 		t.Fatalf("next_run_at after the first Fire = %v, want %v", got, first)
 	}
 
-	second := first.Add(time.Hour)
-	if err := fire(second); err == nil {
-		t.Fatal("a Fire reusing an existing session id succeeded; the session creation was supposed to fail")
+	// Make it due again, so the second Fire gets past the "still due" check and
+	// fails where this test means it to: creating a session with a taken id.
+	if err := s.InTenantTx(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE cron_schedules SET next_run_at = now() - interval '1 hour' WHERE schedule_id = $1`, scheduleID)
+		return err
+	}); err != nil {
+		t.Fatalf("make the schedule due again: %v", err)
 	}
-	if got := readNext(); !got.Equal(first) {
-		t.Errorf("next_run_at after a failed Fire = %v, want it unchanged at %v: the schedule advanced without its session", got, first)
+	due := readNext()
+	second := first.Add(time.Hour)
+	err = fire(second)
+	if err == nil || errors.Is(err, cron.ErrNotDue) {
+		t.Fatalf("a Fire reusing an existing session id returned %v; the session creation was supposed to fail", err)
+	}
+	if got := readNext(); !got.Equal(due) {
+		t.Errorf("next_run_at after a failed Fire = %v, want it unchanged at %v: the schedule advanced without its session", got, due)
+	}
+}
+
+// Two schedulers over one database, as two nexusd replicas are: a schedule both
+// read due is fired by exactly one of them.
+func TestScheduler_TwoReplicasFireADueScheduleOnce(t *testing.T) {
+	appPool, adminPool := setupCronEnv(t)
+	s := store.New(appPool)
+	tenantID := uuid.New()
+	insertTenant(t, adminPool, tenantID)
+	past := time.Now().Add(-time.Hour)
+	insertDueSchedule(t, s, tenantID, uuid.New(), "due", "* * * * *", &past)
+
+	kek, err := crypto.GenerateKEK()
+	if err != nil {
+		t.Fatalf("GenerateKEK: %v", err)
+	}
+	keys := cryptopg.NewKeyStore(kek)
+	starters := []*fakeStarter{{}, {}}
+	var wg sync.WaitGroup
+	for _, st := range starters {
+		sched := &cron.Scheduler{Schedules: cronpg.New(s, keys), Starter: st, Tenants: poolTenantLister{pool: adminPool}}
+		wg.Go(func() { sched.RunOnce(context.Background()) })
+	}
+	wg.Wait()
+
+	if got := len(starters[0].starts) + len(starters[1].starts); got != 1 {
+		t.Fatalf("two replicas started %d runs for one due schedule, want exactly 1", got)
+	}
+	var sessions int
+	if err := s.InTenantTx(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM sessions WHERE surface_id = 'cron'`).Scan(&sessions)
+	}); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if sessions != 1 {
+		t.Fatalf("%d cron sessions exist, want 1", sessions)
 	}
 }

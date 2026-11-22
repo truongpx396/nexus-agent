@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/truongpx396/nexus-agent/internal/obs"
@@ -48,6 +49,10 @@ type LangfuseExporter struct {
 
 	mu      sync.Mutex
 	pending []langfuseEvent
+
+	// dropped counts events refused because pending was full; flush reports and
+	// resets it, so an outage shows up once per interval instead of once per event.
+	dropped atomic.Int64
 
 	flushInterval time.Duration
 	stop          chan struct{}
@@ -161,13 +166,27 @@ func (e *LangfuseExporter) flushLoop() {
 	}
 }
 
+// maxPending bounds the events held between flushes. While Langfuse is
+// unreachable a flush sends nothing and drops its batch, but events keep arriving
+// for the length of a flush interval and, if the host is slow rather than down, a
+// flush can take longer than that, so the buffer needs its own limit.
+const maxPending = 10_000
+
 func (e *LangfuseExporter) enqueue(ev langfuseEvent) {
 	e.mu.Lock()
+	if len(e.pending) >= maxPending {
+		e.mu.Unlock()
+		e.dropped.Add(1)
+		return
+	}
 	e.pending = append(e.pending, ev)
 	e.mu.Unlock()
 }
 
 func (e *LangfuseExporter) flush(ctx context.Context) {
+	if n := e.dropped.Swap(0); n > 0 {
+		log.Warn().Int64("dropped", n).Msg("obs: langfuse buffer full; events dropped")
+	}
 	e.mu.Lock()
 	batch := e.pending
 	e.pending = nil

@@ -194,3 +194,115 @@ func TestResumeDelegation_AReturnedChildLeavesExactlyOneResultInThePrompt(t *tes
 		t.Fatalf("the post-delegation prompt answers tu1 with %q, want the child's result once", got)
 	}
 }
+
+// parallelTurn is a model turn that asks for two tools at once, which a model
+// making parallel calls does routinely.
+var parallelTurn = fake.Script{Chunks: []fake.ChunkSpec{
+	{Kind: "tool_use", ToolUseID: "tu1", ToolName: "platform/echo@v1", Input: `{"msg":"first"}`},
+	{Kind: "tool_use", ToolUseID: "tu2", ToolName: "platform/other@v1", Input: `{"msg":"second"}`},
+	{Kind: "done", Done: "stop"},
+}}
+
+// gatedExecutor holds the tools named in gated for approval and runs the rest,
+// recording which tools actually ran.
+type gatedExecutor struct {
+	gated map[string]bool
+	ran   *[]string
+}
+
+func (e gatedExecutor) Execute(_ context.Context, req kernel.ToolUseRequest, _ kernel.ExecContext) kernel.ToolResult {
+	if e.gated[req.ToolName] {
+		return kernel.ToolResult{IsError: true, Reason: "approval required", AwaitingApproval: true, AskKind: "once", CanonicalDigest: []byte("d")}
+	}
+	*e.ran = append(*e.ran, req.ToolName)
+	return kernel.ToolResult{Output: json.RawMessage(`{"ran":"` + req.ToolName + `"}`)}
+}
+
+func (e gatedExecutor) ExecuteApproved(_ context.Context, req kernel.ToolUseRequest, _ []byte, _ kernel.ExecContext) kernel.ToolResult {
+	*e.ran = append(*e.ran, req.ToolName+" (approved)")
+	return kernel.ToolResult{Output: json.RawMessage(`{"echo":"approved"}`)}
+}
+
+func resumeFirst(t *testing.T, r *rig, useID uuid.UUID) []eventlog.Event {
+	t.Helper()
+	var out []eventlog.Event
+	for ev, err := range r.k.Resume(context.Background(), rehydrated(t, r),
+		kernel.RunConfig{System: "test", ModelID: "fake", MaxTurns: 5, AutonomyLevel: "supervised"},
+		kernel.PendingResolution{ToolUseEventID: useID, ToolID: "platform/echo@v1", Input: json.RawMessage(`{"msg":"first"}`), ApprovedDigest: []byte("d"), Decision: kernel.ApprovalDecisionGranted}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+// When call 1 of a turn needs approval, call 2 has been requested but not run.
+// After the approval it must be run, and the model must be shown its real result:
+// it asked for the call, and used to be told that it had failed.
+func TestResume_ACallAfterTheSuspendedOneIsRunNotFailed(t *testing.T) {
+	var ran []string
+	exec := gatedExecutor{gated: map[string]bool{"platform/echo@v1": true}, ran: &ran}
+	r := newRig(exec, parallelTurn, finalTurn)
+	rec := &promptRecorder{inner: fake.New(parallelTurn, finalTurn)}
+	r.k.Provider = rec
+
+	events, err := r.run(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ran) != 0 {
+		t.Fatalf("before the approval these ran: %v, want nothing (call 1 suspended the run)", ran)
+	}
+	resumed := resumeFirst(t, r, ofType(events, eventlog.EventToolUse)[0].EventID)
+
+	if got := terminalReasonOf(t, resumed); got != "completed" {
+		t.Fatalf("resumed run ended %q, want completed", got)
+	}
+	if len(ran) != 2 || ran[0] != "platform/echo@v1 (approved)" || ran[1] != "platform/other@v1" {
+		t.Fatalf("ran = %v, want the approved call and then the second call", ran)
+	}
+	last := rec.prompts[len(rec.prompts)-1]
+	if got := toolResultsFor(last, "tu2"); len(got) != 1 || got[0] != `{"ran":"platform/other@v1"}` {
+		t.Fatalf("the prompt answers tu2 with %q, want its real result once", got)
+	}
+	if got := toolResultsFor(last, "tu1"); len(got) != 1 || got[0] != `{"echo":"approved"}` {
+		t.Fatalf("the prompt answers tu1 with %q, want the approved result once", got)
+	}
+	for _, e := range r.log.Events(r.sessionID) {
+		if e.Type == eventlog.EventToolResult && strings.Contains(string(e.Payload), "interrupted_before_execution") {
+			t.Fatal("a call the model asked for was answered with a synthetic interrupted_before_execution error")
+		}
+	}
+	if err := provider.ValidateTranscript(last.Messages); err != nil {
+		t.Fatalf("the prompt after the resume is not one a hosted API accepts: %v", err)
+	}
+}
+
+// If the second call itself needs approval, the run suspends again on it, and it
+// is not answered as if it had failed.
+func TestResume_ASecondCallThatNeedsApprovalSuspendsTheRunAgain(t *testing.T) {
+	var ran []string
+	exec := gatedExecutor{gated: map[string]bool{"platform/echo@v1": true, "platform/other@v1": true}, ran: &ran}
+	r := newRig(exec, parallelTurn, finalTurn)
+	rec := &promptRecorder{inner: fake.New(parallelTurn, finalTurn)}
+	r.k.Provider = rec
+
+	events, err := r.run(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed := resumeFirst(t, r, ofType(events, eventlog.EventToolUse)[0].EventID)
+
+	if n := len(ofType(resumed, eventlog.EventTerminal)); n != 0 {
+		t.Fatalf("the run ended (%d terminal events) instead of suspending on the second call", n)
+	}
+	if st, ok := r.log.Status(r.sessionID); !ok || st.Value != eventlog.SessionStatusSuspended {
+		t.Fatalf("status = %v, want suspended on the second call", st)
+	}
+	for _, e := range r.log.Events(r.sessionID) {
+		if e.Type == eventlog.EventToolResult && strings.Contains(string(e.Payload), "interrupted_before_execution") {
+			t.Fatal("the second call was answered as interrupted although it is waiting for approval")
+		}
+	}
+}

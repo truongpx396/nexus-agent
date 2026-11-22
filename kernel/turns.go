@@ -343,81 +343,11 @@ func (k *Kernel) runTurns(ctx context.Context, st *RunState, cfg RunConfig, yiel
 				// nodes nest under the model turn that requested them,
 				// rather than sitting as flat siblings of every other turn's
 				// own tool calls.
-				toolCtx, toolSpan := k.startSpan(turnCtx, "tool.call", obs.ObservationTool, obs.Attrs{"tool.id": tu.ToolName})
-				result := k.Tools.Execute(toolCtx, tu, execCtx)
-				outcome := "ok"
-				if result.IsError {
-					outcome = "error"
-				}
-				if k.TraceContent {
-					toolSpan.SetContent(string(tu.Input), resultText(result))
-				}
-				toolSpan.End(obs.Attrs{"outcome": outcome})
-
-				ev, err := k.appendToolResult(ctx, st, toolUseEvents[i].EventID, toolUseEvents[i].ToolID, result)
-				if err != nil {
-					yield(eventlog.Event{}, err)
+				block, stop := k.dispatchCall(ctx, turnCtx, st, execCtx, tu, toolUseEvents[i], yield)
+				if stop {
 					return
 				}
-				resultBlocks = append(resultBlocks, provider.ContentBlock{Kind: provider.BlockToolResult, ToolUseID: tu.ToolUseID, Text: resultText(result), IsError: result.IsError})
-				if !yield(ev, nil) {
-					return
-				}
-
-				// The durable half of Rule-of-Two taint state (README
-				// pattern 21's own "session taint state as a projection" --
-				// kernel.RehydrateTaint is the read half): appended
-				// regardless of what happens next (permission denied,
-				// awaiting approval/delegation, stuck) -- the leg was
-				// engaged for real the moment the permission chain resolved
-				// it (tools.ExecuteResult's own doc comment), whether or
-				// not this call's own outcome goes on to suspend or
-				// terminate the run.
-				if result.TaintChanged {
-					tev, err := k.appendEvent(ctx, st, eventlog.EventTaintTransition, eventlog.ActorSystem, nil, nil, nil, taintTransitionPayload{Engaged: result.TaintEngaged})
-					if err != nil {
-						yield(eventlog.Event{}, err)
-						return
-					}
-					if !yield(tev, nil) {
-						return
-					}
-				}
-
-				if result.PermissionDenied {
-					toolID := "unknown"
-					if toolUseEvents[i].ToolID != nil {
-						toolID = *toolUseEvents[i].ToolID
-					}
-					k.terminate(ctx, st, yield, TerminalPermissionDenied(toolID))
-					return
-				}
-				if result.AwaitingApproval {
-					k.suspendForApproval(ctx, st, yield, toolUseEvents[i].EventID, toolUseEvents[i].ToolID, tu.Input, result)
-					return
-				}
-				if result.AwaitingDelegation {
-					k.suspendForDelegation(ctx, st, yield, toolUseEvents[i].EventID, toolUseEvents[i].ToolID, result.ChildSessionID)
-					return
-				}
-
-				if k.Stuck != nil {
-					verdict := k.Stuck.Record(st.SessionID, tu.ToolName, tu.Input)
-					if verdict.Suspected {
-						sev, err := k.appendEvent(ctx, st, eventlog.EventStuckSuspected, eventlog.ActorSystem, nil, nil, nil, stuckSuspectedPayload{Reason: string(verdict.Reason)})
-						if err != nil {
-							yield(eventlog.Event{}, err)
-							return
-						}
-						if !yield(sev, nil) {
-							return
-						}
-						if verdict.Terminate {
-							k.terminate(ctx, st, yield, TerminalStuckTerminated(string(verdict.Reason)))
-							return
-						}
-					}
-				}
+				resultBlocks = append(resultBlocks, block)
 			}
 			if len(resultBlocks) > 0 {
 				st.Transcript = append(st.Transcript, provider.Message{Role: "tool", Blocks: resultBlocks})
