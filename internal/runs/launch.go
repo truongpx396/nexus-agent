@@ -55,8 +55,9 @@ type LaunchRequest struct {
 	MCPCatalog       []provider.ToolSchema
 }
 
-// Launched is a run that has been accepted. Events carries every event the
-// run produces, in order, until it ends.
+// Launched is a run that has been accepted. Events carries the events the
+// opening step appended (Starter.StartRun's contract), then closes; the rest of
+// the run is published by the worker that drives it.
 type Launched struct {
 	SessionID uuid.UUID
 	Events    <-chan Event

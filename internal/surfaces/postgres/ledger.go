@@ -90,3 +90,13 @@ func (l *Ledger) appendEvent(ctx context.Context, tx pgx.Tx, tenantID, sessionID
 	_, err := l.sealer.Bind(tx).Append(ctx, tenantID, sessionID, typ, nil, nil, payload)
 	return err
 }
+
+func (l *Ledger) ClaimDue(ctx context.Context, tenantID uuid.UUID, limit int) ([]surfaces.DueDelivery, error) {
+	var due []surfaces.DueDelivery
+	err := l.st.InTenantTx(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var cerr error
+		due, cerr = claimDueDeliveries(ctx, tx, limit)
+		return cerr
+	})
+	return due, err
+}

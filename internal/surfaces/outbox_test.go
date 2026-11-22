@@ -3,6 +3,7 @@ package surfaces_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -15,6 +16,7 @@ import (
 // these tests pin the Outbox's own policy — idempotency, the retry cap, what
 // is and is not sent — separately from what the Postgres ledger stores.
 type fakeLedger struct {
+	due      []surfaces.DueDelivery
 	delivery surfaces.Delivery
 	openErr  error
 	recErr   error
@@ -39,6 +41,12 @@ func (f *fakeLedger) Record(_ context.Context, _, _, _ uuid.UUID, status surface
 	}
 	f.recorded = append(f.recorded, recorded{status, reason})
 	return nil
+}
+
+func (f *fakeLedger) ClaimDue(context.Context, uuid.UUID, int) ([]surfaces.DueDelivery, error) {
+	due := f.due
+	f.due = nil // a claimed delivery is leased: the next pass does not see it
+	return due, nil
 }
 
 type recordingSender struct {
@@ -91,14 +99,14 @@ func TestDeliver_ATerminalDeliveryIsNeverSentAgain(t *testing.T) {
 }
 
 func TestDeliver_AFailureIsRetryableUntilTheCapThenPermanent(t *testing.T) {
-	boom := errors.New("provider returned 503")
+	boom := &surfaces.SendError{Reason: "status 503"}
 	cases := []struct {
 		attemptsSoFar int
 		want          surfaces.DeliveryStatus
 	}{
 		{0, surfaces.DeliveryFailed},
-		{1, surfaces.DeliveryFailed},
-		{2, surfaces.DeliveryFailedPermanent}, // this is the third attempt
+		{3, surfaces.DeliveryFailed},
+		{4, surfaces.DeliveryFailedPermanent}, // this is the fifth attempt, the cap
 	}
 	for _, tc := range cases {
 		l := &fakeLedger{delivery: surfaces.Delivery{ID: uuid.New(), Status: surfaces.DeliveryFailed, AttemptCount: tc.attemptsSoFar}}
@@ -109,8 +117,8 @@ func TestDeliver_AFailureIsRetryableUntilTheCapThenPermanent(t *testing.T) {
 		if len(l.recorded) != 1 || l.recorded[0].status != tc.want {
 			t.Errorf("after %d prior attempts recorded %+v, want %s", tc.attemptsSoFar, l.recorded, tc.want)
 		}
-		if l.recorded[0].reason != boom.Error() {
-			t.Errorf("recorded reason %q, want the sender's own error", l.recorded[0].reason)
+		if l.recorded[0].reason != boom.Reason {
+			t.Errorf("recorded reason %q, want the sender's classified reason", l.recorded[0].reason)
 		}
 	}
 }
@@ -145,4 +153,32 @@ func TestDeliver_LedgerFailuresAreReturnedAndNeverSendUnrecorded(t *testing.T) {
 			t.Errorf("Deliver = %v, want a record-outcome error", err)
 		}
 	})
+}
+
+// A sender's error text can carry anything the transport put in it, a request
+// URL with a credential included; the delivery_failed event records a classified
+// reason instead, so a sender that did not classify its failure cannot leak.
+func TestDeliver_TheRecordedReasonIsClassifiedAndNeverTheErrorText(t *testing.T) {
+	const secret = "123456:SECRET-TOKEN"
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"unclassified", errors.New(`Post "https://api.telegram.org/bot` + secret + `/sendMessage": dial tcp: lookup failed`), "send failed"},
+		{"classified", &surfaces.SendError{Reason: "status 400: chat not found", Err: errors.New(secret)}, "status 400: chat not found"},
+		{"deadline", fmt.Errorf("send: %w", context.DeadlineExceeded), "timeout"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			l := &fakeLedger{delivery: surfaces.Delivery{ID: uuid.New(), Status: surfaces.DeliveryPending}}
+			_ = deliver(l, &recordingSender{err: tc.err})
+			if len(l.recorded) != 1 || l.recorded[0].reason != tc.want {
+				t.Fatalf("recorded = %+v, want the reason %q", l.recorded, tc.want)
+			}
+			if strings.Contains(l.recorded[0].reason, secret) {
+				t.Fatalf("the recorded reason carries the credential: %q", l.recorded[0].reason)
+			}
+		})
+	}
 }

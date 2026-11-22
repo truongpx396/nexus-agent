@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+
+	"github.com/truongpx396/nexus-agent/internal/surfaces"
 )
 
 // roundTripFunc mirrors internal/surfaces/telegram's own (its doc
@@ -22,17 +24,17 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { re
 func TestSender_Send_RendersEachNotificationKind(t *testing.T) {
 	cases := []struct {
 		name    string
-		payload notificationPayload
+		payload surfaces.Notification
 		want    string
 	}{
 		{
 			name:    "approval",
-			payload: notificationPayload{Kind: "approval", SessionID: "s-1", ToolID: "platform/shell@1"},
+			payload: surfaces.Notification{Kind: "approval", SessionID: "s-1", ToolID: "platform/shell@1"},
 			want:    "Approval needed for session s-1 (tool: platform/shell@1) — review it in the run's own approval endpoint.",
 		},
 		{
 			name:    "content",
-			payload: notificationPayload{Kind: "content", Text: "here is my reply"},
+			payload: surfaces.Notification{Kind: "content", Text: "here is my reply"},
 			want:    "here is my reply",
 		},
 	}

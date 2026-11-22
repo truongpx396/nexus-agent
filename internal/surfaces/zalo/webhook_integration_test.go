@@ -210,9 +210,11 @@ func TestHandleWebhook_SecondMessageFromSamePeerResumesSameSession(t *testing.T)
 	}
 }
 
-// TestHandleWebhook_SamePeerAfterNonAwaitingInputStartsFreshReusingKey
-// mirrors internal/surfaces/telegram's own (its doc comment).
-func TestHandleWebhook_SamePeerAfterNonAwaitingInputStartsFreshReusingKey(t *testing.T) {
+// TestHandleWebhook_SamePeerWhileTheSessionIsActiveDeliversTheMessageToIt: a
+// session found for this peer that is still working (queued, in this test, and
+// running or suspended likewise) is sent the message rather than dropped or
+// given a rival session.
+func TestHandleWebhook_SamePeerWhileTheSessionIsActiveDeliversTheMessageToIt(t *testing.T) {
 	pool := setupZaloEnv(t)
 	s := store.New(pool)
 	tenantID := uuid.New()
@@ -238,8 +240,51 @@ func TestHandleWebhook_SamePeerAfterNonAwaitingInputStartsFreshReusingKey(t *tes
 	if rec.Code != http.StatusOK {
 		t.Fatalf("second message: status = %d, body = %s", rec.Code, rec.Body.String())
 	}
+	if !resumer.resumed || resumer.sessionID != firstSessionID || resumer.input != "second message" {
+		t.Fatalf("the second message was not delivered to the open session: %+v", resumer)
+	}
+	if starter.calls != 1 {
+		t.Fatalf("StartRun ran %d times, want 1: a message to an active conversation must not start another session", starter.calls)
+	}
+}
+
+// TestHandleWebhook_SamePeerAfterTheSessionEndedStartsFreshReusingKey: a session
+// that has ended takes no message, so a fresh one starts, reusing the same key
+// so the next lookup finds the new one.
+func TestHandleWebhook_SamePeerAfterTheSessionEndedStartsFreshReusingKey(t *testing.T) {
+	pool := setupZaloEnv(t)
+	s := store.New(pool)
+	tenantID := uuid.New()
+	insertTestTenant(t, s, tenantID)
+	kek, err := crypto.GenerateKEK()
+	if err != nil {
+		t.Fatalf("GenerateKEK: %v", err)
+	}
+	starter := &fakeStarter{}
+	resumer := &fakeResumer{}
+	srv := &Server{
+		Reader: runspg.Reader{Store: s, KeyStore: cryptopg.NewKeyStore(kek)}, Dedup: surfpg.NewDedup(s), Launcher: newLauncher(s, cryptopg.NewKeyStore(kek), starter), Resume: resumer,
+		Channels: fakeChannels{secret: "s", ok: true},
+	}
+
+	rec := postZaloWebhook(t, srv, tenantID, "s", newZaloWebhookBody(t, "user-1", "first message"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first message: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	firstSessionID := starter.req.SessionID
+	if err := s.InTenantTx(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE sessions SET status = $2 WHERE session_id = $1`, firstSessionID, eventlog.SessionStatusCompleted)
+		return err
+	}); err != nil {
+		t.Fatalf("mark session completed: %v", err)
+	}
+
+	rec = postZaloWebhook(t, srv, tenantID, "s", newZaloWebhookBody(t, "user-1", "second message"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second message: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
 	if resumer.resumed {
-		t.Fatal("a session that is not awaiting_input must never be resumed")
+		t.Fatal("a session that has ended must never be sent a message")
 	}
 	if starter.req.SessionID == firstSessionID {
 		t.Fatal("expected a genuinely NEW session for the second message")
@@ -257,53 +302,6 @@ func TestHandleWebhook_SamePeerAfterNonAwaitingInputStartsFreshReusingKey(t *tes
 	}
 	if firstKey != secondKey {
 		t.Fatalf("session_key differs across the two sessions (%q vs %q), want the same deterministic key reused", firstKey, secondKey)
-	}
-}
-
-// TestServer_NotificationPayload_DecryptsContentEvent mirrors
-// internal/surfaces/telegram's own (its doc comment).
-func TestServer_NotificationPayload_DecryptsContentEvent(t *testing.T) {
-	pool := setupZaloEnv(t)
-	s := store.New(pool)
-	tenantID := uuid.New()
-	sessionID := uuid.New()
-	insertTestTenant(t, s, tenantID)
-
-	kek, err := crypto.GenerateKEK()
-	if err != nil {
-		t.Fatalf("GenerateKEK: %v", err)
-	}
-	keys := cryptopg.NewKeyStore(kek)
-	var dek crypto.DEK
-	if err := s.InTenantTx(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var derr error
-		dek, derr = keys.NewDEK(ctx, tx, tenantID)
-		return derr
-	}); err != nil {
-		t.Fatalf("NewDEK: %v", err)
-	}
-
-	plaintext, err := json.Marshal(map[string]string{"body": "here is my reply"})
-	if err != nil {
-		t.Fatalf("marshal plaintext: %v", err)
-	}
-	sealed, err := crypto.Seal(dek, plaintext, tenantID.String(), sessionID.String())
-	if err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
-
-	srv := &Server{Reader: runspg.Reader{Store: s, KeyStore: keys}, Dedup: surfpg.NewDedup(s)}
-	ev := eventlog.Event{SessionID: sessionID, Type: eventlog.EventContent, Payload: sealed, KeyID: dek.KeyID}
-	payload, ok := srv.notificationPayload(context.Background(), srv.Reader.EventOpener(tenantID), sessionID, ev)
-	if !ok {
-		t.Fatal("notificationPayload returned ok=false for a real content event")
-	}
-	var got notificationPayload
-	if err := json.Unmarshal(payload, &got); err != nil {
-		t.Fatalf("unmarshal built payload: %v", err)
-	}
-	if got.Kind != "content" || got.Text != "here is my reply" {
-		t.Fatalf("payload = %+v, want kind=content text=%q", got, "here is my reply")
 	}
 }
 
@@ -362,7 +360,7 @@ func TestHandleWebhook_DuplicateMsgIDAcknowledgedWithoutASecondRun(t *testing.T)
 // TestHandleWebhook_SessionLockAcquiredAndReleasedAroundDispatch proves
 // s.Lock's own plumbing end to end: Acquire is called with the dispatched
 // sessionKey, and Release is called with the SAME token only after the
-// run's own event channel (drainAndNotify) has finished draining — closing
+// dispatch has decided, not at the end of the turn — closing
 // the production-readiness review's other finding, that the REST/webhook
 // direct-call path never touched SessionLock at all.
 func TestHandleWebhook_SessionLockAcquiredAndReleasedAroundDispatch(t *testing.T) {
@@ -386,7 +384,7 @@ func TestHandleWebhook_SessionLockAcquiredAndReleasedAroundDispatch(t *testing.T
 	select {
 	case <-locker.done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for Release — drainAndNotify never ran or never released the lock")
+		t.Fatal("timed out waiting for Release — dispatch never released the lock")
 	}
 
 	locker.mu.Lock()
@@ -402,13 +400,11 @@ func TestHandleWebhook_SessionLockAcquiredAndReleasedAroundDispatch(t *testing.T
 	}
 }
 
-// TestHandleWebhook_ContendedSessionLockDropsDeliveryWithoutStartingARun is
-// dispatch's own documented trade-off under lock contention: if s.Lock
-// never grants the lock (another goroutine is already driving this exact
-// session_key's turn), this delivery is acknowledged but StartRun is never
-// called — never a second concurrent turn for the same session, the whole
-// point of wiring SessionLock into this path at all.
-func TestHandleWebhook_ContendedSessionLockDropsDeliveryWithoutStartingARun(t *testing.T) {
+// TestHandleWebhook_ContendedSessionLockAnswersBusyAndTheRetryIsDispatched: if
+// the lock is never granted (another delivery is deciding for this conversation),
+// the request is answered 503 and nothing starts, so the provider retries; the
+// claim on the delivery is released, so that retry is processed.
+func TestHandleWebhook_ContendedSessionLockAnswersBusyAndTheRetryIsDispatched(t *testing.T) {
 	pool := setupZaloEnv(t)
 	s := store.New(pool)
 	tenantID := uuid.New()
@@ -423,12 +419,24 @@ func TestHandleWebhook_ContendedSessionLockDropsDeliveryWithoutStartingARun(t *t
 	locker := &fakeLocker{acquireResults: []bool{false, false, false, false, false}}
 	srv := &Server{Reader: runspg.Reader{Store: s, KeyStore: cryptopg.NewKeyStore(kek)}, Dedup: surfpg.NewDedup(s), Launcher: newLauncher(s, cryptopg.NewKeyStore(kek), starter), Channels: fakeChannels{secret: "s", ok: true}, Lock: locker}
 
-	rec := postZaloWebhook(t, srv, tenantID, "s", newZaloWebhookBody(t, "user-999", "please help"))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s, want 200 (an ack, even though nothing was dispatched)", rec.Code, rec.Body.String())
+	body := newZaloWebhookBody(t, "user-999", "please help")
+	rec := postZaloWebhook(t, srv, tenantID, "s", body)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body = %s, want 503 so the provider retries", rec.Code, rec.Body.String())
 	}
 	if starter.started {
 		t.Fatal("StartRun ran despite the session lock never being granted")
+	}
+
+	// The claim on the delivery was released, so the retry is dispatched once the
+	// lock is free; it is not acknowledged as a duplicate of a message that never
+	// reached a session.
+	locker.mu.Lock()
+	locker.acquireResults = []bool{true}
+	locker.mu.Unlock()
+	rec = postZaloWebhook(t, srv, tenantID, "s", body)
+	if rec.Code != http.StatusOK || !starter.started {
+		t.Fatalf("retry: status = %d (started = %v), body = %s; want it dispatched", rec.Code, starter.started, rec.Body.String())
 	}
 }
 

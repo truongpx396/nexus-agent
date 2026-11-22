@@ -297,7 +297,8 @@ func TestOutbox_FailsPermanentlyAfterCapAndNeverSendsAgain(t *testing.T) {
 	ob := &surfaces.Outbox{Ledger: surfpg.NewLedger(rig.st, rig.keys, rig.chain)}
 	sender := &flakySender{alwaysFail: true}
 
-	for i := range 3 {
+	const attempts = 5 // the outbox's retry cap (surfaces.maxDeliveryAttempts)
+	for i := range attempts {
 		if err := ob.Deliver(ctx, rig.tenantID, sessionID, 1, "rest", "operator", []byte("hi"), sender); err != nil {
 			t.Fatalf("Deliver attempt %d: %v", i+1, err)
 		}
@@ -311,7 +312,7 @@ func TestOutbox_FailsPermanentlyAfterCapAndNeverSendsAgain(t *testing.T) {
 		t.Fatalf("query delivery status: %v", err)
 	}
 	if status != string(surfaces.DeliveryFailedPermanent) {
-		t.Fatalf("delivery status = %q after %d attempts, want failed_permanent", status, 3)
+		t.Fatalf("delivery status = %q after %d attempts, want failed_permanent", status, attempts)
 	}
 
 	callsBefore := sender.calls

@@ -117,14 +117,15 @@ var allowedFeatureImports = map[string][]string{
 	"internal/runs":               {"internal/controlplane", "internal/crypto", "internal/eventlog", "internal/harness", "internal/provider"},
 	"internal/runstate":           {"internal/crypto", "internal/eventlog", "kernel"},
 	"internal/skills":             {"internal/tools"},
+	"internal/surfaces/chat":      {"internal/eventlog", "internal/runs", "internal/surfaces"}, // the dispatch, reply and limiter the chat surfaces share: it speaks runs and the outbox, and no surface
 	"internal/surfaces/cli":       {"internal/surfaces/capability", "internal/version"},
 	"internal/surfaces/cron":      {"internal/harness", "internal/provider", "internal/runs", "internal/surfaces/capability"},
-	"internal/surfaces/email":     {"internal/eventlog", "internal/runs", "internal/surfaces", "internal/surfaces/capability"},
+	"internal/surfaces/email":     {"internal/eventlog", "internal/runs", "internal/surfaces", "internal/surfaces/capability", "internal/surfaces/chat"},
 	"internal/surfaces/mcp":       {"internal/provider", "internal/surfaces/capability", "internal/tools"},
 	"internal/surfaces/rest":      {"internal/surfaces/capability"}, // the kit: no feature, so no endpoint
-	"internal/surfaces/telegram":  {"internal/eventlog", "internal/runs", "internal/surfaces", "internal/surfaces/capability"},
+	"internal/surfaces/telegram":  {"internal/eventlog", "internal/runs", "internal/surfaces", "internal/surfaces/capability", "internal/surfaces/chat"},
 	"internal/surfaces/web":       {"internal/surfaces/capability"},
-	"internal/surfaces/zalo":      {"internal/eventlog", "internal/runs", "internal/surfaces", "internal/surfaces/capability"},
+	"internal/surfaces/zalo":      {"internal/eventlog", "internal/runs", "internal/surfaces", "internal/surfaces/capability", "internal/surfaces/chat"},
 	"internal/teams/tool":         {"internal/teams", "internal/tools"},
 	"internal/teams":              {"internal/cost", "internal/crypto", "internal/eventlog", "internal/memory", "internal/provider", "internal/runstate", "kernel"},
 	"internal/tools":              {"internal/hooks", "internal/permissions"},
